@@ -1,0 +1,57 @@
+name: Bug report
+description: Report a reproducible signal-purple problem
+title: "bug: "
+labels: []
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        Never include phone numbers, service identifiers, message contents,
+        provisioning URIs, keys, or database passphrases. Report security
+        problems privately as described in SECURITY.md.
+  - type: input
+    id: revision
+    attributes:
+      label: signal-purple revision
+      placeholder: Git commit SHA
+    validations:
+      required: true
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: Distro, Pidgin/libpurple version, and Rust version
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Build or installation
+        - Plugin loading
+        - Linking or reconnecting
+        - Direct messages
+        - Group messages
+        - Typing or receipts
+        - Storage or keyring
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior and reproduction
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Sanitized logs
+      render: text

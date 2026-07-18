@@ -1,0 +1,10 @@
+/build/
+/build-*/
+/rust/signal-core/target/
+/.cache/
+compile_commands.json
+*.swp
+*~
+
+# Local research input contains non-portable citation tokens.
+deep-research-report.md

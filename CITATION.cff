@@ -1,0 +1,12 @@
+cff-version: 1.2.0
+message: "If you use signal-purple in research, cite this software."
+title: "signal-purple"
+type: software
+abstract: >-
+  An experimental Signal protocol plugin for libpurple 2. Original adapter
+  code is GPL-3.0-or-later; the bundled Presage backend is AGPL-3.0-only.
+authors:
+  - family-names: "van Adrighem"
+    given-names: "Vincent"
+repository-code: "https://github.com/adrighem/signal-purple"
+version: 0.1.0-dev

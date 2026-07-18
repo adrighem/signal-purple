@@ -1,0 +1,69 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CFLAGS: "-Werror"
+    steps:
+      - name: Check out source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends \
+            build-essential clang cmake libclang-dev libglib2.0-dev \
+            libpurple-dev libsecret-1-dev libssl-dev ninja-build \
+            pkg-config protobuf-compiler
+
+      - name: Install pinned Rust toolchain
+        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
+        with:
+          toolchain: 1.95.0
+          components: rustfmt, clippy
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path rust/signal-core/Cargo.toml -- --check
+
+      - name: Lint Rust
+        run: cargo clippy --locked --manifest-path rust/signal-core/Cargo.toml --all-targets -- -D warnings
+
+      - name: Test Rust core
+        run: cargo test --locked --manifest-path rust/signal-core/Cargo.toml --lib
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+          -DCMAKE_INSTALL_PREFIX=/usr
+
+      - name: Build
+        run: cmake --build build --parallel 2
+
+      - name: Test C adapter and plugin
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Install smoke test
+        run: |
+          cmake --install build --prefix "$RUNNER_TEMP/signal-purple"
+          plugin_path="$(awk '/libsignal-purple\.so$/ { print; exit }' \
+            build/install_manifest.txt)"
+          test -n "$plugin_path"
+          G_DEBUG=fatal-warnings ./build/plugin-probe "$plugin_path"

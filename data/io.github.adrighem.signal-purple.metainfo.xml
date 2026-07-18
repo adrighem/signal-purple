@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: CC0-1.0 -->
+<component type="addon">
+  <id>io.github.adrighem.signal-purple</id>
+  <extends>im.pidgin.Pidgin</extends>
+  <name>signal-purple</name>
+  <summary>Experimental Signal protocol plugin for libpurple 2</summary>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>GPL-3.0-or-later AND AGPL-3.0-only</project_license>
+  <description>
+    <p>
+      An unofficial linked-device Signal protocol plugin for Pidgin and other
+      libpurple 2 clients. The bundled backend also carries AGPL-3.0-only
+      obligations; see the project licensing documentation.
+    </p>
+  </description>
+  <url type="homepage">https://github.com/adrighem/signal-purple</url>
+  <url type="bugtracker">https://github.com/adrighem/signal-purple/issues</url>
+  <developer_name>signal-purple contributors</developer_name>
+</component>

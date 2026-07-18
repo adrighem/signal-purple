@@ -1,0 +1,25 @@
+name: Feature proposal
+description: Propose a focused capability or UX improvement
+title: "feature: "
+labels: []
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Describe the need without prescribing an implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+    validations:
+      required: true
+  - type: textarea
+    id: security
+    attributes:
+      label: Security and compatibility considerations
+      description: Note key, storage, privacy, Purple, and Signal-service impact.
+    validations:
+      required: true
