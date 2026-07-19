@@ -23,7 +23,9 @@ ionice -c 3 nice scripts/make-source-archive.sh HEAD
 ```
 
 The script uses `cargo vendor`, writes Cargo source replacement into the
-archive, normalizes metadata to the commit timestamp, and emits a deterministic
+archive, and replaces the `debian/copyright` vendor placeholder with an exact
+per-package DEP-5 inventory derived from each Cargo manifest. Archive metadata
+is normalized to the commit timestamp before emitting a deterministic
 `.orig.tar.xz`. Cargo is forced offline by the Debian rules, and CMake adds
 `--offline` whenever the source tree contains `vendor/`.
 

@@ -22,8 +22,11 @@ License: AGPL-3
  On Debian systems, the complete text of the GNU Affero General Public License
  version 3 is available in /usr/share/common-licenses/AGPL-3.
 
+# BEGIN GENERATED VENDOR INVENTORY
 Files: vendor/*
-Copyright: the respective upstream authors
+Copyright: the respective upstream authors and contributors
 License: various
- Each vendored crate retains its upstream license files and Cargo metadata.
+ Release source archives replace this placeholder with an exact, deterministic
+ per-package inventory generated from the vendored Cargo manifests.
+# END GENERATED VENDOR INVENTORY
  THIRD_PARTY_LICENSES.md records the locked graph's declared licenses.

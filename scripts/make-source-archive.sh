@@ -22,9 +22,10 @@ mkdir -p "$source_dir/.cargo"
         --manifest-path rust/signal-core/Cargo.toml \
         > .cargo/config.toml 2> "$temporary/cargo-vendor.log"
     test -s .cargo/config.toml
+    python3 scripts/generate-vendor-copyright.py vendor debian/copyright
     mkdir "$temporary/cargo-home"
     CARGO_HOME="$temporary/cargo-home" CARGO_NET_OFFLINE=true \
-        cargo metadata --frozen --no-deps \
+        cargo metadata --frozen --no-deps --format-version=1 \
         --manifest-path rust/signal-core/Cargo.toml > /dev/null
 )
 
