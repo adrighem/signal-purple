@@ -38,13 +38,17 @@ and message bodies are sensitive. Production code must not log them.
 - Worker shutdown is joined before account state is freed.
 - Backend events use a bounded queue; overflow fails visibly and reconnects
   rather than allowing unbounded process memory growth.
+- Message projection state is stored in the same SQLCipher database. Purple
+  acknowledges a message event only after its synchronous conversation write;
+  unacknowledged content is replayed after the next receive queue drain.
 
 ## Known gaps
 
 - No independent security audit has occurred.
-- Live direct-message, startup-backlog, contact-sync, group-discovery, and
+- Live direct-message, contact-sync, group-discovery, and
   group-membership paths have been verified. The full supported-client and
-  failure-mode matrix remains a release gate.
+  failure-mode matrix, including startup backlog exactly-once behavior, remains
+  a release gate.
 - Identity-key rejection is not paired with a full safety-number review and
   approval UI. A changed contact remains blocked in the current store; official
   client verification does not update this linked device's Presage database.

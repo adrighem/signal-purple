@@ -2024,7 +2024,7 @@ dependencies = [
 [[package]]
 name = "presage"
 version = "0.8.0-dev"
-source = "git+https://github.com/adrighem/presage.git?rev=c8ee98cf944897812d9375effb98657f537e8b09#c8ee98cf944897812d9375effb98657f537e8b09"
+source = "git+https://github.com/adrighem/presage.git?rev=71294f3e96e23d63dc1c4784337554cd4b4e03ce#71294f3e96e23d63dc1c4784337554cd4b4e03ce"
 dependencies = [
  "base64",
  "bytes",
@@ -2046,7 +2046,7 @@ dependencies = [
 [[package]]
 name = "presage-store-sqlite"
 version = "0.8.0-dev"
-source = "git+https://github.com/adrighem/presage.git?rev=c8ee98cf944897812d9375effb98657f537e8b09#c8ee98cf944897812d9375effb98657f537e8b09"
+source = "git+https://github.com/adrighem/presage.git?rev=71294f3e96e23d63dc1c4784337554cd4b4e03ce#71294f3e96e23d63dc1c4784337554cd4b4e03ce"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2757,7 +2757,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal-core"
-version = "0.1.0" # x-release-please-version
+version = "0.1.0"
 dependencies = [
  "futures",
  "hex",

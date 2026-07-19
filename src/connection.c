@@ -559,6 +559,18 @@ signal_poll_backend(gpointer data)
         }
 
         keep = signal_handle_event(connection, event);
+        if (keep && event->request_id != 0 &&
+            (event->kind == SIGNAL_EVENT_MESSAGE ||
+             event->kind == SIGNAL_EVENT_GROUP_MESSAGE)) {
+            SignalStatus status = signal_core_ack_message(
+                connection->core, event->request_id);
+            if (status != SIGNAL_STATUS_OK)
+                purple_debug_warning(
+                    "signal-purple",
+                    "Could not queue message acknowledgment %" G_GUINT64_FORMAT
+                    ": %d\n",
+                    event->request_id, status);
+        }
         signal_event_free(event);
         if (!keep)
             return G_SOURCE_REMOVE;

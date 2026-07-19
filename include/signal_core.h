@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define SIGNAL_CORE_ABI_VERSION 2u
+#define SIGNAL_CORE_ABI_VERSION 3u
 
 typedef struct SignalCore SignalCore;
 
@@ -96,6 +96,10 @@ SignalStatus signal_core_set_typing(SignalCore *core,
                                     uint64_t request_id,
                                     const char *recipient,
                                     int typing);
+
+/* Acknowledges that Purple accepted a message event for display. */
+SignalStatus signal_core_ack_message(SignalCore *core,
+                                     uint64_t delivery_id);
 
 /* Returns 1 when an event was returned, 0 when the queue is empty, or -1. */
 int signal_core_poll_event(SignalCore *core, SignalEvent **out_event);

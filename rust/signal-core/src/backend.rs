@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
@@ -30,6 +31,8 @@ use crate::event::{
     Event, FLAG_OUTGOING,
 };
 
+const MESSAGE_PROJECTION_CLIENT: &str = "signal-purple-v1";
+
 pub struct Config {
     pub store_path: String,
     pub device_name: String,
@@ -53,6 +56,24 @@ pub enum Command {
         recipient: String,
         typing: bool,
     },
+    AcknowledgeMessage {
+        delivery_id: u64,
+    },
+}
+
+#[derive(Default)]
+struct MessageProjection {
+    next_delivery_id: u64,
+    pending: HashMap<u64, Content>,
+}
+
+impl MessageProjection {
+    fn track(&mut self, content: Content) -> u64 {
+        self.next_delivery_id = self.next_delivery_id.wrapping_add(1).max(1);
+        let delivery_id = self.next_delivery_id;
+        self.pending.insert(delivery_id, content);
+        delivery_id
+    }
 }
 
 #[derive(Clone)]
@@ -236,6 +257,11 @@ async fn receive_and_command_loop(
     sink: EventSink,
     ready: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    manager
+        .store()
+        .initialize_message_projection(MESSAGE_PROJECTION_CLIENT)
+        .await
+        .map_err(|error| format!("Could not initialize durable message replay: {error}"))?;
     let messages = {
         let mut receive = Box::pin(manager.receive_messages());
         tokio::select! {
@@ -258,6 +284,7 @@ async fn receive_and_command_loop(
 
     let mut synchronized = false;
     let mut groups_dirty = false;
+    let mut projection = MessageProjection::default();
 
     loop {
         tokio::select! {
@@ -274,6 +301,11 @@ async fn receive_and_command_loop(
                             }
                             emit_contact_snapshot(&manager, &sink).await;
                             emit_group_snapshot(&manager, &sink).await;
+                            replay_unprojected_messages(
+                                &mut manager,
+                                &sink,
+                                &mut projection,
+                            ).await;
                             groups_dirty = false;
                             synchronized = true;
                             ready.store(true, Ordering::Release);
@@ -286,7 +318,14 @@ async fn receive_and_command_loop(
                     Some(Received::Contacts) => emit_contact_snapshot(&manager, &sink).await,
                     Some(Received::Content(content)) => {
                         groups_dirty |= content_has_group_context(&content.body);
-                        handle_content(&mut manager, *content, &sink).await;
+                        if synchronized {
+                            project_content(
+                                &mut manager,
+                                *content,
+                                &sink,
+                                &mut projection,
+                            ).await;
+                        }
                     }
                     None => {
                         sink.emit(Event {
@@ -307,6 +346,7 @@ async fn receive_and_command_loop(
                             command,
                             &mut shutdown,
                             &sink,
+                            &mut projection,
                         ).await {
                             return Ok(());
                         }
@@ -323,8 +363,9 @@ async fn handle_command_interruptibly(
     command: Command,
     shutdown: &mut watch::Receiver<bool>,
     sink: &EventSink,
+    projection: &mut MessageProjection,
 ) -> bool {
-    let operation = handle_command(manager, command, sink);
+    let operation = handle_command(manager, command, sink, projection);
     pin_mut!(operation);
 
     tokio::select! {
@@ -411,6 +452,55 @@ async fn emit_group_snapshot(manager: &Manager<SqliteStore, Registered>, sink: &
     }
 }
 
+async fn replay_unprojected_messages(
+    manager: &mut Manager<SqliteStore, Registered>,
+    sink: &EventSink,
+    projection: &mut MessageProjection,
+) {
+    let messages = match manager
+        .store()
+        .unprojected_messages(MESSAGE_PROJECTION_CLIENT)
+        .await
+    {
+        Ok(messages) => messages,
+        Err(error) => {
+            sink.emit(Event::error(
+                format!("Could not read pending Signal messages: {error}"),
+                false,
+            ));
+            return;
+        }
+    };
+
+    for content in messages {
+        project_content(manager, content, sink, projection).await;
+    }
+}
+
+async fn project_content(
+    manager: &mut Manager<SqliteStore, Registered>,
+    content: Content,
+    sink: &EventSink,
+    projection: &mut MessageProjection,
+) {
+    let delivery_id = projection.track(content.clone());
+    if handle_content(manager, content.clone(), delivery_id, sink).await {
+        return;
+    }
+
+    projection.pending.remove(&delivery_id);
+    if let Err(error) = manager
+        .store()
+        .mark_message_projected(MESSAGE_PROJECTION_CLIENT, &content)
+        .await
+    {
+        sink.emit(Event::error(
+            format!("Could not record a handled Signal message: {error}"),
+            false,
+        ));
+    }
+}
+
 fn content_has_group_context(content: &ContentBody) -> bool {
     match content {
         ContentBody::DataMessage(message) => message.group_v2.is_some(),
@@ -437,7 +527,28 @@ async fn handle_command(
     manager: &mut Manager<SqliteStore, Registered>,
     command: Command,
     sink: &EventSink,
+    projection: &mut MessageProjection,
 ) {
+    if let Command::AcknowledgeMessage { delivery_id } = command {
+        let Some(content) = projection.pending.get(&delivery_id) else {
+            return;
+        };
+        match manager
+            .store()
+            .mark_message_projected(MESSAGE_PROJECTION_CLIENT, content)
+            .await
+        {
+            Ok(()) => {
+                projection.pending.remove(&delivery_id);
+            }
+            Err(error) => sink.emit(Event::error(
+                format!("Could not acknowledge a displayed Signal message: {error}"),
+                false,
+            )),
+        }
+        return;
+    }
+
     let (request_id, result) = match command {
         Command::SendMessage {
             request_id,
@@ -531,6 +642,7 @@ async fn handle_command(
             };
             (request_id, result)
         }
+        Command::AcknowledgeMessage { .. } => unreachable!(),
     };
 
     if let Err(error) = result {
@@ -541,14 +653,24 @@ async fn handle_command(
 async fn handle_content(
     manager: &mut Manager<SqliteStore, Registered>,
     content: Content,
+    delivery_id: u64,
     sink: &EventSink,
-) {
+) -> bool {
     let timestamp = content_timestamp(&content);
     let sender = content.metadata.sender.service_id_string();
 
     match &content.body {
         ContentBody::DataMessage(message) => {
-            emit_data_message(manager, message, &sender, false, timestamp, sink).await;
+            let projected = emit_data_message(
+                manager,
+                message,
+                &sender,
+                false,
+                timestamp,
+                delivery_id,
+                sink,
+            )
+            .await;
             if content.metadata.needs_receipt {
                 let mut receipt_manager = manager.clone();
                 let receipt_sink = sink.clone();
@@ -563,12 +685,22 @@ async fn handle_content(
                     .await;
                 });
             }
+            return projected;
         }
         ContentBody::EditMessage(EditMessage {
             data_message: Some(message),
             ..
         }) => {
-            emit_data_message(manager, message, &sender, false, timestamp, sink).await;
+            return emit_data_message(
+                manager,
+                message,
+                &sender,
+                false,
+                timestamp,
+                delivery_id,
+                sink,
+            )
+            .await;
         }
         ContentBody::SynchronizeMessage(SyncMessage {
             sent: Some(sent), ..
@@ -577,7 +709,16 @@ async fn handle_content(
                 let peer = sent
                     .parse_destination_service_id()
                     .map_or_else(|| sender.clone(), |id| id.service_id_string());
-                emit_data_message(manager, message, &peer, true, timestamp, sink).await;
+                return emit_data_message(
+                    manager,
+                    message,
+                    &peer,
+                    true,
+                    timestamp,
+                    delivery_id,
+                    sink,
+                )
+                .await;
             } else if let Some(EditMessage {
                 data_message: Some(message),
                 ..
@@ -586,7 +727,16 @@ async fn handle_content(
                 let peer = sent
                     .parse_destination_service_id()
                     .map_or_else(|| sender.clone(), |id| id.service_id_string());
-                emit_data_message(manager, message, &peer, true, timestamp, sink).await;
+                return emit_data_message(
+                    manager,
+                    message,
+                    &peer,
+                    true,
+                    timestamp,
+                    delivery_id,
+                    sink,
+                )
+                .await;
             }
         }
         ContentBody::TypingMessage(message) if message.group_id.is_none() => {
@@ -614,6 +764,7 @@ async fn handle_content(
         )),
         _ => {}
     }
+    false
 }
 
 async fn emit_data_message(
@@ -622,8 +773,9 @@ async fn emit_data_message(
     peer: &str,
     outgoing: bool,
     timestamp: u64,
+    delivery_id: u64,
     sink: &EventSink,
-) {
+) -> bool {
     let mut text = message.body.clone().unwrap_or_default();
     if let Some(reaction) = &message.reaction
         && let Some(emoji) = &reaction.emoji
@@ -638,7 +790,7 @@ async fn emit_data_message(
         text.push_str(&format!("[Attachment: {name}]"));
     }
     if text.is_empty() {
-        return;
+        return false;
     }
 
     let group_key = message
@@ -667,6 +819,7 @@ async fn emit_data_message(
         };
         sink.emit(Event {
             kind: EVENT_GROUP_MESSAGE,
+            request_id: delivery_id,
             flags,
             peer_id: Some(group_peer),
             chat_id: Some(group_identifier(&group_key)),
@@ -678,6 +831,7 @@ async fn emit_data_message(
     } else {
         sink.emit(Event {
             kind: EVENT_MESSAGE,
+            request_id: delivery_id,
             flags,
             peer_id: Some(peer.to_owned()),
             text: Some(text),
@@ -685,6 +839,7 @@ async fn emit_data_message(
             ..Event::default()
         });
     }
+    true
 }
 
 async fn send_delivery_receipt(

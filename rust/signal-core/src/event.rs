@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use std::ffi::{CString, c_char};
 
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 pub const EVENT_LINK_QR: u32 = 1;
 pub const EVENT_READY: u32 = 2;

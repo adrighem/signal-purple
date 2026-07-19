@@ -87,6 +87,14 @@ fn queue_command(core: &SignalCore, command: Command) -> SignalStatus {
     }
 }
 
+fn queue_control_command(core: &SignalCore, command: Command) -> SignalStatus {
+    match core.commands.try_send(command) {
+        Ok(()) => SignalStatus::Ok,
+        Err(tokio_mpsc::error::TrySendError::Full(_)) => SignalStatus::QueueFull,
+        Err(tokio_mpsc::error::TrySendError::Closed(_)) => SignalStatus::InternalError,
+    }
+}
+
 #[unsafe(no_mangle)]
 pub extern "C" fn signal_core_abi_version() -> u32 {
     ABI_VERSION
@@ -276,6 +284,29 @@ pub unsafe extern "C" fn signal_core_set_typing(
                 recipient,
                 typing: typing != 0,
             },
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Queues durable acknowledgment of a message accepted by Purple.
+///
+/// # Safety
+///
+/// `core` must be live and exclusively serialized with teardown.
+pub unsafe extern "C" fn signal_core_ack_message(
+    core: *mut SignalCore,
+    delivery_id: u64,
+) -> SignalStatus {
+    ffi_guard(|| {
+        if core.is_null() || delivery_id == 0 {
+            return SignalStatus::InvalidArgument;
+        }
+        // SAFETY: `core` is live until `signal_core_free`, which must not race
+        // any ABI call.
+        queue_control_command(
+            unsafe { &*core },
+            Command::AcknowledgeMessage { delivery_id },
         )
     })
 }
@@ -491,6 +522,22 @@ mod tests {
         assert!(matches!(
             receiver.try_recv(),
             Ok(Command::SetTyping { request_id: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn message_acknowledgments_are_accepted_before_ready() {
+        let (commands, mut receiver) = tokio_mpsc::channel(1);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let core = test_core(commands, shutdown, None, false);
+
+        assert_eq!(
+            queue_control_command(&core, Command::AcknowledgeMessage { delivery_id: 42 }),
+            SignalStatus::Ok
+        );
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Command::AcknowledgeMessage { delivery_id: 42 })
         ));
     }
 

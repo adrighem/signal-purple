@@ -17,6 +17,7 @@ service, and an isolated temporary Pidgin profile.
 | Primary phone to plugin direct-message synchronization | Passed |
 | Plugin to primary phone direct message | Passed |
 | Incoming direct-message presentation | Reproduced in Pidgin: `PURPLE_MESSAGE_NO_LOG` forced informational-notice styling even with `PURPLE_MESSAGE_RECV`; fixed by retaining normal receive flags while conversation logging remains disabled |
+| Durable message projection startup | Passed on the normal desktop profile: the SQLCipher projection schema initialized, the account reached connected state, and the ABI-v3 plugin/core pair loaded system-wide; an interrupted-message replay still needs a controlled live send |
 | Contact buddy-list creation and refresh | Passed with 46 visible contacts while Pidgin's offline filter remained disabled |
 | Contact alias update and stale deletion | Implemented; stale-deletion decisions are unit-tested, but neither path was mutated live |
 | Storage Service group discovery and restart reconciliation | Passed with 11 groups; three same-key copies produced by an earlier implementation were collapsed to 11 unique managed chats and another reconnect created no duplicates |
@@ -34,6 +35,11 @@ The same isolated account fetched 11 groups from Signal Storage Service without
 requiring new group messages. Reconnect reconciliation, managed duplicate
 cleanup, title persistence, chat opening, membership, and administrator flags
 were inspected through Purple's live D-Bus API and persisted buddy list.
+The normal desktop profile subsequently loaded the ABI-v3 projection build and
+reconnected without relinking. Fork-level store tests cover upgrade bootstrap,
+pending-message enumeration, and durable acknowledgment. A controlled incoming
+send interrupted between Presage storage and Purple display remains necessary
+before the exactly-once release gate can be checked.
 
 ## 2026-07-19 Debian 13 packaging run
 

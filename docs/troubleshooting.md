@@ -49,6 +49,11 @@ linked device. It cannot request arbitrary older conversation history or copy
 history from the primary phone. Conversation logging is deliberately disabled,
 so previously displayed messages are not reconstructed from Purple logs.
 
+Current builds also replay messages which Presage saved but Purple did not
+acknowledge before a crash. The acknowledgment is encrypted in the Signal
+store and is written only after Purple accepts the message for display. This is
+crash recovery, not a general history request.
+
 ## Sending to a raw identifier fails
 
 Direct chats use canonical Signal service identifiers synchronized into the

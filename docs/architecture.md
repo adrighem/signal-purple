@@ -74,6 +74,13 @@ older messages from the primary phone or Signal service.
 - Incoming text is markup-escaped. Outgoing Purple markup is stripped.
 - Own-device `SynchronizeMessage` values render as outgoing messages.
 - Delivery receipts are sent when Presage marks an envelope as needing one.
+- Presage acknowledges an envelope to Signal before the Purple UI can display
+  it, but saves supported content in SQLCipher first. signal-purple records a
+  separate encrypted projection acknowledgment only after Purple accepts the
+  corresponding event. A crash anywhere between network receipt and UI
+  delivery therefore leaves the message eligible for replay on reconnect.
+  Existing stored history is marked projected when this mechanism is first
+  initialized, preventing an upgrade from flooding conversations.
 - Purple 2 has no robust per-message receipt update API, so received receipts
   are currently consumed without a misleading UI projection.
 
@@ -88,6 +95,14 @@ that delegates to Presage's contact request.
 Flare initializes channels from its local thread store. Its
 [`contacts()` projection](https://gitlab.com/schmiddi-on-mobile/flare-backend/-/blob/8f9f178cb5ec9040d73fdd7c70a3ca3a5bcdcb72/flare-store/src/lib.rs#L133)
 also enriches synchronized contact names with stored Signal profiles.
+
+Flare loads stored history when a conversation is opened, so content saved by
+Presage remains available after a restart. It does not maintain a durable
+frontend-delivery acknowledgment, and its backend documentation leaves retry
+functionality as future work. signal-purple instead replays only content which
+Purple has not acknowledged, because loading a full stored timeline into a
+libpurple conversation would create duplicates and expose historical messages
+that the adapter deliberately does not log.
 
 signal-purple applies the same essential contact-request step automatically on
 every connection. It then reconciles complete snapshots into plugin-managed
