@@ -1,27 +1,34 @@
 # Roadmap
 
-## 0.1 — prove interoperability
+The project advances only when the acceptance criteria for a milestone are
+demonstrated. Version numbers are compatibility targets, not deadlines.
 
-- Complete linked-device, reconnect, direct-message, group-message, typing,
-  and delivery-receipt tests with dedicated non-production Signal accounts.
-- Add deterministic reconnect and malformed-event regression coverage.
-- Vendor the Rust dependency graph for network-free release builds.
+## Milestone 0: release contract
+
+- Define the supported 1.0 scope and objective release gates.
+- Record evidence for every release decision.
+
+## Milestone 1: v0.1.0 foundation
+
+- Keep versions synchronized with release-please while signed tags remain a
+  deliberate release action.
 - Produce a reproducible Debian 13 package.
+- Complete contact, group, offline-message, and resilience testing against real
+  Signal clients.
 
-## 0.2 — secure messaging UX
+## Milestone 2: v0.2.0 semantics and trust
 
-- Add an explicit upstream identity-change event, then implement safety-number
-  display, key-change review, and explicit trust.
-- Add read-receipt presentation without misleading per-device status.
-- Improve aliases, usernames, profiles, reactions, edits, and deletion notices.
+- Surface identity changes without relinking or silent trust.
+- Let the user accept a changed identity and resume from the same conversation.
+- Complete read, delivery, typing, and retry semantics.
 
-## 0.3 — attachments
+## Milestone 3: v0.3.0 attachments
 
-- Add bounded attachment upload/download with Purple transfer objects.
-- Encrypt cached content and define cleanup/recovery semantics.
+- Add bounded attachment transfer with safe temporary storage.
+- Verify cancellation, malformed input, and resource limits.
 
-## Deferred
+## Milestone 4: 1.0 release
 
-Primary-device registration, active phone-number discovery, calls, official
-backup compatibility, and advanced group administration remain deferred until
-the linked-device messaging core is demonstrably reliable.
+- Pass every item in [the 1.0 checklist](docs/release-checklist.md).
+- Publish a release candidate and complete a soak period.
+- Publish 1.0 only from the reviewed release commit.

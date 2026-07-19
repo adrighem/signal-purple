@@ -40,7 +40,9 @@ and message bodies are sensitive. Production code must not log them.
 ## Known gaps
 
 - No independent security audit has occurred.
-- Live Signal interoperability has not yet been verified.
+- Live direct-message, startup-backlog, and contact-sync paths have been
+  verified. The full supported-client and failure-mode matrix remains a release
+  gate.
 - Identity-key rejection is not paired with a full safety-number review and
   approval UI. A changed contact remains blocked in the current store; official
   client verification does not update this linked device's Presage database.
