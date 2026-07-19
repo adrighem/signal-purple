@@ -59,6 +59,10 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vendor")
 endif()
 set(SIGNAL_CORE_LIBRARY
     "${SIGNAL_CARGO_TARGET_DIR}/${SIGNAL_CARGO_PROFILE}/libsignal_core.so")
+set(SIGNAL_CORE_BUILD_RUNTIME_DIR
+    "${CMAKE_CURRENT_BINARY_DIR}/signal-purple")
+set(SIGNAL_CORE_BUILD_RUNTIME_LIBRARY
+    "${SIGNAL_CORE_BUILD_RUNTIME_DIR}/libsignal_core.so")
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
 add_custom_command(
@@ -79,9 +83,21 @@ add_custom_command(
     COMMENT "Building the pinned Presage backend"
     VERBATIM)
 add_custom_target(signal-core-build ALL DEPENDS "${SIGNAL_CORE_LIBRARY}")
+add_custom_command(
+    OUTPUT "${SIGNAL_CORE_BUILD_RUNTIME_LIBRARY}"
+    COMMAND "${CMAKE_COMMAND}" -E make_directory
+            "${SIGNAL_CORE_BUILD_RUNTIME_DIR}"
+    COMMAND "${CMAKE_COMMAND}" -E create_symlink
+            "${SIGNAL_CORE_LIBRARY}"
+            "${SIGNAL_CORE_BUILD_RUNTIME_LIBRARY}"
+    DEPENDS "${SIGNAL_CORE_LIBRARY}"
+    VERBATIM)
+add_custom_target(signal-core-runtime ALL
+                  DEPENDS "${SIGNAL_CORE_BUILD_RUNTIME_LIBRARY}")
 add_library(signal-core SHARED IMPORTED GLOBAL)
 set_target_properties(signal-core PROPERTIES IMPORTED_LOCATION
-                      "${SIGNAL_CORE_LIBRARY}")
+                      "${SIGNAL_CORE_LIBRARY}"
+                      IMPORTED_NO_SONAME TRUE)
 add_dependencies(signal-core signal-core-build)
 
 add_library(signal-purple MODULE
@@ -90,6 +106,7 @@ add_library(signal-purple MODULE
     src/group_sync.c
     src/plugin.c
     src/util.c)
+add_dependencies(signal-purple signal-core-runtime)
 target_compile_features(signal-purple PRIVATE c_std_11)
 target_compile_definitions(signal-purple PRIVATE
     PURPLE_PLUGINS
@@ -103,7 +120,8 @@ target_link_libraries(signal-purple PRIVATE
     PkgConfig::PURPLE PkgConfig::GLIB PkgConfig::LIBSECRET signal-core)
 target_link_options(signal-purple PRIVATE "-Wl,--no-undefined")
 set_target_properties(signal-purple PROPERTIES
-    BUILD_RPATH "${SIGNAL_CARGO_TARGET_DIR}/${SIGNAL_CARGO_PROFILE}"
+    BUILD_RPATH "$ORIGIN/signal-purple"
+    BUILD_WITH_INSTALL_RPATH TRUE
     INSTALL_RPATH "$ORIGIN/signal-purple")
 
 install(TARGETS signal-purple LIBRARY DESTINATION "${SIGNAL_PURPLE_PLUGIN_DIR}")

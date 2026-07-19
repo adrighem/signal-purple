@@ -39,9 +39,12 @@ ionice -c 3 nice dpkg-buildpackage --build=binary --no-sign
 Release evidence must come from a clean Debian 13 amd64 environment. A build on
 a newer Debian host is useful only as a development check. The current protocol
 graph requires Rust 1.94 while Debian 13 supplies Rust 1.85, so the package
-currently requires an audited backport of the pinned Rust toolchain. This is a
-release blocker until the backport is reproducible or the graph supports the
-stock toolchain.
+currently requires the checksum-verified upstream Rust 1.95 toolchain or an
+audited Debian backport. The clean-environment validation uses the upstream
+`rust-1.95.0-x86_64-unknown-linux-gnu.tar.gz` distribution with SHA-256
+`a47ac940abd12399d59ad15c877e7113fa35f2b9ec7e6a8a045d4fd8b9741dea`.
+Build dependencies must be checked separately because Debian 13's package
+resolver cannot satisfy the declared Rust 1.94 minimum from stable alone.
 
 Runtime dependencies include libpurple 2, GLib, libsecret, OpenSSL, and the
 native libraries linked by the bundled SQLCipher backend. Use `dpkg-shlibdeps`
