@@ -104,6 +104,7 @@ The first version does not implement attachment transfers, safety-number state
 changes, primary registration, contact discovery, calls, or official backup
 compatibility. These need separate designs rather than thin callback additions.
 It also does not project disappearing timers or remote deletion into Purple.
-The adapter disables conversation logging and marks delivered messages no-log,
-but synced buddy aliases and identifiers still live in Purple's plaintext buddy
-list.
+The adapter disables logging on every Signal conversation. Text messages keep
+their normal send/receive flags because Pidgin deliberately renders no-log
+messages as grey informational notices. Synced buddy aliases and identifiers
+still live in Purple's plaintext buddy list.

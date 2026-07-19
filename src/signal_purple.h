@@ -53,6 +53,7 @@ int signal_chat_send(PurpleConnection *gc, int id, const char *message,
                      PurpleMessageFlags flags);
 
 char *signal_plaintext_from_markup(const char *markup);
+PurpleMessageFlags signal_message_flags(gboolean outgoing);
 char *signal_store_path(PurpleAccount *account, GError **error);
 char *signal_secret_get_or_create(PurpleAccount *account,
                                   const char *store_path,

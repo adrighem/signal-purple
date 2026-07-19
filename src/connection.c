@@ -416,14 +416,13 @@ signal_deliver_direct(SignalConnection *connection, const SignalEvent *event)
 
     if ((event->flags & SIGNAL_EVENT_FLAG_OUTGOING) == 0) {
         serv_got_im(connection->gc, event->peer_id, escaped,
-                    PURPLE_MESSAGE_RECV | PURPLE_MESSAGE_NO_LOG, timestamp);
+                    signal_message_flags(FALSE), timestamp);
         return;
     }
 
     purple_conv_im_write(PURPLE_CONV_IM(conversation),
                          purple_account_get_username(account), escaped,
-                         PURPLE_MESSAGE_SEND | PURPLE_MESSAGE_REMOTE_SEND |
-                             PURPLE_MESSAGE_NO_LOG,
+                         signal_message_flags(TRUE),
                          timestamp);
 }
 
@@ -444,10 +443,8 @@ signal_deliver_group(SignalConnection *connection, const SignalEvent *event)
                     ? (time_t)(event->timestamp_ms / 1000)
                     : time(NULL);
     serv_got_chat_in(connection->gc, (int)id, event->peer_id,
-                     (event->flags & SIGNAL_EVENT_FLAG_OUTGOING)
-                         ? PURPLE_MESSAGE_SEND | PURPLE_MESSAGE_REMOTE_SEND |
-                               PURPLE_MESSAGE_NO_LOG
-                         : PURPLE_MESSAGE_RECV | PURPLE_MESSAGE_NO_LOG,
+                     signal_message_flags(
+                         (event->flags & SIGNAL_EVENT_FLAG_OUTGOING) != 0),
                      escaped, timestamp);
 }
 

@@ -50,6 +50,13 @@ signal_plaintext_from_markup(const char *markup)
     return purple_markup_strip_html(markup);
 }
 
+PurpleMessageFlags
+signal_message_flags(gboolean outgoing)
+{
+    return outgoing ? PURPLE_MESSAGE_SEND | PURPLE_MESSAGE_REMOTE_SEND
+                    : PURPLE_MESSAGE_RECV;
+}
+
 char *
 signal_store_path(PurpleAccount *account, GError **error)
 {

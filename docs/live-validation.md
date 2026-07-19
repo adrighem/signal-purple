@@ -16,6 +16,7 @@ service, and an isolated temporary Pidgin profile.
 | Messages queued while the linked device is offline | Implemented by the receive queue; not separately exercised live |
 | Primary phone to plugin direct-message synchronization | Passed |
 | Plugin to primary phone direct message | Passed |
+| Incoming direct-message presentation | Reproduced in Pidgin: `PURPLE_MESSAGE_NO_LOG` forced informational-notice styling even with `PURPLE_MESSAGE_RECV`; fixed by retaining normal receive flags while conversation logging remains disabled |
 | Contact buddy-list creation and refresh | Passed with 46 visible contacts while Pidgin's offline filter remained disabled |
 | Contact alias update and stale deletion | Implemented; stale-deletion decisions are unit-tested, but neither path was mutated live |
 | Storage Service group discovery and restart reconciliation | Passed with 11 groups; three same-key copies produced by an earlier implementation were collapsed to 11 unique managed chats and another reconnect created no duplicates |

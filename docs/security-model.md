@@ -30,8 +30,9 @@ and message bodies are sensitive. Production code must not log them.
   domain-separated SHA-256 group identifier, which the backend resolves against
   the store for sends.
 - Remote message text is escaped before Purple renders it.
-- Conversation logging is disabled and each delivered message carries Purple's
-  no-log flag.
+- Conversation logging is disabled on every Signal conversation. Text messages
+  use normal send/receive flags because Pidgin renders Purple's per-message
+  no-log flag as an informational notice instead of a chat message.
 - Upstream info-level tracing is compiled out so Presage cannot emit the
   provisioning URI through its linking log statement.
 - Worker shutdown is joined before account state is freed.
