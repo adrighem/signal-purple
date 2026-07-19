@@ -111,6 +111,11 @@ SignalStatus signal_core_dismiss_identity(SignalCore *core,
                                           uint64_t request_id,
                                           const char *recipient);
 
+SignalStatus signal_core_mark_read(SignalCore *core,
+                                   uint64_t request_id,
+                                   const char *recipient,
+                                   uint64_t timestamp);
+
 /* Returns 1 when an event was returned, 0 when the queue is empty, or -1. */
 int signal_core_poll_event(SignalCore *core, SignalEvent **out_event);
 

@@ -366,6 +366,35 @@ pub unsafe extern "C" fn signal_core_dismiss_identity(
 }
 
 #[unsafe(no_mangle)]
+/// Queues a read receipt after Purple reports that a conversation is focused.
+///
+/// # Safety
+///
+/// `core` must be live and `recipient` must be a valid NUL-terminated string.
+pub unsafe extern "C" fn signal_core_mark_read(
+    core: *mut SignalCore,
+    request_id: u64,
+    recipient: *const c_char,
+    timestamp: u64,
+) -> SignalStatus {
+    ffi_guard(|| {
+        if core.is_null() || timestamp == 0 {
+            return SignalStatus::InvalidArgument;
+        }
+        // SAFETY: copied immediately after validation.
+        let recipient = status_try!(unsafe { required_string(recipient, MAX_RECIPIENT_BYTES) });
+        queue_command(
+            unsafe { &*core },
+            Command::MarkRead {
+                request_id,
+                recipient,
+                timestamp,
+            },
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
 /// Polls one owned backend event without blocking.
 ///
 /// # Safety

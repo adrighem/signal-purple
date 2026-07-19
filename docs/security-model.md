@@ -46,6 +46,9 @@ and message bodies are sensitive. Production code must not log them.
 - Message projection state is stored in the same SQLCipher database. Purple
   acknowledges a message event only after its synchronous conversation write;
   unacknowledged content is replayed after the next receive queue drain.
+- Read receipts are emitted only after Purple reports focus. Pending receipt
+  metadata is held in process memory and is not written to Purple's plaintext
+  configuration.
 
 ## Known gaps
 

@@ -74,6 +74,9 @@ older messages from the primary phone or Signal service.
 - Incoming text is markup-escaped. Outgoing Purple markup is stripped.
 - Own-device `SynchronizeMessage` values render as outgoing messages.
 - Delivery receipts are sent when Presage marks an envelope as needing one.
+- Read receipts are held until Purple reports that the direct or group
+  conversation is focused. Background delivery and notification rendering do
+  not mark a message read.
 - Presage acknowledges an envelope to Signal before the Purple UI can display
   it, but saves supported content in SQLCipher first. signal-purple records a
   separate encrypted projection acknowledgment only after Purple accepts the

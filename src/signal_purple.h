@@ -22,6 +22,7 @@ typedef struct {
     GHashTable *group_members_by_key;
     GHashTable *identity_changes_seen;
     GHashTable *pending_identity_changes;
+    GPtrArray *pending_reads;
     SignalContactSync contact_sync;
     SignalContactSync group_sync;
     GBytes *link_qr;

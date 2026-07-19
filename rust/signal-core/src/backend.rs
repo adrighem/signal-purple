@@ -67,6 +67,11 @@ pub enum Command {
         request_id: u64,
         recipient: String,
     },
+    MarkRead {
+        request_id: u64,
+        recipient: String,
+        timestamp: u64,
+    },
 }
 
 #[derive(Default)]
@@ -622,6 +627,26 @@ async fn handle_command(
         return;
     }
 
+    if let Command::MarkRead {
+        request_id,
+        recipient,
+        timestamp,
+    } = command
+    {
+        let result = match parse_recipient(&recipient) {
+            Some(recipient) => {
+                send_receipt(manager, recipient, timestamp, receipt_message::Type::Read)
+                    .await
+                    .map_err(|error| error.to_string())
+            }
+            None => Err("Recipient is not a canonical Signal service identifier".into()),
+        };
+        if let Err(error) = result {
+            sink.emit(Event::request_error(request_id, error));
+        }
+        return;
+    }
+
     let (request_id, result) = match command {
         Command::SendMessage {
             request_id,
@@ -717,6 +742,7 @@ async fn handle_command(
         }
         Command::AcknowledgeMessage { .. } => unreachable!(),
         Command::AcceptIdentity { .. } | Command::DismissIdentity { .. } => unreachable!(),
+        Command::MarkRead { .. } => unreachable!(),
     };
 
     if let Err(error) = result {
@@ -922,23 +948,38 @@ async fn send_delivery_receipt(
     message_timestamp: u64,
     sink: &EventSink,
 ) {
-    let timestamp = now_ms();
-    if let Err(error) = manager
-        .send_message(
-            recipient,
-            ReceiptMessage {
-                r#type: Some(receipt_message::Type::Delivery.into()),
-                timestamp: vec![message_timestamp],
-            },
-            timestamp,
-        )
-        .await
+    if let Err(error) = send_receipt(
+        manager,
+        recipient,
+        message_timestamp,
+        receipt_message::Type::Delivery,
+    )
+    .await
     {
         sink.emit(Event::error(
             format!("Could not send a Signal delivery receipt: {error}"),
             false,
         ));
     }
+}
+
+async fn send_receipt(
+    manager: &mut Manager<SqliteStore, Registered>,
+    recipient: ServiceId,
+    message_timestamp: u64,
+    receipt_type: receipt_message::Type,
+) -> Result<(), presage::Error<presage_store_sqlite::SqliteStoreError>> {
+    let timestamp = now_ms();
+    manager
+        .send_message(
+            recipient,
+            ReceiptMessage {
+                r#type: Some(receipt_type.into()),
+                timestamp: vec![message_timestamp],
+            },
+            timestamp,
+        )
+        .await
 }
 
 fn parse_recipient(value: &str) -> Option<ServiceId> {

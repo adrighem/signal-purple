@@ -11,6 +11,53 @@ typedef struct {
     PurpleConvChatBuddyFlags flags;
 } SignalGroupMember;
 
+typedef struct {
+    char *peer_id;
+    char *chat_id;
+    guint64 timestamp;
+} SignalPendingRead;
+
+static void
+signal_pending_read_free(gpointer data)
+{
+    SignalPendingRead *read = data;
+
+    if (read == NULL)
+        return;
+    g_free(read->peer_id);
+    g_free(read->chat_id);
+    g_free(read);
+}
+
+static gboolean
+signal_send_read(SignalConnection *connection, const SignalPendingRead *read)
+{
+    return signal_core_mark_read(
+               connection->core, connection->next_request_id++,
+               read->peer_id, read->timestamp) == SIGNAL_STATUS_OK;
+}
+
+static void
+signal_queue_read(SignalConnection *connection, PurpleConversation *conversation,
+                  const SignalEvent *event)
+{
+    SignalPendingRead *read;
+
+    if ((event->flags & SIGNAL_EVENT_FLAG_OUTGOING) != 0 ||
+        event->peer_id == NULL || event->timestamp_ms == 0)
+        return;
+    read = g_new0(SignalPendingRead, 1);
+    read->peer_id = g_strdup(event->peer_id);
+    read->chat_id = g_strdup(event->chat_id);
+    read->timestamp = event->timestamp_ms;
+    if (purple_conversation_has_focus(conversation) &&
+        signal_send_read(connection, read)) {
+        signal_pending_read_free(read);
+        return;
+    }
+    g_ptr_array_add(connection->pending_reads, read);
+}
+
 static void
 signal_group_member_free(gpointer data)
 {
@@ -417,6 +464,7 @@ signal_deliver_direct(SignalConnection *connection, const SignalEvent *event)
     if ((event->flags & SIGNAL_EVENT_FLAG_OUTGOING) == 0) {
         serv_got_im(connection->gc, event->peer_id, escaped,
                     signal_message_flags(FALSE), timestamp);
+        signal_queue_read(connection, conversation, event);
         return;
     }
 
@@ -436,7 +484,8 @@ signal_deliver_group(SignalConnection *connection, const SignalEvent *event)
     if (event->chat_id == NULL || event->peer_id == NULL || event->text == NULL)
         return;
 
-    signal_open_group(connection, event->chat_id, event->title);
+    PurpleConversation *conversation = signal_open_group(
+        connection, event->chat_id, event->title);
     id = signal_group_id(connection, event->chat_id, event->title);
     escaped = g_markup_escape_text(event->text, -1);
     timestamp = event->timestamp_ms > 0
@@ -446,6 +495,41 @@ signal_deliver_group(SignalConnection *connection, const SignalEvent *event)
                      signal_message_flags(
                          (event->flags & SIGNAL_EVENT_FLAG_OUTGOING) != 0),
                      escaped, timestamp);
+    signal_queue_read(connection, conversation, event);
+}
+
+static void
+signal_conversation_updated(PurpleConversation *conversation,
+                            PurpleConvUpdateType update, gpointer user_data)
+{
+    SignalConnection *connection = user_data;
+    const char *direct_peer = NULL;
+    const char *group_key = NULL;
+
+    (void)update;
+    if (connection->closing || !purple_conversation_has_focus(conversation) ||
+        purple_conversation_get_account(conversation) !=
+            purple_connection_get_account(connection->gc))
+        return;
+    if (purple_conversation_get_type(conversation) == PURPLE_CONV_TYPE_IM) {
+        direct_peer = purple_conversation_get_name(conversation);
+    } else if (purple_conversation_get_type(conversation) ==
+               PURPLE_CONV_TYPE_CHAT) {
+        group_key = g_hash_table_lookup(
+            connection->group_keys_by_id,
+            GINT_TO_POINTER(purple_conv_chat_get_id(
+                PURPLE_CONV_CHAT(conversation))));
+    }
+
+    for (guint index = connection->pending_reads->len; index > 0; index--) {
+        SignalPendingRead *read = g_ptr_array_index(
+            connection->pending_reads, index - 1);
+        gboolean matches = read->chat_id != NULL
+                               ? g_strcmp0(read->chat_id, group_key) == 0
+                               : g_strcmp0(read->peer_id, direct_peer) == 0;
+        if (matches && signal_send_read(connection, read))
+            g_ptr_array_remove_index(connection->pending_reads, index - 1);
+    }
 }
 
 static void
@@ -690,6 +774,8 @@ signal_login(PurpleAccount *account)
         g_str_hash, g_str_equal, g_free, NULL);
     connection->pending_identity_changes = g_hash_table_new_full(
         g_str_hash, g_str_equal, g_free, NULL);
+    connection->pending_reads = g_ptr_array_new_with_free_func(
+        signal_pending_read_free);
     signal_contact_sync_init(&connection->contact_sync);
     signal_contact_sync_init(&connection->group_sync);
     connection->next_group_id = 1;
@@ -709,6 +795,7 @@ signal_login(PurpleAccount *account)
         g_hash_table_unref(connection->group_members_by_key);
         g_hash_table_unref(connection->identity_changes_seen);
         g_hash_table_unref(connection->pending_identity_changes);
+        g_ptr_array_unref(connection->pending_reads);
         signal_contact_sync_clear(&connection->contact_sync);
         signal_contact_sync_clear(&connection->group_sync);
         g_free(connection->store_path);
@@ -719,6 +806,9 @@ signal_login(PurpleAccount *account)
     }
 
     purple_connection_set_protocol_data(gc, connection);
+    purple_signal_connect(
+        purple_conversations_get_handle(), "conversation-updated", connection,
+        PURPLE_CALLBACK(signal_conversation_updated), connection);
     purple_connection_set_state(gc, PURPLE_CONNECTING);
     purple_connection_update_progress(gc, "Opening encrypted Signal store", 0, 3);
 
@@ -738,6 +828,7 @@ signal_close(PurpleConnection *gc)
 
     connection->closing = TRUE;
     purple_connection_set_protocol_data(gc, NULL);
+    purple_signals_disconnect_by_handle(connection);
     purple_request_close_with_handle(connection);
 
     if (connection->poll_source != NULL) {
@@ -754,6 +845,7 @@ signal_close(PurpleConnection *gc)
     g_hash_table_unref(connection->group_members_by_key);
     g_hash_table_unref(connection->identity_changes_seen);
     g_hash_table_unref(connection->pending_identity_changes);
+    g_ptr_array_unref(connection->pending_reads);
     signal_contact_sync_clear(&connection->contact_sync);
     signal_contact_sync_clear(&connection->group_sync);
     g_free(connection->store_path);

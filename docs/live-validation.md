@@ -25,7 +25,7 @@ service, and an isolated temporary Pidgin profile.
 | Group title and active-membership projection | Passed; an opened 3-member group showed all members and one administrator flag |
 | Group master-key confinement | Passed; persisted chats contained opaque `group-id` values and no raw group master keys |
 | Group send/receive | Not exercised |
-| Typing and delivery receipts | Not exercised |
+| Typing and receipts | Direct typing, delivery receipts, and focus-gated direct/group read receipts are implemented and unit/build tested; not exercised against another live client |
 | Second linked-device synchronization | Not exercised |
 
 The installed plugin also passed the headless module probe. The live run proved
