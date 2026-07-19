@@ -38,7 +38,9 @@ typedef enum {
     SIGNAL_EVENT_CONTACT_SYNC_END = 13,
     SIGNAL_EVENT_GROUP_SYNC_BEGIN = 14,
     SIGNAL_EVENT_GROUP_SYNC_END = 15,
-    SIGNAL_EVENT_GROUP_MEMBER = 16
+    SIGNAL_EVENT_GROUP_MEMBER = 16,
+    SIGNAL_EVENT_IDENTITY_CHANGE = 17,
+    SIGNAL_EVENT_IDENTITY_ACCEPTED = 18
 } SignalEventKind;
 
 typedef enum {
@@ -100,6 +102,14 @@ SignalStatus signal_core_set_typing(SignalCore *core,
 /* Acknowledges that Purple accepted a message event for display. */
 SignalStatus signal_core_ack_message(SignalCore *core,
                                      uint64_t delivery_id);
+
+SignalStatus signal_core_accept_identity(SignalCore *core,
+                                         uint64_t request_id,
+                                         const char *recipient);
+
+SignalStatus signal_core_dismiss_identity(SignalCore *core,
+                                          uint64_t request_id,
+                                          const char *recipient);
 
 /* Returns 1 when an event was returned, 0 when the queue is empty, or -1. */
 int signal_core_poll_event(SignalCore *core, SignalEvent **out_event);

@@ -142,6 +142,12 @@ main(int argc, char **argv)
     g_assert_true(purple_core_init("signal-purple-tests"));
     purple_set_blist(purple_blist_new());
 
+    plugin = purple_plugins_find_with_id(SIGNAL_PLUGIN_ID);
+    if (plugin != NULL) {
+        if (purple_plugin_is_loaded(plugin))
+            g_assert_true(purple_plugin_unload(plugin));
+        purple_plugin_destroy(plugin);
+    }
     plugin = purple_plugin_probe(argv[1]);
     g_assert_nonnull(plugin);
     g_assert_cmpstr(purple_plugin_get_id(plugin), ==, SIGNAL_PLUGIN_ID);
@@ -161,6 +167,7 @@ main(int argc, char **argv)
     g_assert_nonnull(protocol->close);
     g_assert_nonnull(protocol->send_im);
     g_assert_nonnull(protocol->send_typing);
+    g_assert_nonnull(protocol->blist_node_menu);
     g_assert_nonnull(protocol->chat_info);
     g_assert_nonnull(protocol->chat_info_defaults);
     g_assert_nonnull(protocol->join_chat);

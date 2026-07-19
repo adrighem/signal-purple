@@ -62,14 +62,12 @@ contact rather than entering a phone number.
 
 ## Identity changes block messages
 
-The current backend rejects changed identity keys and does not expose a
-per-contact approval workflow. Verification in an official client does not
-change signal-purple's separate store. Communication with that contact remains
-blocked in this release. An inbound message can be skipped by Presage before
-the adapter receives an error event, while an outbound send reports only a
-generic operation failure.
+Incoming messages continue across an identity replacement to avoid losing an
+envelope which Signal has already acknowledged. Sending also continues for a
+contact that was not explicitly verified, with a one-time advisory.
 
-After independently verifying the change, the only current recovery is to use a
-new configured store path, link it as a new device, and remove the old linked
-device from the primary phone. Retain the old encrypted store until the new
-device works; do not overwrite or delete it as a routine workaround.
+For an explicitly verified contact, sending remains blocked. Verify the
+contact through another trusted channel, then right-click that Signal buddy and
+choose **Accept changed Signal identity**. The plugin resets the affected
+sessions and marks the contact unverified, without relinking the account. Do
+not accept merely to clear the warning.

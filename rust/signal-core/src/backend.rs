@@ -27,8 +27,8 @@ use zeroize::Zeroizing;
 use crate::event::{
     EVENT_CONTACT, EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED,
     EVENT_GROUP, EVENT_GROUP_MEMBER, EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN,
-    EVENT_GROUP_SYNC_END, EVENT_LINK_QR, EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT, EVENT_TYPING,
-    Event, FLAG_OUTGOING,
+    EVENT_GROUP_SYNC_END, EVENT_IDENTITY_ACCEPTED, EVENT_IDENTITY_CHANGE, EVENT_LINK_QR,
+    EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT, EVENT_TYPING, Event, FLAG_OUTGOING,
 };
 
 const MESSAGE_PROJECTION_CLIENT: &str = "signal-purple-v1";
@@ -58,6 +58,14 @@ pub enum Command {
     },
     AcknowledgeMessage {
         delivery_id: u64,
+    },
+    AcceptIdentity {
+        request_id: u64,
+        recipient: String,
+    },
+    DismissIdentity {
+        request_id: u64,
+        recipient: String,
     },
 }
 
@@ -142,7 +150,7 @@ async fn run(
     let open_store = SqliteStore::open_with_passphrase(
         &config.store_path,
         Some(config.passphrase.as_str()),
-        OnNewIdentity::Reject,
+        OnNewIdentity::TrustUnverified,
     );
     pin_mut!(open_store);
     let store = tokio::select! {
@@ -262,6 +270,11 @@ async fn receive_and_command_loop(
         .initialize_message_projection(MESSAGE_PROJECTION_CLIENT)
         .await
         .map_err(|error| format!("Could not initialize durable message replay: {error}"))?;
+    manager
+        .store()
+        .initialize_identity_change_tracking()
+        .await
+        .map_err(|error| format!("Could not initialize identity-change tracking: {error}"))?;
     let messages = {
         let mut receive = Box::pin(manager.receive_messages());
         tokio::select! {
@@ -306,6 +319,7 @@ async fn receive_and_command_loop(
                                 &sink,
                                 &mut projection,
                             ).await;
+                            emit_identity_changes(&manager, &sink).await;
                             groups_dirty = false;
                             synchronized = true;
                             ready.store(true, Ordering::Release);
@@ -325,6 +339,7 @@ async fn receive_and_command_loop(
                                 &sink,
                                 &mut projection,
                             ).await;
+                            emit_identity_changes(&manager, &sink).await;
                         }
                     }
                     None => {
@@ -350,6 +365,7 @@ async fn receive_and_command_loop(
                         ).await {
                             return Ok(());
                         }
+                        emit_identity_changes(&manager, &sink).await;
                     }
                 }
             }
@@ -452,6 +468,25 @@ async fn emit_group_snapshot(manager: &Manager<SqliteStore, Registered>, sink: &
     }
 }
 
+async fn emit_identity_changes(manager: &Manager<SqliteStore, Registered>, sink: &EventSink) {
+    match manager.store().identity_change_notices().await {
+        Ok(changes) => {
+            for change in changes {
+                sink.emit(Event {
+                    kind: EVENT_IDENTITY_CHANGE,
+                    peer_id: Some(change.address),
+                    value: i32::from(change.verified),
+                    ..Event::default()
+                });
+            }
+        }
+        Err(error) => sink.emit(Event::error(
+            format!("Could not read Signal identity changes: {error}"),
+            false,
+        )),
+    }
+}
+
 async fn replay_unprojected_messages(
     manager: &mut Manager<SqliteStore, Registered>,
     sink: &EventSink,
@@ -545,6 +580,44 @@ async fn handle_command(
                 format!("Could not acknowledge a displayed Signal message: {error}"),
                 false,
             )),
+        }
+        return;
+    }
+
+    if let Command::AcceptIdentity {
+        request_id,
+        recipient,
+    } = command
+    {
+        match manager.store().accept_identity_change(&recipient).await {
+            Ok(true) => sink.emit(Event {
+                kind: EVENT_IDENTITY_ACCEPTED,
+                request_id,
+                peer_id: Some(recipient),
+                ..Event::default()
+            }),
+            Ok(false) => sink.emit(Event::request_error(
+                request_id,
+                "No verified identity change is pending for this contact",
+            )),
+            Err(error) => sink.emit(Event::request_error(
+                request_id,
+                format!("Could not accept the Signal identity change: {error}"),
+            )),
+        }
+        return;
+    }
+
+    if let Command::DismissIdentity {
+        request_id,
+        recipient,
+    } = command
+    {
+        if let Err(error) = manager.store().dismiss_identity_change(&recipient).await {
+            sink.emit(Event::request_error(
+                request_id,
+                format!("Could not dismiss the Signal identity notice: {error}"),
+            ));
         }
         return;
     }
@@ -643,6 +716,7 @@ async fn handle_command(
             (request_id, result)
         }
         Command::AcknowledgeMessage { .. } => unreachable!(),
+        Command::AcceptIdentity { .. } | Command::DismissIdentity { .. } => unreachable!(),
     };
 
     if let Err(error) = result {

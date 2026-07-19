@@ -76,6 +76,7 @@ static PurplePluginProtocolInfo protocol_info = {
     .icon_spec = NO_BUDDY_ICONS,
     .list_icon = signal_list_icon,
     .status_types = signal_status_types,
+    .blist_node_menu = signal_blist_node_menu,
     .login = signal_login,
     .close = signal_close,
     .send_im = signal_send_im,

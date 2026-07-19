@@ -312,6 +312,60 @@ pub unsafe extern "C" fn signal_core_ack_message(
 }
 
 #[unsafe(no_mangle)]
+/// Accepts a pending identity replacement for one canonical recipient.
+///
+/// # Safety
+///
+/// `core` must be live and `recipient` must be a valid NUL-terminated string.
+pub unsafe extern "C" fn signal_core_accept_identity(
+    core: *mut SignalCore,
+    request_id: u64,
+    recipient: *const c_char,
+) -> SignalStatus {
+    ffi_guard(|| {
+        if core.is_null() {
+            return SignalStatus::InvalidArgument;
+        }
+        // SAFETY: copied immediately after validation.
+        let recipient = status_try!(unsafe { required_string(recipient, MAX_RECIPIENT_BYTES) });
+        queue_control_command(
+            unsafe { &*core },
+            Command::AcceptIdentity {
+                request_id,
+                recipient,
+            },
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Dismisses a non-blocking identity replacement notice.
+///
+/// # Safety
+///
+/// `core` must be live and `recipient` must be a valid NUL-terminated string.
+pub unsafe extern "C" fn signal_core_dismiss_identity(
+    core: *mut SignalCore,
+    request_id: u64,
+    recipient: *const c_char,
+) -> SignalStatus {
+    ffi_guard(|| {
+        if core.is_null() {
+            return SignalStatus::InvalidArgument;
+        }
+        // SAFETY: copied immediately after validation.
+        let recipient = status_try!(unsafe { required_string(recipient, MAX_RECIPIENT_BYTES) });
+        queue_control_command(
+            unsafe { &*core },
+            Command::DismissIdentity {
+                request_id,
+                recipient,
+            },
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
 /// Polls one owned backend event without blocking.
 ///
 /// # Safety

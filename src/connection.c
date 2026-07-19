@@ -448,6 +448,53 @@ signal_deliver_group(SignalConnection *connection, const SignalEvent *event)
                      escaped, timestamp);
 }
 
+static void
+signal_identity_changed(SignalConnection *connection, const SignalEvent *event)
+{
+    SignalStatus status;
+
+    if (event->peer_id == NULL || event->peer_id[0] == '\0' ||
+        g_hash_table_contains(connection->identity_changes_seen,
+                              event->peer_id))
+        return;
+
+    g_hash_table_add(connection->identity_changes_seen,
+                     g_strdup(event->peer_id));
+    if (event->value != 0) {
+        g_hash_table_add(connection->pending_identity_changes,
+                         g_strdup(event->peer_id));
+        purple_notify_warning(
+            connection, "Signal safety number changed",
+            "Messages to a verified Signal contact are blocked",
+            "Verify the contact through another channel, then right-click the buddy and choose “Accept changed Signal identity”.");
+        return;
+    }
+
+    purple_notify_info(
+        connection, "Signal safety number changed",
+        "Communication continued for an unverified contact",
+        "Verify the safety number in an official Signal client before sharing sensitive information.");
+    status = signal_core_dismiss_identity(
+        connection->core, connection->next_request_id++, event->peer_id);
+    if (status != SIGNAL_STATUS_OK)
+        purple_debug_warning(
+            "signal-purple", "Could not dismiss identity notice for %s: %d\n",
+            event->peer_id, status);
+}
+
+static void
+signal_identity_accepted(SignalConnection *connection,
+                         const SignalEvent *event)
+{
+    if (event->peer_id == NULL)
+        return;
+    g_hash_table_remove(connection->pending_identity_changes, event->peer_id);
+    g_hash_table_remove(connection->identity_changes_seen, event->peer_id);
+    purple_notify_info(connection, "Signal identity accepted",
+                       "Messaging can continue",
+                       "The contact is now unverified until its safety number is verified again.");
+}
+
 static gboolean
 signal_handle_event(SignalConnection *connection, const SignalEvent *event)
 {
@@ -502,6 +549,12 @@ signal_handle_event(SignalConnection *connection, const SignalEvent *event)
         break;
     case SIGNAL_EVENT_RECEIPT:
         /* Purple 2 has no safe per-message receipt update API. */
+        break;
+    case SIGNAL_EVENT_IDENTITY_CHANGE:
+        signal_identity_changed(connection, event);
+        break;
+    case SIGNAL_EVENT_IDENTITY_ACCEPTED:
+        signal_identity_accepted(connection, event);
         break;
     case SIGNAL_EVENT_NOTICE:
         purple_notify_info(connection, "signal-purple", event->title,
@@ -633,6 +686,10 @@ signal_login(PurpleAccount *account)
         g_str_hash, g_str_equal, g_free, g_free);
     connection->group_members_by_key = g_hash_table_new_full(
         g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_ptr_array_unref);
+    connection->identity_changes_seen = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, NULL);
+    connection->pending_identity_changes = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, NULL);
     signal_contact_sync_init(&connection->contact_sync);
     signal_contact_sync_init(&connection->group_sync);
     connection->next_group_id = 1;
@@ -650,6 +707,8 @@ signal_login(PurpleAccount *account)
         g_hash_table_unref(connection->group_keys_by_id);
         g_hash_table_unref(connection->group_titles_by_key);
         g_hash_table_unref(connection->group_members_by_key);
+        g_hash_table_unref(connection->identity_changes_seen);
+        g_hash_table_unref(connection->pending_identity_changes);
         signal_contact_sync_clear(&connection->contact_sync);
         signal_contact_sync_clear(&connection->group_sync);
         g_free(connection->store_path);
@@ -693,10 +752,70 @@ signal_close(PurpleConnection *gc)
     g_hash_table_unref(connection->group_keys_by_id);
     g_hash_table_unref(connection->group_titles_by_key);
     g_hash_table_unref(connection->group_members_by_key);
+    g_hash_table_unref(connection->identity_changes_seen);
+    g_hash_table_unref(connection->pending_identity_changes);
     signal_contact_sync_clear(&connection->contact_sync);
     signal_contact_sync_clear(&connection->group_sync);
     g_free(connection->store_path);
     g_free(connection);
+}
+
+static void
+signal_accept_changed_identity(PurpleBlistNode *node, gpointer user_data)
+{
+    PurpleBuddy *buddy;
+    PurpleAccount *account;
+    PurpleConnection *gc;
+    SignalConnection *connection;
+    const char *peer;
+    SignalStatus status;
+
+    (void)user_data;
+    if (!PURPLE_BLIST_NODE_IS_BUDDY(node))
+        return;
+    buddy = PURPLE_BUDDY(node);
+    account = purple_buddy_get_account(buddy);
+    gc = purple_account_get_connection(account);
+    connection = signal_connection_data(gc);
+    peer = purple_buddy_get_name(buddy);
+    if (connection == NULL || connection->closing ||
+        !g_hash_table_contains(connection->pending_identity_changes, peer))
+        return;
+
+    status = signal_core_accept_identity(
+        connection->core, connection->next_request_id++, peer);
+    if (status != SIGNAL_STATUS_OK)
+        purple_notify_error(connection, "Could not accept Signal identity",
+                            "The request could not be queued",
+                            "Reconnect the account and try again.");
+}
+
+GList *
+signal_blist_node_menu(PurpleBlistNode *node)
+{
+    PurpleBuddy *buddy;
+    PurpleAccount *account;
+    PurpleConnection *gc;
+    SignalConnection *connection;
+
+    if (!PURPLE_BLIST_NODE_IS_BUDDY(node))
+        return NULL;
+    buddy = PURPLE_BUDDY(node);
+    account = purple_buddy_get_account(buddy);
+    if (g_strcmp0(purple_account_get_protocol_id(account), SIGNAL_PLUGIN_ID) != 0)
+        return NULL;
+    gc = purple_account_get_connection(account);
+    connection = signal_connection_data(gc);
+    if (connection == NULL ||
+        !g_hash_table_contains(connection->pending_identity_changes,
+                               purple_buddy_get_name(buddy)))
+        return NULL;
+
+    return g_list_append(
+        NULL,
+        purple_menu_action_new(
+            "Accept changed Signal identity",
+            PURPLE_CALLBACK(signal_accept_changed_identity), NULL, NULL));
 }
 
 static int

@@ -18,6 +18,8 @@ pub const EVENT_CONTACT_SYNC_END: u32 = 13;
 pub const EVENT_GROUP_SYNC_BEGIN: u32 = 14;
 pub const EVENT_GROUP_SYNC_END: u32 = 15;
 pub const EVENT_GROUP_MEMBER: u32 = 16;
+pub const EVENT_IDENTITY_CHANGE: u32 = 17;
+pub const EVENT_IDENTITY_ACCEPTED: u32 = 18;
 
 pub const FLAG_OUTGOING: u32 = 1 << 0;
 pub const FLAG_FATAL: u32 = 1 << 1;

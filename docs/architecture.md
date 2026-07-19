@@ -84,6 +84,22 @@ older messages from the primary phone or Signal service.
 - Purple 2 has no robust per-message receipt update API, so received receipts
   are currently consumed without a misleading UI projection.
 
+## Identity replacement
+
+Rejecting every changed identity appears safe but can lose inbound messages:
+Signal's websocket envelope is acknowledged before Presage finishes decrypting
+and before Purple can warn the user. Trusting every replacement, as the pinned
+Flare store does, avoids that loss but removes the protection expected for a
+verified contact.
+
+signal-purple records replacement keys and verification state inside SQLCipher.
+Receiving always continues. Unverified contacts continue with a one-time
+advisory. Explicitly verified contacts are blocked only for sending and expose
+an acceptance action on that buddy. Acceptance installs the pending key, clears
+sessions and sender keys, and downgrades the contact to unverified. This keeps
+normal chats uninterrupted while retaining an explicit safety boundary where
+the user previously chose one.
+
 ## Flare comparison
 
 Flare uses the same pinned Presage revision but presents contacts and groups as

@@ -25,7 +25,12 @@ and message bodies are sensitive. Production code must not log them.
 - SQLCipher is enabled by Presage's SQLite-store default feature.
 - A missing libsecret service fails closed; the plugin does not fall back to an
   unencrypted database.
-- The backend uses Presage's `OnNewIdentity::Reject` policy.
+- Identity replacements are recorded in SQLCipher. Receiving continues so a
+  service-acknowledged envelope is not silently lost. Unverified contacts also
+  continue sending after one advisory. Replacements for explicitly verified
+  contacts remain blocked for sending until the user accepts them from the
+  buddy menu, at which point sessions are reset and the contact is downgraded
+  to unverified.
 - Group master keys remain in the encrypted Rust store. Purple persists only a
   domain-separated SHA-256 group identifier, which the backend resolves against
   the store for sends.
@@ -49,11 +54,10 @@ and message bodies are sensitive. Production code must not log them.
   group-membership paths have been verified. The full supported-client and
   failure-mode matrix, including startup backlog exactly-once behavior, remains
   a release gate.
-- Identity-key rejection is not paired with a full safety-number review and
-  approval UI. A changed contact remains blocked in the current store; official
-  client verification does not update this linked device's Presage database.
-  Pinned Presage may skip inbound identity/decryption failures before yielding
-  an event, so Purple cannot reliably warn about that skipped message.
+- Purple does not display or compare the numeric safety number. Acceptance is
+  therefore a confirmation that the user completed verification through
+  another trusted channel, not an in-plugin cryptographic comparison. This
+  path is unit-tested but still needs a controlled live identity replacement.
 - Attachments are names-only; file transfer security and encrypted caching are
   not implemented.
 - Pidgin/libpurple 2 is a legacy in-process plugin environment. A memory-safety

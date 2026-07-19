@@ -20,6 +20,8 @@ typedef struct {
     GHashTable *group_keys_by_id;
     GHashTable *group_titles_by_key;
     GHashTable *group_members_by_key;
+    GHashTable *identity_changes_seen;
+    GHashTable *pending_identity_changes;
     SignalContactSync contact_sync;
     SignalContactSync group_sync;
     GBytes *link_qr;
@@ -51,6 +53,7 @@ char *signal_get_chat_name(GHashTable *components);
 void signal_chat_leave(PurpleConnection *gc, int id);
 int signal_chat_send(PurpleConnection *gc, int id, const char *message,
                      PurpleMessageFlags flags);
+GList *signal_blist_node_menu(PurpleBlistNode *node);
 
 char *signal_plaintext_from_markup(const char *markup);
 PurpleMessageFlags signal_message_flags(gboolean outgoing);
