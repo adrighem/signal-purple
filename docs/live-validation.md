@@ -34,3 +34,22 @@ The same isolated account fetched 11 groups from Signal Storage Service without
 requiring new group messages. Reconnect reconciliation, managed duplicate
 cleanup, title persistence, chat opening, membership, and administrator flags
 were inspected through Purple's live D-Bus API and persisted buddy list.
+
+## 2026-07-19 Debian 13 packaging run
+
+Commit `2837e31` was built twice from separate paths in a clean Debian 13
+amd64 root using the checksum-pinned upstream Rust 1.95 toolchain. Both builds
+ran offline against the vendored Cargo graph and passed all three C/Purple test
+executables. The source archives, runtime packages, and debug-symbol packages
+were byte-identical:
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `signal-purple_0.1.0.orig.tar.xz` | `bc31796da82d768390e70852f1d82aee689e0c71ceb8fba8924e521925de7f63` |
+| `signal-purple_0.1.0-1_amd64.deb` | `05585febca056af1adb5c91612669b49265cc6bdf17b02e2e7ff4a56b2355251` |
+| `signal-purple-dbgsym_0.1.0-1_amd64.deb` | `b498aabb25f813256ce4eff5bc501d6ad700c1fc4af248072279a5e30364ba16` |
+
+The generated DEP-5 file inventories all 385 vendored packages. Lintian
+reported the expected initial-upload warning and one informational Rust
+FORTIFY note, with no package error. Runtime dependency resolution and the
+private `$ORIGIN/signal-purple` core-library path were also verified.

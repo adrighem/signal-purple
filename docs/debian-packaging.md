@@ -49,3 +49,6 @@ resolver cannot satisfy the declared Rust 1.94 minimum from stable alone.
 Runtime dependencies include libpurple 2, GLib, libsecret, OpenSSL, and the
 native libraries linked by the bundled SQLCipher backend. Use `dpkg-shlibdeps`
 on both installed shared libraries rather than maintaining that list manually.
+
+The reproducibility evidence and artifact hashes for the current audited run
+are recorded in [live-validation.md](live-validation.md).
