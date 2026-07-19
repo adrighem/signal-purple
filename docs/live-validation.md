@@ -46,19 +46,29 @@ before the exactly-once release gate can be checked.
 
 ## 2026-07-19 Debian 13 packaging run
 
-Commit `2837e31` was built twice from separate paths in a clean Debian 13
-amd64 root using the checksum-pinned upstream Rust 1.95 toolchain. Both builds
-ran offline against the vendored Cargo graph and passed all three C/Purple test
-executables. The source archives, runtime packages, and debug-symbol packages
-were byte-identical:
+Commit `9f68633` was archived and built twice from separate paths in a clean
+Debian 13 amd64 root using the checksum-pinned upstream Rust 1.95 toolchain.
+Both builds ran offline against the vendored Cargo graph and passed all three
+C/Purple test executables. The source archives, runtime packages, and
+debug-symbol packages were byte-identical:
 
 | Artifact | SHA-256 |
 | --- | --- |
-| `signal-purple_0.1.0.orig.tar.xz` | `bc31796da82d768390e70852f1d82aee689e0c71ceb8fba8924e521925de7f63` |
-| `signal-purple_0.1.0-1_amd64.deb` | `05585febca056af1adb5c91612669b49265cc6bdf17b02e2e7ff4a56b2355251` |
-| `signal-purple-dbgsym_0.1.0-1_amd64.deb` | `b498aabb25f813256ce4eff5bc501d6ad700c1fc4af248072279a5e30364ba16` |
+| `signal-purple_0.1.0.orig.tar.xz` | `db908c615b5a737742500a0b97bbaaa33d62fad6215141ee7b36c8607459d4ab` |
+| `signal-purple_0.1.0-1_amd64.deb` | `ac54b7eae073b184f6457fcb6135dbd50bf5aeb3730d1af8cf4cd7cb89ce8272` |
+| `signal-purple-dbgsym_0.1.0-1_amd64.deb` | `dc0dbc31af7566045be2b486b15643a0ce80c5aa6240739d1956e5ff57b6a829` |
 
 The generated DEP-5 file inventories all 385 vendored packages. Lintian
-reported the expected initial-upload warning and one informational Rust
-FORTIFY note, with no package error. Runtime dependency resolution and the
-private `$ORIGIN/signal-purple` core-library path were also verified.
+reported only the expected initial-upload warning. Installing the runtime
+package back into the clean root, loading the installed plugin with the
+headless probe, runtime dependency resolution, and the private
+`$ORIGIN/signal-purple` core-library path all passed.
+
+## 2026-07-19 hardening run
+
+Commit `9f68633` passed Rust formatting, Clippy with warnings denied, 15 Rust
+unit tests, the warning-as-error C build, all three C/Purple tests, and a second
+C run under AddressSanitizer and UndefinedBehaviorSanitizer. GitHub reported no
+open Dependabot, code-scanning, or secret-scanning alerts. The optimized ABI-v4
+plugin was installed system-wide, Pidgin loaded both installed libraries, and
+the existing account reconnected with 46 buddies and 11 group chats intact.

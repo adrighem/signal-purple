@@ -22,12 +22,12 @@ is linked from the release issue or release pull request.
 
 ## Build and supply chain
 
-- [ ] Release inputs are pinned and available without mutable Git references.
-- [ ] A clean Debian 13 environment produces the documented package.
-- [ ] Two builds produce identical binary package contents.
-- [ ] CI passes formatting, warnings, tests, ABI checks, and packaging checks.
+- [x] Release inputs are pinned and available without mutable Git references.
+- [x] A clean Debian 13 environment produces the documented package.
+- [x] Two builds produce identical binary package contents.
+- [x] CI passes formatting, warnings, tests, ABI checks, and packaging checks.
 - [ ] The source archive, package, checksums, SBOM, and signature agree.
-- [ ] No known unresolved release-blocking vulnerability remains.
+- [x] No known unresolved release-blocking vulnerability remains.
 
 ## Interoperability
 
@@ -45,15 +45,15 @@ is linked from the release issue or release pull request.
 - [ ] Network loss, reconnect, rate limits, and remote protocol errors recover.
 - [ ] Corrupt state, unavailable key storage, and full disk fail safely.
 - [ ] Sensitive values never appear in logs, crashes, or generated diagnostics.
-- [ ] ABI inputs have sanitizer and malformed-input coverage.
+- [x] ABI inputs have sanitizer and malformed-input coverage.
 - [ ] Upgrade and rollback procedures preserve or explicitly migrate state.
 - [ ] The release candidate completes its soak with no unresolved regression.
 
 ## Documentation and release
 
-- [ ] Installation, upgrade, rollback, relinking, and removal are documented.
-- [ ] Security boundaries, data retention, limitations, and support are current.
-- [ ] The release-please pull request matches the audited changelog and version.
+- [x] Installation, upgrade, rollback, relinking, and removal are documented.
+- [x] Security boundaries, data retention, limitations, and support are current.
+- [x] The release-please pull request matches the audited changelog and version.
 - [ ] The signed release tag identifies the reviewed commit.
 - [ ] Release artifacts are reproduced and smoke-tested from that tag.
-- [ ] A rollback decision and recovery path exist before publication.
+- [x] A rollback decision and recovery path exist before publication.

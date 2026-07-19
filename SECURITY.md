@@ -20,6 +20,8 @@ updates when Signal changes its service or cryptographic stack.
 ## Scope
 
 The project protects the local Presage database with SQLCipher and stores the
-passphrase through libsecret. It does not yet expose a complete safety-number
-verification workflow and has not undergone an independent audit. Read the
-[security model](docs/security-model.md) for explicit guarantees and gaps.
+passphrase through libsecret. Identity replacements have a warning and
+acceptance workflow, but numeric safety-number comparison still belongs in an
+official Signal client. The project has not undergone an independent audit.
+Read the [security model](docs/security-model.md) for explicit guarantees and
+gaps.
