@@ -30,6 +30,25 @@ The plugin waits for Presage's pending queue to empty before allowing sends.
 Large initial syncs can take time. A backend error should appear in Purple; use
 sanitized debug output when reporting it.
 
+## The Signal buddy list is empty
+
+Reconnect the Signal account and allow the requested contact synchronization
+to finish. The plugin logs an identifier-free summary such as `Applied contact
+snapshot: 46 contacts, 46 created, 0 removed` when run with `pidgin --debug`.
+Do not include contact identifiers in a public report.
+
+Signal does not expose contact presence. Current builds mark synchronized
+contacts reachable while the account is connected so Pidgin's default offline
+filter does not hide the entire `Signal` group. Older builds require **View >
+Show Offline Buddies**.
+
+## Messages sent while Pidgin was offline are missing
+
+On reconnect, the plugin drains envelopes still queued by Signal for this
+linked device. It cannot request arbitrary older conversation history or copy
+history from the primary phone. Conversation logging is deliberately disabled,
+so previously displayed messages are not reconstructed from Purple logs.
+
 ## Sending to a raw identifier fails
 
 Direct chats use canonical Signal service identifiers synchronized into the

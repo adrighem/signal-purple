@@ -22,6 +22,8 @@
   request synchronized 46 contacts and projected all 46 as visible Purple
   buddies. Alias-update and stale-delete behavior remains test-only. Groups,
   typing, receipts, and second-device sync remain pending.
+- User documentation now distinguishes queued offline delivery from unsupported
+  historical import and records the Flare contact-sync comparison.
 
 The installed maintainer package did not include its documented triage script
 or reference files, so this run was captured manually and `state.json` was left

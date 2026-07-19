@@ -29,7 +29,8 @@ validation should test, with non-production accounts:
 4. group send/receive;
 5. typing and delivery receipts;
 6. contact buddy-list creation, alias updates, and stale-contact removal;
-7. primary-phone and second linked-device synchronization.
+7. delivery of messages queued while the linked device is offline;
+8. primary-phone and second linked-device synchronization.
 
 No revision should be called compatible until those checks pass.
 Completed and outstanding scenarios are recorded in

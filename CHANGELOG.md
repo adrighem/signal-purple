@@ -16,3 +16,5 @@ semantic versioning after the first stable release.
   receipts.
 - Versioned polling C ABI with owned event memory and deterministic teardown.
 - C utility tests, Rust unit tests, and a headless libpurple plugin probe.
+- Documentation of queued offline-message delivery, contact-sync diagnostics,
+  and the corresponding Flare design.

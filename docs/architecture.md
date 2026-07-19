@@ -47,7 +47,10 @@ explicit event destruction.
    account connected.
 
 This ordering prevents sends before queued profile, session, and sender-key
-updates have been applied.
+updates have been applied. The queue contains envelopes addressed to this
+linked device, including messages Signal still has queued after it was offline.
+It is not a general conversation-history API and cannot retrieve arbitrary
+older messages from the primary phone or Signal service.
 
 ## Message mapping
 
@@ -68,6 +71,25 @@ updates have been applied.
 - Delivery receipts are sent when Presage marks an envelope as needing one.
 - Purple 2 has no robust per-message receipt update API, so received receipts
   are currently consumed without a misleading UI projection.
+
+## Flare comparison
+
+Flare uses the same pinned Presage revision but presents contacts and groups as
+conversation threads instead of a presence-oriented buddy list. Its UI exposes
+a manual
+[`sync-contacts` action](https://gitlab.com/schmiddi-on-mobile/flare/-/blob/484450e4cf8a34992a68df753a872e530a5b3d2c/src/gui/window.rs#L353)
+that delegates to Presage's contact request.
+[After the receive queue is empty](https://gitlab.com/schmiddi-on-mobile/flare/-/blob/484450e4cf8a34992a68df753a872e530a5b3d2c/src/backend/manager.rs#L106),
+Flare initializes channels from its local thread store. Its
+[`contacts()` projection](https://gitlab.com/schmiddi-on-mobile/flare-backend/-/blob/8f9f178cb5ec9040d73fdd7c70a3ca3a5bcdcb72/flare-store/src/lib.rs#L133)
+also enriches synchronized contact names with stored Signal profiles.
+
+signal-purple applies the same essential contact-request step automatically on
+every connection. It then reconciles complete snapshots into plugin-managed
+Purple buddies. Because Purple normally hides offline buddies and Signal has no
+presence API, synchronized contacts are marked reachable while the account is
+connected. Contact names and synchronized phone numbers are used as aliases;
+profile enrichment is not implemented yet.
 
 ## Deliberate boundaries
 

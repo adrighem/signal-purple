@@ -13,10 +13,11 @@ service, and an isolated temporary Pidgin profile.
 | --- | --- |
 | Fresh linked-device QR flow | Passed |
 | Encrypted-store disconnect and reconnect | Passed without a new QR |
+| Messages queued while the linked device is offline | Implemented by the receive queue; not separately exercised live |
 | Primary phone to plugin direct-message synchronization | Passed |
 | Plugin to primary phone direct message | Passed |
-| Contact buddy-list creation and refresh | Passed with 46 contacts while Pidgin's offline filter remained disabled |
-| Contact alias update and stale deletion | Covered by deterministic reconciliation tests; not mutated live |
+| Contact buddy-list creation and refresh | Passed with 46 visible contacts while Pidgin's offline filter remained disabled |
+| Contact alias update and stale deletion | Implemented; stale-deletion decisions are unit-tested, but neither path was mutated live |
 | Group send/receive | Not exercised |
 | Typing and delivery receipts | Not exercised |
 | Second linked-device synchronization | Not exercised |

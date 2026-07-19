@@ -1,8 +1,10 @@
 # signal-purple
 
 > **Pre-alpha and unofficial.** This project is not affiliated with or
-> supported by Signal. It has not yet completed a live Signal interoperability
-> test and should not be treated as a substitute for an official Signal client.
+> supported by Signal. Only the scenarios listed in
+> [live validation](docs/live-validation.md) have been tested against the
+> production service. Do not treat this as a substitute for an official Signal
+> client.
 
 `signal-purple` is an experimental Signal protocol plugin for Pidgin and other
 libpurple 2 clients. It links as a secondary Signal device, keeps Signal
@@ -14,12 +16,12 @@ to the Purple plugin.
 | Capability | Status |
 | --- | --- |
 | Purple 2.14 plugin discovery/load | Implemented and tested |
-| Fresh-store linked-device QR flow | Live dedicated-account test passed 2026-07-19 |
-| Existing linked-device reconnect | Live dedicated-account test passed 2026-07-19 |
+| Fresh-store linked-device QR flow | Live isolated-profile test passed 2026-07-19 |
+| Existing linked-device reconnect | Live isolated-profile test passed 2026-07-19 |
 | SQLCipher store with libsecret key | Implemented |
-| Signal contact buddy-list create/update/delete | Live 46-contact create/refresh test passed 2026-07-19; update/delete unit-tested |
+| Signal contact buddy-list create/update/delete | Implemented; 46-contact create/refresh live-tested and snapshot reconciliation unit-tested |
 | Group metadata synchronization | Implemented; live test pending |
-| Plain-text direct messages | Live dedicated-account test passed 2026-07-19 |
+| Plain-text direct messages | Live isolated-profile test passed 2026-07-19 |
 | Basic group messages | Implemented; live test pending |
 | Typing indicators | Implemented; live test pending |
 | Delivery receipts | Sent by the backend; Purple 2 has no receipt UI |
@@ -143,6 +145,10 @@ database or secret requires linking a new device.
   not provide phone-number discovery or mutate Signal's remote contact data.
 - Message formatting is reduced to plain text. Incoming text is escaped before
   entering Purple; outgoing Purple markup is stripped.
+- Reconnecting drains messages queued by Signal for this linked device until
+  Presage reports `QueueEmpty`. The plugin cannot request arbitrary older
+  conversation history from the phone or service, and it does not import an
+  official client's local message database.
 - Disappearing-message timers and remote deletions are not projected into
   Purple. The plugin disables logging for every Signal conversation, but Purple
   still stores contact aliases and stable Signal identifiers in plaintext in
