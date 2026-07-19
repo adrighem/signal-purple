@@ -1,6 +1,12 @@
 /build/
 /build-*/
+/obj-*/
+/dist/
 /rust/signal-core/target/
+/debian/.debhelper/
+/debian/cargo-home/
+/debian/cargo-target/
+/debian/signal-purple/
 /.cache/
 compile_commands.json
 *.swp

@@ -1,0 +1,30 @@
+#!/usr/bin/make -f
+
+export DH_VERBOSE = 1
+export DEB_BUILD_MAINT_OPTIONS = hardening=+all reproducible=+fixfilepath
+export CARGO_HOME = $(CURDIR)/debian/cargo-home
+export CARGO_NET_OFFLINE = true
+export RUSTFLAGS = --remap-path-prefix=$(CURDIR)=/usr/src/signal-purple \
+	-C link-arg=-Wl,-z,relro -C link-arg=-Wl,-z,now
+
+%:
+	dh $@ --buildsystem=cmake+ninja
+
+override_dh_auto_configure:
+	dh_auto_configure -- \
+		-DCMAKE_BUILD_TYPE=RelWithDebInfo \
+		-DCMAKE_INSTALL_PREFIX=/usr \
+		-DSIGNAL_CARGO_TARGET_DIR=$(CURDIR)/debian/cargo-target
+
+override_dh_auto_build:
+	ionice -c 3 nice dh_auto_build --max-parallel=2
+
+override_dh_auto_test:
+	ionice -c 3 nice dh_auto_test
+
+override_dh_auto_clean:
+	dh_auto_clean
+	rm -rf debian/cargo-home debian/cargo-target
+
+override_dh_clean:
+	dh_clean -Xvendor

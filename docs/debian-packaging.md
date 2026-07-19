@@ -15,10 +15,31 @@ directory reported by:
 pkg-config --variable=plugindir purple
 ```
 
-The current Cargo graph includes Git sources and therefore is not yet suitable
-for a network-isolated Debian build. A release source artifact must vendor the
-locked Rust graph and configure Cargo source replacement. Do not claim official
-Debian packaging until that artifact builds in a clean Debian 13 environment.
+The release source artifact contains the complete locked Cargo graph. Generate
+it from a clean release commit with:
+
+```sh
+ionice -c 3 nice scripts/make-source-archive.sh HEAD
+```
+
+The script uses `cargo vendor`, writes Cargo source replacement into the
+archive, normalizes metadata to the commit timestamp, and emits a deterministic
+`.orig.tar.xz`. Cargo is forced offline by the Debian rules, and CMake adds
+`--offline` whenever the source tree contains `vendor/`.
+
+Build the package by extracting the archive, copying `debian/` from the same
+commit if needed, and running:
+
+```sh
+ionice -c 3 nice dpkg-buildpackage --build=binary --no-sign
+```
+
+Release evidence must come from a clean Debian 13 amd64 environment. A build on
+a newer Debian host is useful only as a development check. The current protocol
+graph requires Rust 1.94 while Debian 13 supplies Rust 1.85, so the package
+currently requires an audited backport of the pinned Rust toolchain. This is a
+release blocker until the backport is reproducible or the graph supports the
+stock toolchain.
 
 Runtime dependencies include libpurple 2, GLib, libsecret, OpenSSL, and the
 native libraries linked by the bundled SQLCipher backend. Use `dpkg-shlibdeps`

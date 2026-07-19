@@ -1,0 +1,29 @@
+Format: https://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
+Upstream-Name: signal-purple
+Source: https://github.com/adrighem/signal-purple
+
+Files: *
+Copyright: 2026 Vincent van Adrighem
+License: GPL-3+
+ This program is free software: you can redistribute it and/or modify it under
+ the terms of the GNU General Public License as published by the Free Software
+ Foundation, either version 3 of the License, or any later version.
+ .
+ On Debian systems, the complete text of the GNU General Public License version
+ 3 is available in /usr/share/common-licenses/GPL-3.
+
+Files: rust/signal-core/*
+Copyright: 2026 Vincent van Adrighem
+License: AGPL-3
+ This program is free software: you can redistribute it and/or modify it under
+ the terms of the GNU Affero General Public License as published by the Free
+ Software Foundation, version 3.
+ .
+ On Debian systems, the complete text of the GNU Affero General Public License
+ version 3 is available in /usr/share/common-licenses/AGPL-3.
+
+Files: vendor/*
+Copyright: the respective upstream authors
+License: various
+ Each vendored crate retains its upstream license files and Cargo metadata.
+ THIRD_PARTY_LICENSES.md records the locked graph's declared licenses.

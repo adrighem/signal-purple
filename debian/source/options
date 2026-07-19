@@ -1,0 +1,4 @@
+tar-ignore = .github
+tar-ignore = build
+tar-ignore = dist
+tar-ignore = rust/signal-core/target
