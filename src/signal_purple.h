@@ -5,6 +5,7 @@
 #include <glib.h>
 #include <purple.h>
 
+#include "contact_sync.h"
 #include "signal_core.h"
 
 #define SIGNAL_PLUGIN_ID "prpl-adrighem-signal"
@@ -17,9 +18,13 @@ typedef struct {
     GHashTable *group_ids_by_key;
     GHashTable *group_keys_by_id;
     GHashTable *group_titles_by_key;
+    SignalContactSync contact_sync;
     GBytes *link_qr;
     char *store_path;
     guint next_group_id;
+    guint contact_sync_contacts;
+    guint contact_sync_created;
+    guint contact_sync_removed;
     guint64 next_request_id;
     gboolean closing;
 } SignalConnection;

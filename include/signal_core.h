@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define SIGNAL_CORE_ABI_VERSION 1u
+#define SIGNAL_CORE_ABI_VERSION 2u
 
 typedef struct SignalCore SignalCore;
 
@@ -33,7 +33,9 @@ typedef enum {
     SIGNAL_EVENT_RECEIPT = 8,
     SIGNAL_EVENT_NOTICE = 9,
     SIGNAL_EVENT_ERROR = 10,
-    SIGNAL_EVENT_DISCONNECTED = 11
+    SIGNAL_EVENT_DISCONNECTED = 11,
+    SIGNAL_EVENT_CONTACT_SYNC_BEGIN = 12,
+    SIGNAL_EVENT_CONTACT_SYNC_END = 13
 } SignalEventKind;
 
 typedef enum {

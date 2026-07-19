@@ -52,7 +52,13 @@ updates have been applied.
 ## Message mapping
 
 - Canonical Signal service identifiers are Purple buddy names. Synced profile
-  names are aliases only.
+  names are server aliases only. Explicit snapshot boundaries let Purple apply
+  contact creates and updates before removing stale managed entries. User-made
+  buddies without the managed marker are never swept. The backend explicitly
+  requests a contact sync after opening the receive stream, then refreshes the
+  projection when Presage reports synchronized contacts. Because Signal does
+  not expose presence, contacts are marked reachable while the linked account
+  is connected so Purple's default offline filter does not hide them.
 - Group master keys remain private 32-byte backend identifiers, represented as
   64 hex characters only across the internal ABI. They are never used as
   Purple titles or join metadata. Each connection assigns a collision-free

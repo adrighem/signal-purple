@@ -54,6 +54,7 @@ set_target_properties(signal-core PROPERTIES IMPORTED_LOCATION
 add_dependencies(signal-core signal-core-build)
 
 add_library(signal-purple MODULE
+    src/contact_sync.c
     src/connection.c
     src/plugin.c
     src/util.c)
@@ -93,6 +94,17 @@ if(BUILD_TESTING)
     target_link_libraries(test-util PRIVATE
         PkgConfig::PURPLE PkgConfig::GLIB PkgConfig::LIBSECRET)
     add_test(NAME util COMMAND test-util)
+
+    add_executable(test-contact-sync
+        tests/test_contact_sync.c
+        src/contact_sync.c)
+    target_compile_features(test-contact-sync PRIVATE c_std_11)
+    target_compile_options(test-contact-sync PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wformat=2 -Wshadow)
+    target_include_directories(test-contact-sync PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(test-contact-sync PRIVATE PkgConfig::GLIB)
+    add_test(NAME contact-sync COMMAND test-contact-sync)
 
     add_executable(plugin-probe tests/plugin_probe.c)
     target_compile_features(plugin-probe PRIVATE c_std_11)

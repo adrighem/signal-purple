@@ -4,6 +4,8 @@
 #include <errno.h>
 #include <libsecret/secret.h>
 
+#define SIGNAL_SYNCED_BUDDY_KEY "signal-purple-synced-contact"
+
 static guint
 signal_group_id(SignalConnection *connection, const char *group_key,
                 const char *title)
@@ -94,17 +96,34 @@ signal_show_link_qr(SignalConnection *connection, const SignalEvent *event)
 }
 
 static void
+signal_begin_contact_sync(SignalConnection *connection)
+{
+    signal_contact_sync_begin(&connection->contact_sync);
+    connection->contact_sync_contacts = 0;
+    connection->contact_sync_created = 0;
+    connection->contact_sync_removed = 0;
+}
+
+static void
 signal_add_contact(SignalConnection *connection, const SignalEvent *event)
 {
     PurpleAccount *account;
     PurpleBuddy *buddy;
     PurpleGroup *group;
+    gboolean managed;
+    const char *alias;
 
     if (event->peer_id == NULL || event->peer_id[0] == '\0')
         return;
 
+    connection->contact_sync_contacts++;
+    signal_contact_sync_mark(&connection->contact_sync, event->peer_id);
     account = purple_connection_get_account(connection->gc);
     buddy = purple_find_buddy(account, event->peer_id);
+    managed =
+        buddy != NULL &&
+        purple_blist_node_get_bool(PURPLE_BLIST_NODE(buddy),
+                                   SIGNAL_SYNCED_BUDDY_KEY);
     if (buddy == NULL) {
         group = purple_find_group("Signal");
         if (group == NULL) {
@@ -113,10 +132,53 @@ signal_add_contact(SignalConnection *connection, const SignalEvent *event)
         }
         buddy = purple_buddy_new(account, event->peer_id, NULL);
         purple_blist_add_buddy(buddy, NULL, group, NULL);
+        managed = TRUE;
+        connection->contact_sync_created++;
     }
 
-    if (event->title != NULL && event->title[0] != '\0')
-        purple_blist_server_alias_buddy(buddy, event->title);
+    if (managed)
+        purple_blist_node_set_bool(PURPLE_BLIST_NODE(buddy),
+                                   SIGNAL_SYNCED_BUDDY_KEY, TRUE);
+    alias = event->title != NULL && event->title[0] != '\0'
+                ? event->title
+                : event->text;
+    purple_blist_server_alias_buddy(
+        buddy, alias != NULL && alias[0] != '\0' ? alias : NULL);
+    /* Signal has no contact presence. Treat synchronized contacts as reachable
+     * while the linked account is connected so Purple does not hide the whole
+     * address book behind its offline-buddy filter. */
+    purple_prpl_got_user_status(account, event->peer_id, "available", NULL);
+}
+
+static void
+signal_end_contact_sync(SignalConnection *connection)
+{
+    PurpleAccount *account;
+    GSList *buddies;
+
+    if (!connection->contact_sync.active)
+        return;
+
+    account = purple_connection_get_account(connection->gc);
+    buddies = purple_find_buddies(account, NULL);
+    for (GSList *item = buddies; item != NULL; item = item->next) {
+        PurpleBuddy *buddy = item->data;
+        PurpleBlistNode *node = PURPLE_BLIST_NODE(buddy);
+
+        if (purple_blist_node_get_bool(node, SIGNAL_SYNCED_BUDDY_KEY) &&
+            signal_contact_sync_should_remove(
+                &connection->contact_sync, purple_buddy_get_name(buddy))) {
+            purple_blist_remove_buddy(buddy);
+            connection->contact_sync_removed++;
+        }
+    }
+    g_slist_free(buddies);
+    signal_contact_sync_end(&connection->contact_sync);
+    purple_debug_info(
+        "signal-purple",
+        "Applied contact snapshot: %u contacts, %u created, %u removed\n",
+        connection->contact_sync_contacts, connection->contact_sync_created,
+        connection->contact_sync_removed);
 }
 
 static PurpleConversation *
@@ -209,11 +271,17 @@ signal_handle_event(SignalConnection *connection, const SignalEvent *event)
         purple_request_close_with_handle(connection);
         g_clear_pointer(&connection->link_qr, g_bytes_unref);
         purple_connection_update_progress(connection->gc,
-                                          "Signal messages synchronized", 3, 3);
+                                          "Signal messages synchronized", 2, 3);
         purple_connection_set_state(connection->gc, PURPLE_CONNECTED);
+        break;
+    case SIGNAL_EVENT_CONTACT_SYNC_BEGIN:
+        signal_begin_contact_sync(connection);
         break;
     case SIGNAL_EVENT_CONTACT:
         signal_add_contact(connection, event);
+        break;
+    case SIGNAL_EVENT_CONTACT_SYNC_END:
+        signal_end_contact_sync(connection);
         break;
     case SIGNAL_EVENT_GROUP:
         if (event->chat_id != NULL)
@@ -353,6 +421,7 @@ signal_login(PurpleAccount *account)
         g_direct_hash, g_direct_equal, NULL, g_free);
     connection->group_titles_by_key = g_hash_table_new_full(
         g_str_hash, g_str_equal, g_free, g_free);
+    signal_contact_sync_init(&connection->contact_sync);
     connection->next_group_id = 1;
     connection->next_request_id = 1;
 
@@ -367,6 +436,7 @@ signal_login(PurpleAccount *account)
         g_hash_table_unref(connection->group_ids_by_key);
         g_hash_table_unref(connection->group_keys_by_id);
         g_hash_table_unref(connection->group_titles_by_key);
+        signal_contact_sync_clear(&connection->contact_sync);
         g_free(connection->store_path);
         g_free(connection);
         purple_connection_error_reason(gc, PURPLE_CONNECTION_ERROR_OTHER_ERROR,
@@ -407,6 +477,7 @@ signal_close(PurpleConnection *gc)
     g_hash_table_unref(connection->group_ids_by_key);
     g_hash_table_unref(connection->group_keys_by_id);
     g_hash_table_unref(connection->group_titles_by_key);
+    signal_contact_sync_clear(&connection->contact_sync);
     g_free(connection->store_path);
     g_free(connection);
 }

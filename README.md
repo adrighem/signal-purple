@@ -14,11 +14,12 @@ to the Purple plugin.
 | Capability | Status |
 | --- | --- |
 | Purple 2.14 plugin discovery/load | Implemented and tested |
-| Fresh-store linked-device QR flow | Implemented; live account test pending |
-| Existing linked-device reconnect | Implemented; live account test pending |
+| Fresh-store linked-device QR flow | Live dedicated-account test passed 2026-07-19 |
+| Existing linked-device reconnect | Live dedicated-account test passed 2026-07-19 |
 | SQLCipher store with libsecret key | Implemented |
-| Contact and group synchronization | Implemented; live test pending |
-| Plain-text direct messages | Implemented; live test pending |
+| Signal contact buddy-list create/update/delete | Live 46-contact create/refresh test passed 2026-07-19; update/delete unit-tested |
+| Group metadata synchronization | Implemented; live test pending |
+| Plain-text direct messages | Live dedicated-account test passed 2026-07-19 |
 | Basic group messages | Implemented; live test pending |
 | Typing indicators | Implemented; live test pending |
 | Delivery receipts | Sent by the backend; Purple 2 has no receipt UI |
@@ -132,6 +133,14 @@ database or secret requires linking a new device.
 - Synchronized groups open when their first message arrives. Proactively
   browsing or opening a group is not implemented. Closing a Purple chat never
   leaves the Signal group.
+- Synchronized contacts are projected into Purple's `Signal` buddy-list group.
+  Each connection requests a fresh contact sync from the primary phone.
+  Complete snapshots create missing buddies, update server aliases, and remove
+  previously synchronized contacts that are no longer present. Local aliases
+  remain local. A synchronized phone number is the display fallback when no
+  contact name is available. Signal does not expose presence, so synchronized
+  contacts are shown as reachable while the account is connected. This does
+  not provide phone-number discovery or mutate Signal's remote contact data.
 - Message formatting is reduced to plain text. Incoming text is escaped before
   entering Purple; outgoing Purple markup is stripped.
 - Disappearing-message timers and remote deletions are not projected into
@@ -147,6 +156,7 @@ database or secret requires linking a new device.
 - [Architecture](docs/architecture.md)
 - [Security model](docs/security-model.md)
 - [Compatibility policy](docs/compatibility.md)
+- [Live validation](docs/live-validation.md)
 - [Troubleshooting](docs/troubleshooting.md)
 - [Roadmap](ROADMAP.md)
 - [Licensing](docs/licensing.md)

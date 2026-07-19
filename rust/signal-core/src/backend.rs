@@ -22,8 +22,9 @@ use tokio::sync::{mpsc as tokio_mpsc, watch};
 use zeroize::Zeroizing;
 
 use crate::event::{
-    EVENT_CONTACT, EVENT_DISCONNECTED, EVENT_GROUP, EVENT_GROUP_MESSAGE, EVENT_LINK_QR,
-    EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT, EVENT_TYPING, Event, FLAG_OUTGOING,
+    EVENT_CONTACT, EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED,
+    EVENT_GROUP, EVENT_GROUP_MESSAGE, EVENT_LINK_QR, EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT,
+    EVENT_TYPING, Event, FLAG_OUTGOING,
 };
 
 pub struct Config {
@@ -245,6 +246,14 @@ async fn receive_and_command_loop(
         }
     };
     pin_mut!(messages);
+
+    if let Err(error) = manager.request_contacts().await {
+        sink.emit(Event::error(
+            format!("Could not request Signal contact synchronization: {error}"),
+            false,
+        ));
+    }
+
     let mut synchronized = false;
 
     loop {
@@ -310,18 +319,32 @@ async fn handle_command_interruptibly(
 
 async fn emit_store_snapshot(manager: &Manager<SqliteStore, Registered>, sink: &EventSink) {
     match manager.store().contacts().await {
-        Ok(contacts) => {
-            for contact in contacts.flatten() {
-                let peer = ServiceId::Aci(contact.uuid.into()).service_id_string();
+        Ok(contacts) => match contacts.collect::<Result<Vec<_>, _>>() {
+            Ok(contacts) => {
                 sink.emit(Event {
-                    kind: EVENT_CONTACT,
-                    peer_id: Some(peer),
-                    title: (!contact.name.is_empty()).then_some(contact.name),
-                    text: contact.phone_number.map(|number| number.to_string()),
+                    kind: EVENT_CONTACT_SYNC_BEGIN,
+                    ..Event::default()
+                });
+                for contact in contacts {
+                    let peer = ServiceId::Aci(contact.uuid.into()).service_id_string();
+                    sink.emit(Event {
+                        kind: EVENT_CONTACT,
+                        peer_id: Some(peer),
+                        title: (!contact.name.is_empty()).then_some(contact.name),
+                        text: contact.phone_number.map(|number| number.to_string()),
+                        ..Event::default()
+                    });
+                }
+                sink.emit(Event {
+                    kind: EVENT_CONTACT_SYNC_END,
                     ..Event::default()
                 });
             }
-        }
+            Err(error) => sink.emit(Event::error(
+                format!("Could not decode synchronized Signal contacts: {error}"),
+                false,
+            )),
+        },
         Err(error) => sink.emit(Event::error(
             format!("Could not read synchronized Signal contacts: {error}"),
             false,
@@ -329,16 +352,22 @@ async fn emit_store_snapshot(manager: &Manager<SqliteStore, Registered>, sink: &
     }
 
     match manager.store().groups().await {
-        Ok(groups) => {
-            for (key, group) in groups.flatten() {
-                sink.emit(Event {
-                    kind: EVENT_GROUP,
-                    chat_id: Some(hex::encode(key)),
-                    title: Some(group.title),
-                    ..Event::default()
-                });
+        Ok(groups) => match groups.collect::<Result<Vec<_>, _>>() {
+            Ok(groups) => {
+                for (key, group) in groups {
+                    sink.emit(Event {
+                        kind: EVENT_GROUP,
+                        chat_id: Some(hex::encode(key)),
+                        title: Some(group.title),
+                        ..Event::default()
+                    });
+                }
             }
-        }
+            Err(error) => sink.emit(Event::error(
+                format!("Could not decode synchronized Signal groups: {error}"),
+                false,
+            )),
+        },
         Err(error) => sink.emit(Event::error(
             format!("Could not read synchronized Signal groups: {error}"),
             false,

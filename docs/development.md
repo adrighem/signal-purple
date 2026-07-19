@@ -31,9 +31,9 @@ ctest --test-dir build --output-on-failure
 ```
 
 The C tests include a headless libpurple core that probes and loads the actual
-plugin module plus focused markup handling. The Rust tests cover owned ABI
-payloads, FFI error outputs, bounded event overflow, QR PNG generation, and
-group-key validation. Live compatibility tests require dedicated
+plugin module plus focused markup and contact-snapshot reconciliation. The
+Rust tests cover owned ABI payloads, FFI error outputs, bounded event overflow,
+QR PNG generation, and group-key validation. Live compatibility tests require dedicated
 non-production Signal accounts and are not run for untrusted pull requests.
 
 ## C rules

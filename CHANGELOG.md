@@ -11,6 +11,8 @@ semantic versioning after the first stable release.
 - Purple 2.14 protocol plugin with direct and group text-message routing.
 - Pinned Presage Rust backend with linked-device QR provisioning.
 - SQLCipher state protected by a libsecret-managed passphrase.
-- Contact/group sync, typing indicators, and delivery receipts.
+- Automatic contact refresh plus authoritative buddy-list
+  create/update/delete, group metadata sync, typing indicators, and delivery
+  receipts.
 - Versioned polling C ABI with owned event memory and deterministic teardown.
 - C utility tests, Rust unit tests, and a headless libpurple plugin probe.
