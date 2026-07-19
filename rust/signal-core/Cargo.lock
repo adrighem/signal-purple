@@ -2024,7 +2024,7 @@ dependencies = [
 [[package]]
 name = "presage"
 version = "0.8.0-dev"
-source = "git+https://github.com/whisperfish/presage.git?rev=63482efd0cbdc0780baf0650517c7d55f1cac05d#63482efd0cbdc0780baf0650517c7d55f1cac05d"
+source = "git+https://github.com/adrighem/presage.git?rev=c8ee98cf944897812d9375effb98657f537e8b09#c8ee98cf944897812d9375effb98657f537e8b09"
 dependencies = [
  "base64",
  "bytes",
@@ -2046,7 +2046,7 @@ dependencies = [
 [[package]]
 name = "presage-store-sqlite"
 version = "0.8.0-dev"
-source = "git+https://github.com/whisperfish/presage.git?rev=63482efd0cbdc0780baf0650517c7d55f1cac05d#63482efd0cbdc0780baf0650517c7d55f1cac05d"
+source = "git+https://github.com/adrighem/presage.git?rev=c8ee98cf944897812d9375effb98657f537e8b09#c8ee98cf944897812d9375effb98657f537e8b09"
 dependencies = [
  "async-trait",
  "bytes",
@@ -2765,6 +2765,7 @@ dependencies = [
  "presage",
  "presage-store-sqlite",
  "qrcode",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
  "zeroize",

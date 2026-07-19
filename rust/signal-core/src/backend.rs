@@ -7,6 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use futures::{StreamExt, channel::oneshot, pin_mut};
 use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::content::{Content, ContentBody, DataMessage, GroupContextV2};
+use presage::libsignal_service::groups_v2::Role;
 use presage::libsignal_service::protocol::ServiceId;
 use presage::model::identity::OnNewIdentity;
 use presage::model::messages::Received;
@@ -18,13 +19,15 @@ use presage::{Manager, manager::Registered};
 use presage_store_sqlite::SqliteStore;
 use qrcode::QrCode;
 use qrcode::types::Color;
+use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc as tokio_mpsc, watch};
 use zeroize::Zeroizing;
 
 use crate::event::{
     EVENT_CONTACT, EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED,
-    EVENT_GROUP, EVENT_GROUP_MESSAGE, EVENT_LINK_QR, EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT,
-    EVENT_TYPING, Event, FLAG_OUTGOING,
+    EVENT_GROUP, EVENT_GROUP_MEMBER, EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN,
+    EVENT_GROUP_SYNC_END, EVENT_LINK_QR, EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT, EVENT_TYPING,
+    Event, FLAG_OUTGOING,
 };
 
 pub struct Config {
@@ -234,8 +237,7 @@ async fn receive_and_command_loop(
     ready: Arc<AtomicBool>,
 ) -> Result<(), String> {
     let messages = {
-        let receive = manager.receive_messages();
-        pin_mut!(receive);
+        let mut receive = Box::pin(manager.receive_messages());
         tokio::select! {
             result = &mut receive => {
                 result.map_err(|error| {
@@ -255,21 +257,35 @@ async fn receive_and_command_loop(
     }
 
     let mut synchronized = false;
+    let mut groups_dirty = false;
 
     loop {
         tokio::select! {
             received = messages.next() => {
                 match received {
                     Some(Received::QueueEmpty) => {
-                        emit_store_snapshot(&manager, &sink).await;
                         if !synchronized {
+                            match Box::pin(manager.synchronize_storage_groups()).await {
+                                Ok(_) => {}
+                                Err(error) => sink.emit(Event::error(
+                                    format!("Could not synchronize Signal groups: {error}"),
+                                    false,
+                                )),
+                            }
+                            emit_contact_snapshot(&manager, &sink).await;
+                            emit_group_snapshot(&manager, &sink).await;
+                            groups_dirty = false;
                             synchronized = true;
                             ready.store(true, Ordering::Release);
                             sink.emit(Event { kind: EVENT_READY, ..Event::default() });
+                        } else if groups_dirty {
+                            emit_group_snapshot(&manager, &sink).await;
+                            groups_dirty = false;
                         }
                     }
-                    Some(Received::Contacts) => emit_store_snapshot(&manager, &sink).await,
+                    Some(Received::Contacts) => emit_contact_snapshot(&manager, &sink).await,
                     Some(Received::Content(content)) => {
+                        groups_dirty |= content_has_group_context(&content.body);
                         handle_content(&mut manager, *content, &sink).await;
                     }
                     None => {
@@ -317,7 +333,7 @@ async fn handle_command_interruptibly(
     }
 }
 
-async fn emit_store_snapshot(manager: &Manager<SqliteStore, Registered>, sink: &EventSink) {
+async fn emit_contact_snapshot(manager: &Manager<SqliteStore, Registered>, sink: &EventSink) {
     match manager.store().contacts().await {
         Ok(contacts) => match contacts.collect::<Result<Vec<_>, _>>() {
             Ok(contacts) => {
@@ -350,18 +366,38 @@ async fn emit_store_snapshot(manager: &Manager<SqliteStore, Registered>, sink: &
             false,
         )),
     }
+}
 
+async fn emit_group_snapshot(manager: &Manager<SqliteStore, Registered>, sink: &EventSink) {
     match manager.store().groups().await {
         Ok(groups) => match groups.collect::<Result<Vec<_>, _>>() {
             Ok(groups) => {
+                sink.emit(Event {
+                    kind: EVENT_GROUP_SYNC_BEGIN,
+                    ..Event::default()
+                });
                 for (key, group) in groups {
+                    let chat_id = group_identifier(&key);
                     sink.emit(Event {
                         kind: EVENT_GROUP,
-                        chat_id: Some(hex::encode(key)),
+                        chat_id: Some(chat_id.clone()),
                         title: Some(group.title),
                         ..Event::default()
                     });
+                    for member in group.members {
+                        sink.emit(Event {
+                            kind: EVENT_GROUP_MEMBER,
+                            chat_id: Some(chat_id.clone()),
+                            peer_id: Some(ServiceId::Aci(member.aci).service_id_string()),
+                            value: i32::from(member.role == Role::Administrator),
+                            ..Event::default()
+                        });
+                    }
                 }
+                sink.emit(Event {
+                    kind: EVENT_GROUP_SYNC_END,
+                    ..Event::default()
+                });
             }
             Err(error) => sink.emit(Event::error(
                 format!("Could not decode synchronized Signal groups: {error}"),
@@ -372,6 +408,28 @@ async fn emit_store_snapshot(manager: &Manager<SqliteStore, Registered>, sink: &
             format!("Could not read synchronized Signal groups: {error}"),
             false,
         )),
+    }
+}
+
+fn content_has_group_context(content: &ContentBody) -> bool {
+    match content {
+        ContentBody::DataMessage(message) => message.group_v2.is_some(),
+        ContentBody::EditMessage(EditMessage {
+            data_message: Some(message),
+            ..
+        }) => message.group_v2.is_some(),
+        ContentBody::SynchronizeMessage(SyncMessage {
+            sent: Some(sent), ..
+        }) => sent
+            .message
+            .as_ref()
+            .or_else(|| {
+                sent.edit_message
+                    .as_ref()
+                    .and_then(|edit| edit.data_message.as_ref())
+            })
+            .is_some_and(|message| message.group_v2.is_some()),
+        _ => false,
     }
 }
 
@@ -411,8 +469,8 @@ async fn handle_command(
             group_key,
             message,
         } => {
-            let result = match decode_group_key(&group_key) {
-                Some(key) => {
+            let result = match resolve_group_key(manager, &group_key).await {
+                Ok(Some(key)) => {
                     let timestamp = now_ms();
                     let revision = manager
                         .store()
@@ -439,7 +497,8 @@ async fn handle_command(
                         .await
                         .map_err(|error| error.to_string())
                 }
-                None => Err("Group master key is invalid".into()),
+                Ok(None) => Err("Signal group is not available in the encrypted store".into()),
+                Err(error) => Err(error),
             };
             (request_id, result)
         }
@@ -610,7 +669,7 @@ async fn emit_data_message(
             kind: EVENT_GROUP_MESSAGE,
             flags,
             peer_id: Some(group_peer),
-            chat_id: Some(hex::encode(group_key)),
+            chat_id: Some(group_identifier(&group_key)),
             title,
             text: Some(text),
             timestamp_ms: timestamp,
@@ -662,9 +721,28 @@ fn parse_recipient(value: &str) -> Option<ServiceId> {
     })
 }
 
-fn decode_group_key(value: &str) -> Option<[u8; 32]> {
-    let bytes = hex::decode(value).ok()?;
-    bytes.try_into().ok()
+fn group_identifier(group_key: &[u8; 32]) -> String {
+    let mut digest = Sha256::new();
+    digest.update(b"signal-purple group identifier\0");
+    digest.update(group_key);
+    hex::encode(digest.finalize())
+}
+
+async fn resolve_group_key(
+    manager: &Manager<SqliteStore, Registered>,
+    identifier: &str,
+) -> Result<Option<[u8; 32]>, String> {
+    let groups = manager
+        .store()
+        .groups()
+        .await
+        .map_err(|error| format!("Could not read Signal groups: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Could not decode Signal groups: {error}"))?;
+    Ok(groups
+        .into_iter()
+        .map(|(key, _)| key)
+        .find(|key| group_identifier(key) == identifier))
 }
 
 fn content_timestamp(content: &Content) -> u64 {
@@ -734,10 +812,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn validates_group_keys() {
-        assert_eq!(decode_group_key(&"00".repeat(32)), Some([0; 32]));
-        assert_eq!(decode_group_key("00"), None);
-        assert_eq!(decode_group_key(&"zz".repeat(32)), None);
+    fn derives_stable_non_secret_group_identifiers() {
+        let first = group_identifier(&[0; 32]);
+        let second = group_identifier(&[1; 32]);
+
+        assert_eq!(first.len(), 64);
+        assert_eq!(first, group_identifier(&[0; 32]));
+        assert_ne!(first, hex::encode([0; 32]));
+        assert_ne!(first, second);
     }
 
     #[test]
@@ -745,6 +827,18 @@ mod tests {
         let png = qr_png(b"sgnl://linkdevice?uuid=test&pub_key=test").unwrap();
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert!(png.len() > 100);
+    }
+
+    #[test]
+    fn detects_group_content_for_snapshot_refresh() {
+        let direct = ContentBody::DataMessage(DataMessage::default());
+        let group = ContentBody::DataMessage(DataMessage {
+            group_v2: Some(GroupContextV2::default()),
+            ..Default::default()
+        });
+
+        assert!(!content_has_group_context(&direct));
+        assert!(content_has_group_context(&group));
     }
 
     #[test]

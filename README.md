@@ -20,7 +20,7 @@ to the Purple plugin.
 | Existing linked-device reconnect | Live isolated-profile test passed 2026-07-19 |
 | SQLCipher store with libsecret key | Implemented |
 | Signal contact buddy-list create/update/delete | Implemented; 46-contact create/refresh live-tested and snapshot reconciliation unit-tested |
-| Group metadata synchronization | Implemented; live test pending |
+| Group discovery, chat-list reconciliation, and membership | Implemented; 11-group reconnect/deduplication and 3-member chat live-tested |
 | Plain-text direct messages | Live isolated-profile test passed 2026-07-19 |
 | Basic group messages | Implemented; live test pending |
 | Typing indicators | Implemented; live test pending |
@@ -132,9 +132,12 @@ database or secret requires linking a new device.
   with a generic operation error.
 - Attachment contents are not downloaded or uploaded. Incoming attachment
   names are rendered as notices.
-- Synchronized groups open when their first message arrives. Proactively
-  browsing or opening a group is not implemented. Closing a Purple chat never
-  leaves the Signal group.
+- Signal Storage Service groups are projected into Purple's `Signal groups`
+  chat-list group. Complete snapshots create missing chats, update titles and
+  active membership, flag administrators, remove stale plugin-managed chats,
+  and collapse plugin-created duplicates by stable opaque group identifier.
+  User-created chats are preserved. Opening a synchronized chat does not send
+  a message, and closing it never leaves the Signal group.
 - Synchronized contacts are projected into Purple's `Signal` buddy-list group.
   Each connection requests a fresh contact sync from the primary phone.
   Complete snapshots create missing buddies, update server aliases, and remove
@@ -151,8 +154,10 @@ database or secret requires linking a new device.
   official client's local message database.
 - Disappearing-message timers and remote deletions are not projected into
   Purple. The plugin disables logging for every Signal conversation, but Purple
-  still stores contact aliases and stable Signal identifiers in plaintext in
-  `blist.xml`; another UI or plugin could retain additional plaintext.
+  still stores contact aliases, group titles, and stable opaque identifiers in
+  plaintext in `blist.xml`; raw Signal group master keys remain confined to the
+  encrypted backend store. Another UI or plugin could retain additional
+  plaintext.
 - QR provisioning URIs are sensitive. The backend compiles out upstream
   info-level tracing so Presage's provisioning message cannot log the URI.
 

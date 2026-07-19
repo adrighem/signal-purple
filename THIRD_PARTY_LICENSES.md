@@ -5,7 +5,7 @@ following AGPL-3.0-only projects at exact pinned revisions:
 
 | Dependency | Revision | License |
 | --- | --- | --- |
-| [Presage](https://github.com/whisperfish/presage) | `63482efd0cbdc0780baf0650517c7d55f1cac05d` | AGPL-3.0-only |
+| [Presage fork](https://github.com/adrighem/presage) | `c8ee98cf944897812d9375effb98657f537e8b09` (parent: upstream `63482efd0cbdc0780baf0650517c7d55f1cac05d`) | AGPL-3.0-only |
 | [libsignal-service-rs](https://github.com/whisperfish/libsignal-service-rs) | `fd481655d481388ebfe3a1fdb85a668b4876d592` | AGPL-3.0-only |
 | [Signal libsignal](https://github.com/signalapp/libsignal) | tag `v0.94.4`, commit `46d867c986f66201e34e7ae20ce423eec742bf3f` | AGPL-3.0-only |
 | Signal curve25519-dalek fork | tag `signal-curve25519-4.1.3` | BSD-3-Clause |

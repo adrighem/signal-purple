@@ -43,7 +43,10 @@ explicit event destruction.
 4. An existing linked device loads immediately. A fresh store starts Presage's
    secondary-device provisioning and emits a QR PNG.
 5. The backend starts the receive stream and processes queued sync/session data.
-6. Only Presage's first `QueueEmpty` event marks the core ready and the Purple
+6. At the first `QueueEmpty`, the backend reads the account's Storage Service
+   manifest and refreshes every available group into the encrypted local store.
+7. Only after contact and group snapshots are emitted does the core become ready
+   and the Purple
    account connected.
 
 This ordering prevents sends before queued profile, session, and sender-key
@@ -62,10 +65,12 @@ older messages from the primary phone or Signal service.
   projection when Presage reports synchronized contacts. Because Signal does
   not expose presence, contacts are marked reachable while the linked account
   is connected so Purple's default offline filter does not hide them.
-- Group master keys remain private 32-byte backend identifiers, represented as
-  64 hex characters only across the internal ABI. They are never used as
-  Purple titles or join metadata. Each connection assigns a collision-free
-  sequential Purple chat integer.
+- Group master keys remain private 32-byte values in the encrypted backend
+  store. Purple receives a domain-separated SHA-256 identifier for persistence
+  and joining, then Rust resolves that identifier back to a stored group when
+  sending. Snapshot reconciliation updates titles and active membership,
+  removes stale plugin-managed entries, and collapses duplicate managed chats.
+  Each connection assigns a collision-free sequential Purple chat integer.
 - Incoming text is markup-escaped. Outgoing Purple markup is stripped.
 - Own-device `SynchronizeMessage` values render as outgoing messages.
 - Delivery receipts are sent when Presage marks an envelope as needing one.
@@ -89,7 +94,9 @@ every connection. It then reconciles complete snapshots into plugin-managed
 Purple buddies. Because Purple normally hides offline buddies and Signal has no
 presence API, synchronized contacts are marked reachable while the account is
 connected. Contact names and synchronized phone numbers are used as aliases;
-profile enrichment is not implemented yet.
+profile enrichment is not implemented yet. For groups, signal-purple's pinned
+Presage fork adds a read-only Storage Service synchronization method so the chat
+list is complete without waiting for each group to receive a new message.
 
 ## Deliberate boundaries
 

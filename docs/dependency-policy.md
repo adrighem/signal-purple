@@ -19,3 +19,11 @@ update:
 
 Automated update pull requests may open for visibility, but compilation alone
 does not authorize merging them.
+
+The Presage dependency currently uses the public
+[`adrighem/presage`](https://github.com/adrighem/presage) fork at
+`c8ee98cf944897812d9375effb98657f537e8b09`. Its parent is the previously
+audited upstream pin `63482efd0cbdc0780baf0650517c7d55f1cac05d`; the fork adds
+only read-only Storage Service group synchronization plus its error plumbing
+and focused test. Treat any rebase or additional fork commit as a full
+Signal-stack update under the policy above.

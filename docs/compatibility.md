@@ -26,7 +26,7 @@ validation should test, with non-production accounts:
 1. fresh QR linking;
 2. reconnect with an existing encrypted store;
 3. direct send/receive in both directions;
-4. group send/receive;
+4. group discovery, deduplication, title/membership refresh, and send/receive;
 5. typing and delivery receipts;
 6. contact buddy-list creation, alias updates, and stale-contact removal;
 7. delivery of messages queued while the linked device is offline;

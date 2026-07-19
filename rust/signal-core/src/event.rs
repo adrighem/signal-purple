@@ -15,6 +15,9 @@ pub const EVENT_ERROR: u32 = 10;
 pub const EVENT_DISCONNECTED: u32 = 11;
 pub const EVENT_CONTACT_SYNC_BEGIN: u32 = 12;
 pub const EVENT_CONTACT_SYNC_END: u32 = 13;
+pub const EVENT_GROUP_SYNC_BEGIN: u32 = 14;
+pub const EVENT_GROUP_SYNC_END: u32 = 15;
+pub const EVENT_GROUP_MEMBER: u32 = 16;
 
 pub const FLAG_OUTGOING: u32 = 1 << 0;
 pub const FLAG_FATAL: u32 = 1 << 1;

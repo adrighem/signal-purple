@@ -26,8 +26,9 @@ and message bodies are sensitive. Production code must not log them.
 - A missing libsecret service fails closed; the plugin does not fall back to an
   unencrypted database.
 - The backend uses Presage's `OnNewIdentity::Reject` policy.
-- Group keys and string lengths are validated before backend use. Group master
-  keys are never exposed as Purple chat names or join metadata.
+- Group master keys remain in the encrypted Rust store. Purple persists only a
+  domain-separated SHA-256 group identifier, which the backend resolves against
+  the store for sends.
 - Remote message text is escaped before Purple renders it.
 - Conversation logging is disabled and each delivered message carries Purple's
   no-log flag.
@@ -40,9 +41,9 @@ and message bodies are sensitive. Production code must not log them.
 ## Known gaps
 
 - No independent security audit has occurred.
-- Live direct-message, startup-backlog, and contact-sync paths have been
-  verified. The full supported-client and failure-mode matrix remains a release
-  gate.
+- Live direct-message, startup-backlog, contact-sync, group-discovery, and
+  group-membership paths have been verified. The full supported-client and
+  failure-mode matrix remains a release gate.
 - Identity-key rejection is not paired with a full safety-number review and
   approval UI. A changed contact remains blocked in the current store; official
   client verification does not update this linked device's Presage database.
@@ -54,9 +55,10 @@ and message bodies are sensitive. Production code must not log them.
   flaw in the UI or another plugin can access this process.
 - Signal does not support third-party clients or promise protocol stability.
 - Disappearing timers and remote deletions are not projected into Purple.
-- Purple's buddy list stores synced aliases and stable Signal identifiers in
-  plaintext. The plugin cannot prevent another in-process UI or plugin from
-  retaining message text despite its no-log defaults.
+- Purple's buddy list stores synced contact aliases, group titles, canonical
+  contact identifiers, and opaque group identifiers in plaintext. The plugin
+  cannot prevent another in-process UI or plugin from retaining message text
+  despite its no-log defaults.
 
 ## Update response
 

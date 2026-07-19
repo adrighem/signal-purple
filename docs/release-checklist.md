@@ -9,12 +9,10 @@ is linked from the release issue or release pull request.
 - One Signal account per configured Purple account.
 - Direct messages, contact synchronization, typing, delivery, read, retry, and
   messages received while this client was offline.
+- Group discovery, title and membership synchronization, and group messaging.
 - Identity-change warning and acceptance without relinking.
 - Attachments within documented size and resource limits.
 - Upgrade without losing the account, contacts, or trust state.
-
-Group messaging is included only if the full group test matrix passes before the
-release candidate. Otherwise it remains clearly marked experimental for 1.0.
 
 ## Out of scope
 
@@ -36,8 +34,8 @@ release candidate. Otherwise it remains clearly marked experimental for 1.0.
 - [ ] Direct messages work both ways with supported Signal clients.
 - [ ] Messages sent while signal-purple is offline arrive exactly once.
 - [ ] Contact add, update, remove, and restart synchronization work.
-- [ ] Group creation, membership changes, and messages work, or group support is
-  explicitly excluded.
+- [ ] Group discovery, creation, membership changes, deduplication, and messages
+  work across reconnects.
 - [ ] Typing, delivery, read, failure, and retry states are accurate.
 - [ ] Identity replacement blocks safely, warns, and resumes after acceptance.
 - [ ] Attachment success, cancellation, rejection, and corruption are tested.

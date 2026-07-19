@@ -13,7 +13,9 @@ demonstrated. Version numbers are compatibility targets, not deadlines.
 - Keep versions synchronized with release-please while signed tags remain a
   deliberate release action.
 - Produce a reproducible Debian 13 package.
-- Complete contact, group, offline-message, and resilience testing against real
+- Discover all current Signal groups, synchronize them into Purple's chat list,
+  and refresh membership and titles without waiting for a new group message.
+- Complete group, contact, offline-message, and resilience testing against real
   Signal clients.
 
 ## Milestone 2: v0.2.0 semantics and trust

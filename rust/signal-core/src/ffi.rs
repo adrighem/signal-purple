@@ -8,6 +8,8 @@ use std::thread::JoinHandle;
 use tokio::sync::{mpsc as tokio_mpsc, watch};
 use zeroize::Zeroizing;
 
+const BACKEND_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
+
 use crate::backend::{self, Command, Config};
 use crate::event::{ABI_VERSION, Event, OwnedEvent, SignalEvent};
 
@@ -148,6 +150,7 @@ pub unsafe extern "C" fn signal_core_new(
         let join = status_try!(
             std::thread::Builder::new()
                 .name("signal-purple-core".into())
+                .stack_size(BACKEND_THREAD_STACK_BYTES)
                 .spawn(move || {
                     backend::run_worker(
                         worker_config,
