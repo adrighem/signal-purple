@@ -2,9 +2,13 @@
 #include "signal_purple.h"
 
 #include <errno.h>
+#include <gio/gio.h>
 #include <libsecret/secret.h>
 
 #define SIGNAL_SYNCED_BUDDY_KEY "signal-purple-synced-contact"
+#define SIGNAL_MAX_PENDING_ATTACHMENT_BYTES (64u * 1024u * 1024u)
+
+static gsize signal_pending_attachment_bytes;
 
 typedef struct {
     char *peer_id;
@@ -16,6 +20,259 @@ typedef struct {
     char *chat_id;
     guint64 timestamp;
 } SignalPendingRead;
+
+typedef struct {
+    GBytes *bytes;
+    gsize size;
+} SignalAttachment;
+
+typedef struct {
+    SignalConnection *connection;
+    char *recipient;
+    guint64 request_id;
+    gboolean group;
+} SignalOutgoingAttachment;
+
+static void
+signal_outgoing_attachment_free(PurpleXfer *xfer)
+{
+    SignalOutgoingAttachment *attachment;
+
+    if (xfer == NULL || xfer->data == NULL)
+        return;
+    attachment = xfer->data;
+    xfer->data = NULL;
+    if (attachment->connection != NULL && attachment->request_id != 0)
+        g_hash_table_remove(attachment->connection->outgoing_attachments,
+                            &attachment->request_id);
+    g_free(attachment->recipient);
+    g_free(attachment);
+}
+
+static void
+signal_outgoing_attachment_cancel(PurpleXfer *xfer)
+{
+    SignalOutgoingAttachment *attachment = xfer->data;
+
+    if (attachment != NULL && attachment->connection != NULL &&
+        !attachment->connection->closing && attachment->request_id != 0)
+        signal_core_cancel_attachment(attachment->connection->core,
+                                      attachment->request_id);
+    signal_outgoing_attachment_free(xfer);
+}
+
+static void
+signal_outgoing_attachment_init(PurpleXfer *xfer)
+{
+    SignalOutgoingAttachment *attachment = xfer->data;
+    g_autofree char *contents = NULL;
+    g_autofree char *filename = NULL;
+    g_autofree char *content_type = NULL;
+    g_autofree char *mime_type = NULL;
+    g_autoptr(GError) error = NULL;
+    gsize size = 0;
+    gboolean uncertain = FALSE;
+    SignalStatus status;
+    guint64 *key;
+
+    if (attachment == NULL || attachment->connection == NULL ||
+        attachment->connection->closing)
+        return;
+    if (!g_file_get_contents(purple_xfer_get_local_filename(xfer), &contents,
+                             &size, &error)) {
+        purple_xfer_error(PURPLE_XFER_SEND, purple_xfer_get_account(xfer),
+                          purple_xfer_get_remote_user(xfer), error->message);
+        purple_xfer_cancel_local(xfer);
+        return;
+    }
+    if (size == 0 || size > SIGNAL_MAX_ATTACHMENT_BYTES) {
+        purple_xfer_error(PURPLE_XFER_SEND, purple_xfer_get_account(xfer),
+                          purple_xfer_get_remote_user(xfer),
+                          "Signal attachments must be between 1 byte and 25 MiB");
+        purple_xfer_cancel_local(xfer);
+        return;
+    }
+
+    filename = g_path_get_basename(purple_xfer_get_local_filename(xfer));
+    content_type = g_content_type_guess(filename, (const guchar *)contents,
+                                        MIN(size, (gsize)512), &uncertain);
+    (void)uncertain;
+    if (content_type != NULL)
+        mime_type = g_content_type_get_mime_type(content_type);
+    if (mime_type == NULL)
+        mime_type = g_strdup("application/octet-stream");
+
+    attachment->request_id = attachment->connection->next_request_id++;
+    purple_xfer_start(xfer, -1, NULL, 0);
+    if (xfer->data == NULL)
+        return;
+    if (attachment->group) {
+        status = signal_core_send_group_attachment(
+            attachment->connection->core, attachment->request_id,
+            attachment->recipient, filename, mime_type,
+            (const guint8 *)contents, size);
+    } else {
+        status = signal_core_send_attachment(
+            attachment->connection->core, attachment->request_id,
+            attachment->recipient, filename, mime_type,
+            (const guint8 *)contents, size);
+    }
+    if (status != SIGNAL_STATUS_OK) {
+        attachment->request_id = 0;
+        purple_xfer_error(PURPLE_XFER_SEND, purple_xfer_get_account(xfer),
+                          purple_xfer_get_remote_user(xfer),
+                          "The Signal attachment could not be queued");
+        purple_xfer_cancel_local(xfer);
+        return;
+    }
+
+    key = g_new(guint64, 1);
+    *key = attachment->request_id;
+    purple_xfer_ref(xfer);
+    g_hash_table_insert(attachment->connection->outgoing_attachments, key,
+                        xfer);
+}
+
+static gboolean
+signal_outgoing_attachment_complete(SignalConnection *connection,
+                                    const SignalEvent *event)
+{
+    PurpleXfer *xfer;
+
+    xfer = event->request_id != 0
+               ? g_hash_table_lookup(connection->outgoing_attachments,
+                                     &event->request_id)
+               : NULL;
+    if (xfer == NULL)
+        return FALSE;
+    purple_xfer_set_bytes_sent(xfer, purple_xfer_get_size(xfer));
+    purple_xfer_update_progress(xfer);
+    purple_xfer_set_completed(xfer, TRUE);
+    purple_xfer_end(xfer);
+    return TRUE;
+}
+
+static gboolean
+signal_outgoing_attachment_failed(SignalConnection *connection,
+                                  const SignalEvent *event)
+{
+    PurpleXfer *xfer;
+
+    xfer = event->request_id != 0
+               ? g_hash_table_lookup(connection->outgoing_attachments,
+                                     &event->request_id)
+               : NULL;
+    if (xfer == NULL)
+        return FALSE;
+    purple_xfer_error(PURPLE_XFER_SEND, purple_xfer_get_account(xfer),
+                      purple_xfer_get_remote_user(xfer),
+                      event->text != NULL ? event->text
+                                          : "Signal attachment send failed");
+    purple_xfer_cancel_remote(xfer);
+    return TRUE;
+}
+
+static void
+signal_attachment_free(PurpleXfer *xfer)
+{
+    SignalAttachment *attachment;
+
+    if (xfer == NULL || xfer->data == NULL)
+        return;
+    attachment = xfer->data;
+    xfer->data = NULL;
+    g_assert(signal_pending_attachment_bytes >= attachment->size);
+    signal_pending_attachment_bytes -= attachment->size;
+    g_clear_pointer(&attachment->bytes, g_bytes_unref);
+    g_free(attachment);
+}
+
+static void
+signal_attachment_cancel(PurpleXfer *xfer)
+{
+    signal_attachment_free(xfer);
+}
+
+static void
+signal_attachment_start(PurpleXfer *xfer)
+{
+    SignalAttachment *attachment = xfer->data;
+    gconstpointer bytes;
+    gsize size;
+
+    if (attachment == NULL || attachment->bytes == NULL) {
+        purple_xfer_cancel_local(xfer);
+        return;
+    }
+    bytes = g_bytes_get_data(attachment->bytes, &size);
+    if (!purple_xfer_write_file(xfer, bytes, size))
+        return;
+
+    purple_xfer_update_progress(xfer);
+    purple_xfer_set_completed(xfer, TRUE);
+    purple_xfer_end(xfer);
+}
+
+static void
+signal_attachment_init(PurpleXfer *xfer)
+{
+    purple_xfer_start(xfer, -1, NULL, 0);
+}
+
+static void
+signal_deliver_attachment(SignalConnection *connection,
+                          const SignalEvent *event)
+{
+    PurpleAccount *account;
+    PurpleXfer *xfer;
+    SignalAttachment *attachment;
+    g_autofree char *filename = NULL;
+    const char *peer;
+
+    if (event->data == NULL || event->data_len == 0)
+        return;
+    if (event->data_len > SIGNAL_MAX_ATTACHMENT_BYTES ||
+        signal_pending_attachment_bytes >
+            SIGNAL_MAX_PENDING_ATTACHMENT_BYTES - event->data_len) {
+        purple_notify_error(
+            connection, "Signal attachment rejected",
+            "Too much attachment data is waiting for a save location",
+            "Save or reject pending transfers, then ask the sender to resend the attachment.");
+        return;
+    }
+    peer = event->peer_id != NULL && event->peer_id[0] != '\0'
+               ? event->peer_id
+               : "Signal contact";
+    filename = g_path_get_basename(
+        event->title != NULL && event->title[0] != '\0'
+            ? event->title
+            : "signal-attachment");
+    if (g_str_equal(filename, ".") || g_str_equal(filename, "..") ||
+        g_str_equal(filename, G_DIR_SEPARATOR_S)) {
+        g_free(g_steal_pointer(&filename));
+        filename = g_strdup("signal-attachment");
+    }
+
+    account = purple_connection_get_account(connection->gc);
+    xfer = purple_xfer_new(account, PURPLE_XFER_RECEIVE, peer);
+    if (xfer == NULL)
+        return;
+    attachment = g_new0(SignalAttachment, 1);
+    attachment->bytes = g_bytes_new(event->data, event->data_len);
+    attachment->size = event->data_len;
+    signal_pending_attachment_bytes += attachment->size;
+    xfer->data = attachment;
+    purple_xfer_set_filename(xfer, filename);
+    purple_xfer_set_size(xfer, event->data_len);
+    if (event->text != NULL && event->text[0] != '\0')
+        purple_xfer_set_message(xfer, event->text);
+    purple_xfer_set_init_fnc(xfer, signal_attachment_init);
+    purple_xfer_set_start_fnc(xfer, signal_attachment_start);
+    purple_xfer_set_end_fnc(xfer, signal_attachment_free);
+    purple_xfer_set_request_denied_fnc(xfer, signal_attachment_free);
+    purple_xfer_set_cancel_recv_fnc(xfer, signal_attachment_cancel);
+    purple_xfer_request(xfer);
+}
 
 static void
 signal_pending_read_free(gpointer data)
@@ -622,6 +879,12 @@ signal_handle_event(SignalConnection *connection, const SignalEvent *event)
     case SIGNAL_EVENT_GROUP_MESSAGE:
         signal_deliver_group(connection, event);
         break;
+    case SIGNAL_EVENT_ATTACHMENT:
+        signal_deliver_attachment(connection, event);
+        break;
+    case SIGNAL_EVENT_ATTACHMENT_SENT:
+        signal_outgoing_attachment_complete(connection, event);
+        break;
     case SIGNAL_EVENT_TYPING:
         if (event->peer_id != NULL) {
             if (event->value != 0)
@@ -651,8 +914,9 @@ signal_handle_event(SignalConnection *connection, const SignalEvent *event)
                 event->text != NULL ? event->text : "Signal backend failed");
             return FALSE;
         }
-        purple_notify_error(connection, "signal-purple", event->title,
-                            event->text);
+        if (!signal_outgoing_attachment_failed(connection, event))
+            purple_notify_error(connection, "signal-purple", event->title,
+                                event->text);
         break;
     case SIGNAL_EVENT_DISCONNECTED:
         purple_connection_error_reason(
@@ -698,7 +962,8 @@ signal_poll_backend(gpointer data)
         keep = signal_handle_event(connection, event);
         if (keep && event->request_id != 0 &&
             (event->kind == SIGNAL_EVENT_MESSAGE ||
-             event->kind == SIGNAL_EVENT_GROUP_MESSAGE)) {
+             event->kind == SIGNAL_EVENT_GROUP_MESSAGE ||
+             event->kind == SIGNAL_EVENT_ATTACHMENT)) {
             SignalStatus status = signal_core_ack_message(
                 connection->core, event->request_id);
             if (status != SIGNAL_STATUS_OK)
@@ -774,6 +1039,8 @@ signal_login(PurpleAccount *account)
         g_str_hash, g_str_equal, g_free, NULL);
     connection->pending_identity_changes = g_hash_table_new_full(
         g_str_hash, g_str_equal, g_free, NULL);
+    connection->outgoing_attachments = g_hash_table_new_full(
+        g_int64_hash, g_int64_equal, g_free, (GDestroyNotify)purple_xfer_unref);
     connection->pending_reads = g_ptr_array_new_with_free_func(
         signal_pending_read_free);
     signal_contact_sync_init(&connection->contact_sync);
@@ -795,6 +1062,7 @@ signal_login(PurpleAccount *account)
         g_hash_table_unref(connection->group_members_by_key);
         g_hash_table_unref(connection->identity_changes_seen);
         g_hash_table_unref(connection->pending_identity_changes);
+        g_hash_table_unref(connection->outgoing_attachments);
         g_ptr_array_unref(connection->pending_reads);
         signal_contact_sync_clear(&connection->contact_sync);
         signal_contact_sync_clear(&connection->group_sync);
@@ -831,6 +1099,18 @@ signal_close(PurpleConnection *gc)
     purple_signals_disconnect_by_handle(connection);
     purple_request_close_with_handle(connection);
 
+    GHashTableIter attachment_iter;
+    gpointer attachment_value;
+    g_hash_table_iter_init(&attachment_iter,
+                           connection->outgoing_attachments);
+    while (g_hash_table_iter_next(&attachment_iter, NULL, &attachment_value)) {
+        PurpleXfer *xfer = attachment_value;
+        SignalOutgoingAttachment *attachment = xfer->data;
+        if (attachment != NULL)
+            attachment->connection = NULL;
+    }
+    g_hash_table_remove_all(connection->outgoing_attachments);
+
     if (connection->poll_source != NULL) {
         g_source_destroy(connection->poll_source);
         g_source_unref(connection->poll_source);
@@ -845,6 +1125,7 @@ signal_close(PurpleConnection *gc)
     g_hash_table_unref(connection->group_members_by_key);
     g_hash_table_unref(connection->identity_changes_seen);
     g_hash_table_unref(connection->pending_identity_changes);
+    g_hash_table_unref(connection->outgoing_attachments);
     g_ptr_array_unref(connection->pending_reads);
     signal_contact_sync_clear(&connection->contact_sync);
     signal_contact_sync_clear(&connection->group_sync);
@@ -974,6 +1255,65 @@ signal_send_typing(PurpleConnection *gc, const char *who,
     return 0;
 }
 
+static PurpleXfer *
+signal_new_attachment_xfer(SignalConnection *connection,
+                           const char *display_peer, const char *recipient,
+                           gboolean group)
+{
+    PurpleXfer *xfer;
+    SignalOutgoingAttachment *attachment;
+
+    if (connection == NULL || connection->closing || display_peer == NULL ||
+        recipient == NULL)
+        return NULL;
+    xfer = purple_xfer_new(purple_connection_get_account(connection->gc),
+                           PURPLE_XFER_SEND, display_peer);
+    if (xfer == NULL)
+        return NULL;
+    attachment = g_new0(SignalOutgoingAttachment, 1);
+    attachment->connection = connection;
+    attachment->recipient = g_strdup(recipient);
+    attachment->group = group;
+    xfer->data = attachment;
+    purple_xfer_set_init_fnc(xfer, signal_outgoing_attachment_init);
+    purple_xfer_set_end_fnc(xfer, signal_outgoing_attachment_free);
+    purple_xfer_set_request_denied_fnc(xfer,
+                                       signal_outgoing_attachment_free);
+    purple_xfer_set_cancel_send_fnc(xfer,
+                                    signal_outgoing_attachment_cancel);
+    return xfer;
+}
+
+gboolean
+signal_can_receive_file(PurpleConnection *gc, const char *who)
+{
+    SignalConnection *connection = signal_connection_data(gc);
+
+    return connection != NULL && !connection->closing && who != NULL &&
+           who[0] != '\0';
+}
+
+PurpleXfer *
+signal_new_xfer(PurpleConnection *gc, const char *who)
+{
+    SignalConnection *connection = signal_connection_data(gc);
+
+    return signal_new_attachment_xfer(connection, who, who, FALSE);
+}
+
+void
+signal_send_file(PurpleConnection *gc, const char *who, const char *filename)
+{
+    PurpleXfer *xfer = signal_new_xfer(gc, who);
+
+    if (xfer == NULL)
+        return;
+    if (filename != NULL)
+        purple_xfer_request_accepted(xfer, filename);
+    else
+        purple_xfer_request(xfer);
+}
+
 GList *
 signal_chat_info(PurpleConnection *gc)
 {
@@ -1069,4 +1409,35 @@ signal_chat_send(PurpleConnection *gc, int id, const char *message,
     status = signal_core_send_group_message(
         connection->core, connection->next_request_id++, group_key, plain);
     return signal_status_to_errno(status);
+}
+
+gboolean
+signal_chat_can_receive_file(PurpleConnection *gc, int id)
+{
+    SignalConnection *connection = signal_connection_data(gc);
+
+    return connection != NULL && !connection->closing &&
+           g_hash_table_lookup(connection->group_keys_by_id,
+                               GINT_TO_POINTER(id)) != NULL;
+}
+
+void
+signal_chat_send_file(PurpleConnection *gc, int id, const char *filename)
+{
+    SignalConnection *connection = signal_connection_data(gc);
+    const char *group_key;
+    PurpleXfer *xfer;
+
+    if (!signal_chat_can_receive_file(gc, id))
+        return;
+    group_key = g_hash_table_lookup(connection->group_keys_by_id,
+                                    GINT_TO_POINTER(id));
+    xfer = signal_new_attachment_xfer(
+        connection, signal_group_title(connection, group_key), group_key, TRUE);
+    if (xfer == NULL)
+        return;
+    if (filename != NULL)
+        purple_xfer_request_accepted(xfer, filename);
+    else
+        purple_xfer_request(xfer);
 }

@@ -17,7 +17,7 @@ service, and an isolated temporary Pidgin profile.
 | Primary phone to plugin direct-message synchronization | Passed |
 | Plugin to primary phone direct message | Passed |
 | Incoming direct-message presentation | Reproduced in Pidgin: `PURPLE_MESSAGE_NO_LOG` forced informational-notice styling even with `PURPLE_MESSAGE_RECV`; fixed by retaining normal receive flags while conversation logging remains disabled |
-| Durable message projection startup | Passed on the normal desktop profile: the SQLCipher projection schema initialized, the account reached connected state, and the ABI-v3 plugin/core pair loaded system-wide; an interrupted-message replay still needs a controlled live send |
+| Durable message projection startup | Passed on the normal desktop profile: the SQLCipher projection schema initialized, the account reached connected state, and the versioned plugin/core pair loaded system-wide; an interrupted-message replay still needs a controlled live send |
 | Identity-change policy | Store tests pass for uninterrupted unverified contacts, verified-contact send blocking, receive allowance, session reset, acceptance, and verification downgrade; controlled live replacement is not yet exercised |
 | Outbound retry | Encrypted outbox persistence, completion, deferral, restart loading, bounded backoff, and identity-acceptance expediting are implemented and tested; forced live network loss is not yet exercised |
 | Contact buddy-list creation and refresh | Passed with 46 visible contacts while Pidgin's offline filter remained disabled |
@@ -27,6 +27,7 @@ service, and an isolated temporary Pidgin profile.
 | Group master-key confinement | Passed; persisted chats contained opaque `group-id` values and no raw group master keys |
 | Group send/receive | Not exercised |
 | Typing and receipts | Direct typing, delivery receipts, and focus-gated direct/group read receipts are implemented and unit/build tested; not exercised against another live client |
+| Attachments | Direct/group incoming download and outgoing upload use Purple's native transfer UI with cancellation, filename sanitization, and bounded memory; build and ABI tests pass, but another-client transfer and malformed/corrupt input remain to be exercised live |
 | Second linked-device synchronization | Not exercised |
 
 The installed plugin also passed the headless module probe. The live run proved
@@ -37,7 +38,7 @@ The same isolated account fetched 11 groups from Signal Storage Service without
 requiring new group messages. Reconnect reconciliation, managed duplicate
 cleanup, title persistence, chat opening, membership, and administrator flags
 were inspected through Purple's live D-Bus API and persisted buddy list.
-The normal desktop profile subsequently loaded the ABI-v3 projection build and
+The normal desktop profile subsequently loaded the durable-projection build and
 reconnected without relinking. Fork-level store tests cover upgrade bootstrap,
 pending-message enumeration, and durable acknowledgment. A controlled incoming
 send interrupted between Presage storage and Purple display remains necessary

@@ -80,3 +80,13 @@ contact through another trusted channel, then right-click that Signal buddy and
 choose **Accept changed Signal identity**. The plugin resets the affected
 sessions and marks the contact unverified, without relinking the account. Do
 not accept merely to clear the warning.
+
+## An attachment is rejected or fails
+
+Each attachment is limited to 25 MiB, and one incoming message may contain at
+most 50 MiB. Save or reject existing receive prompts before retrying if Purple
+reports that 64 MiB is already waiting for a destination. Remote filenames are
+sanitized and decrypted bytes are held in memory rather than a plugin-managed
+temporary cache. Outgoing file uploads can be cancelled, but they are not kept
+in the persistent text-message outbox, so send the file again after a restart or
+failed upload.

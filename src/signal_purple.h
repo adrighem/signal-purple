@@ -11,6 +11,7 @@
 
 #define SIGNAL_PLUGIN_ID "prpl-adrighem-signal"
 #define SIGNAL_MAX_MESSAGE_BYTES (64u * 1024u)
+#define SIGNAL_MAX_ATTACHMENT_BYTES (25u * 1024u * 1024u)
 
 typedef struct {
     PurpleConnection *gc;
@@ -22,6 +23,7 @@ typedef struct {
     GHashTable *group_members_by_key;
     GHashTable *identity_changes_seen;
     GHashTable *pending_identity_changes;
+    GHashTable *outgoing_attachments;
     GPtrArray *pending_reads;
     SignalContactSync contact_sync;
     SignalContactSync group_sync;
@@ -44,6 +46,10 @@ int signal_send_im(PurpleConnection *gc, const char *who, const char *message,
                    PurpleMessageFlags flags);
 unsigned int signal_send_typing(PurpleConnection *gc, const char *who,
                                 PurpleTypingState state);
+gboolean signal_can_receive_file(PurpleConnection *gc, const char *who);
+PurpleXfer *signal_new_xfer(PurpleConnection *gc, const char *who);
+void signal_send_file(PurpleConnection *gc, const char *who,
+                      const char *filename);
 
 GList *signal_chat_info(PurpleConnection *gc);
 GHashTable *signal_chat_info_defaults(PurpleConnection *gc,
@@ -54,6 +60,9 @@ char *signal_get_chat_name(GHashTable *components);
 void signal_chat_leave(PurpleConnection *gc, int id);
 int signal_chat_send(PurpleConnection *gc, int id, const char *message,
                      PurpleMessageFlags flags);
+gboolean signal_chat_can_receive_file(PurpleConnection *gc, int id);
+void signal_chat_send_file(PurpleConnection *gc, int id,
+                           const char *filename);
 GList *signal_blist_node_menu(PurpleBlistNode *node);
 
 char *signal_plaintext_from_markup(const char *markup);

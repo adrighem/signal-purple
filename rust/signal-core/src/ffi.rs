@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use std::ffi::{CStr, c_char};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
 use std::thread::JoinHandle;
 
@@ -15,6 +15,9 @@ use crate::event::{ABI_VERSION, Event, OwnedEvent, SignalEvent};
 
 const MAX_RECIPIENT_BYTES: usize = 256;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
+const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+const MAX_ATTACHMENT_FILENAME_BYTES: usize = 255;
+const MAX_CONTENT_TYPE_BYTES: usize = 255;
 const EVENT_QUEUE_CAPACITY: usize = 4096;
 
 #[repr(i32)]
@@ -41,6 +44,7 @@ pub struct SignalCore {
     shutdown: watch::Sender<bool>,
     events: Mutex<mpsc::Receiver<Event>>,
     event_overflowed: Arc<AtomicBool>,
+    queued_event_bytes: Arc<AtomicUsize>,
     ready: Arc<AtomicBool>,
     join: Mutex<Option<JoinHandle<()>>>,
 }
@@ -147,6 +151,8 @@ pub unsafe extern "C" fn signal_core_new(
         let (event_tx, event_rx) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
         let event_overflowed = Arc::new(AtomicBool::new(false));
         let worker_event_overflowed = Arc::clone(&event_overflowed);
+        let queued_event_bytes = Arc::new(AtomicUsize::new(0));
+        let worker_queued_event_bytes = Arc::clone(&queued_event_bytes);
         let ready = Arc::new(AtomicBool::new(false));
         let worker_ready = Arc::clone(&ready);
         let worker_config = Config {
@@ -166,6 +172,7 @@ pub unsafe extern "C" fn signal_core_new(
                         shutdown_rx,
                         event_tx,
                         worker_event_overflowed,
+                        worker_queued_event_bytes,
                         worker_ready,
                     );
                 })
@@ -177,6 +184,7 @@ pub unsafe extern "C" fn signal_core_new(
             shutdown: shutdown_tx,
             events: Mutex::new(event_rx),
             event_overflowed,
+            queued_event_bytes,
             ready,
             join: Mutex::new(Some(join)),
         });
@@ -254,6 +262,144 @@ pub unsafe extern "C" fn signal_core_send_group_message(
                 message,
             },
         )
+    })
+}
+
+struct AttachmentInput {
+    recipient: *const c_char,
+    filename: *const c_char,
+    content_type: *const c_char,
+    data: *const u8,
+    data_len: usize,
+}
+
+unsafe fn send_attachment(
+    core: *mut SignalCore,
+    request_id: u64,
+    input: AttachmentInput,
+    group: bool,
+) -> SignalStatus {
+    ffi_guard(|| {
+        if core.is_null()
+            || input.data.is_null()
+            || input.data_len == 0
+            || input.data_len > MAX_ATTACHMENT_BYTES
+        {
+            return SignalStatus::InvalidArgument;
+        }
+        // SAFETY: all strings and bytes are copied during this call.
+        let recipient =
+            status_try!(unsafe { required_string(input.recipient, MAX_RECIPIENT_BYTES) });
+        let filename =
+            status_try!(unsafe { required_string(input.filename, MAX_ATTACHMENT_FILENAME_BYTES) });
+        let content_type =
+            status_try!(unsafe { required_string(input.content_type, MAX_CONTENT_TYPE_BYTES) });
+        if group
+            && (recipient.len() != 64
+                || hex::decode(&recipient).map_or(true, |value| value.len() != 32))
+        {
+            return SignalStatus::InvalidArgument;
+        }
+        // SAFETY: the caller guarantees `data_len` readable bytes; the bound
+        // above prevents an oversized allocation, and the bytes are copied.
+        let data = unsafe { std::slice::from_raw_parts(input.data, input.data_len) }.to_vec();
+        // SAFETY: `core` remains live and ABI calls are serialized by C.
+        queue_command(
+            unsafe { &*core },
+            Command::SendAttachment {
+                request_id,
+                recipient,
+                filename,
+                content_type,
+                data,
+                group,
+            },
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Queues one bounded attachment for a direct Signal recipient.
+///
+/// # Safety
+///
+/// All pointers must remain readable for this call. `data` must address
+/// `data_len` bytes. The core must be live and serialized with teardown.
+pub unsafe extern "C" fn signal_core_send_attachment(
+    core: *mut SignalCore,
+    request_id: u64,
+    recipient: *const c_char,
+    filename: *const c_char,
+    content_type: *const c_char,
+    data: *const u8,
+    data_len: usize,
+) -> SignalStatus {
+    // SAFETY: this function has the same pointer contract as the helper.
+    unsafe {
+        send_attachment(
+            core,
+            request_id,
+            AttachmentInput {
+                recipient,
+                filename,
+                content_type,
+                data,
+                data_len,
+            },
+            false,
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Queues one bounded attachment for a synchronized Signal group.
+///
+/// # Safety
+///
+/// All pointers must remain readable for this call. `data` must address
+/// `data_len` bytes. The core must be live and serialized with teardown.
+pub unsafe extern "C" fn signal_core_send_group_attachment(
+    core: *mut SignalCore,
+    request_id: u64,
+    group_key: *const c_char,
+    filename: *const c_char,
+    content_type: *const c_char,
+    data: *const u8,
+    data_len: usize,
+) -> SignalStatus {
+    // SAFETY: this function has the same pointer contract as the helper.
+    unsafe {
+        send_attachment(
+            core,
+            request_id,
+            AttachmentInput {
+                recipient: group_key,
+                filename,
+                content_type,
+                data,
+                data_len,
+            },
+            true,
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Cancels an in-flight attachment upload when it has not completed yet.
+///
+/// # Safety
+///
+/// `core` must be live and serialized with teardown.
+pub unsafe extern "C" fn signal_core_cancel_attachment(
+    core: *mut SignalCore,
+    request_id: u64,
+) -> SignalStatus {
+    ffi_guard(|| {
+        if core.is_null() || request_id == 0 {
+            return SignalStatus::InvalidArgument;
+        }
+        // SAFETY: `core` remains live and ABI calls are serialized by C.
+        queue_control_command(unsafe { &*core }, Command::CancelAttachment { request_id })
     })
 }
 
@@ -431,6 +577,10 @@ pub unsafe extern "C" fn signal_core_poll_event(
         };
         match events.try_recv() {
             Ok(event) => {
+                if !event.data.is_empty() {
+                    core.queued_event_bytes
+                        .fetch_sub(event.data.len(), Ordering::AcqRel);
+                }
                 // SAFETY: checked above; event ownership transfers to C.
                 unsafe { *out_event = OwnedEvent::into_raw(event) };
                 1
@@ -502,6 +652,7 @@ pub unsafe extern "C" fn signal_core_free(core: *mut SignalCore) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::CString;
 
     fn test_core(
         commands: tokio_mpsc::Sender<Command>,
@@ -515,6 +666,7 @@ mod tests {
             shutdown,
             events: Mutex::new(events),
             event_overflowed: Arc::new(AtomicBool::new(false)),
+            queued_event_bytes: Arc::new(AtomicUsize::new(0)),
             ready: Arc::new(AtomicBool::new(ready)),
             join: Mutex::new(join),
         }
@@ -622,6 +774,79 @@ mod tests {
             receiver.try_recv(),
             Ok(Command::AcknowledgeMessage { delivery_id: 42 })
         ));
+    }
+
+    #[test]
+    fn attachment_abi_copies_bounded_input() {
+        let (commands, mut receiver) = tokio_mpsc::channel(1);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let mut core = test_core(commands, shutdown, None, true);
+        let recipient = CString::new("aci:recipient").unwrap();
+        let filename = CString::new("photo.jpg").unwrap();
+        let content_type = CString::new("image/jpeg").unwrap();
+        let data = [1u8, 2, 3];
+
+        // SAFETY: all pointers are valid for the duration of the call.
+        let status = unsafe {
+            signal_core_send_attachment(
+                &mut core,
+                7,
+                recipient.as_ptr(),
+                filename.as_ptr(),
+                content_type.as_ptr(),
+                data.as_ptr(),
+                data.len(),
+            )
+        };
+
+        assert_eq!(status, SignalStatus::Ok);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Command::SendAttachment {
+                request_id: 7,
+                data: queued,
+                group: false,
+                ..
+            }) if queued == data
+        ));
+    }
+
+    #[test]
+    fn attachment_abi_rejects_invalid_sizes() {
+        let (commands, _receiver) = tokio_mpsc::channel(1);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let mut core = test_core(commands, shutdown, None, true);
+        let value = CString::new("value").unwrap();
+        let byte = 0u8;
+
+        // SAFETY: the byte pointer is valid; oversized input is rejected
+        // before the function reads it.
+        let status = unsafe {
+            signal_core_send_attachment(
+                &mut core,
+                1,
+                value.as_ptr(),
+                value.as_ptr(),
+                value.as_ptr(),
+                &byte,
+                MAX_ATTACHMENT_BYTES + 1,
+            )
+        };
+        assert_eq!(status, SignalStatus::InvalidArgument);
+
+        // SAFETY: the zero length causes the null data pointer to be rejected.
+        let status = unsafe {
+            signal_core_send_attachment(
+                &mut core,
+                1,
+                value.as_ptr(),
+                value.as_ptr(),
+                value.as_ptr(),
+                std::ptr::null(),
+                0,
+            )
+        };
+        assert_eq!(status, SignalStatus::InvalidArgument);
     }
 
     #[test]

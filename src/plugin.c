@@ -81,6 +81,9 @@ static PurplePluginProtocolInfo protocol_info = {
     .close = signal_close,
     .send_im = signal_send_im,
     .send_typing = signal_send_typing,
+    .can_receive_file = signal_can_receive_file,
+    .send_file = signal_send_file,
+    .new_xfer = signal_new_xfer,
     .get_info = signal_get_info,
     .chat_info = signal_chat_info,
     .chat_info_defaults = signal_chat_info_defaults,
@@ -92,6 +95,8 @@ static PurplePluginProtocolInfo protocol_info = {
     .offline_message = signal_offline_message,
     .struct_size = sizeof(PurplePluginProtocolInfo),
     .get_account_text_table = signal_account_text_table,
+    .chat_can_receive_file = signal_chat_can_receive_file,
+    .chat_send_file = signal_chat_send_file,
 };
 
 static PurplePluginInfo plugin_info = {

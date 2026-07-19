@@ -18,3 +18,7 @@ semantic versioning after the first stable release.
 - C utility tests, Rust unit tests, and a headless libpurple plugin probe.
 - Documentation of queued offline-message delivery, contact-sync diagnostics,
   and the corresponding Flare design.
+- Durable frontend message replay, encrypted text-message retry, read receipts,
+  and identity-change acceptance without relinking.
+- Bounded direct and group attachment transfers through Purple's native file
+  transfer UI, including cancellable uploads and sanitized incoming filenames.

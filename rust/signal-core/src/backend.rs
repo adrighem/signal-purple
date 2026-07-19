@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -10,6 +10,7 @@ use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::content::{Content, ContentBody, DataMessage, GroupContextV2};
 use presage::libsignal_service::groups_v2::Role;
 use presage::libsignal_service::protocol::ServiceId;
+use presage::libsignal_service::sender::AttachmentSpec;
 use presage::model::identity::OnNewIdentity;
 use presage::model::messages::Received;
 use presage::proto::{
@@ -26,13 +27,17 @@ use tokio::sync::{mpsc as tokio_mpsc, watch};
 use zeroize::Zeroizing;
 
 use crate::event::{
-    EVENT_CONTACT, EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED,
-    EVENT_GROUP, EVENT_GROUP_MEMBER, EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN,
-    EVENT_GROUP_SYNC_END, EVENT_IDENTITY_ACCEPTED, EVENT_IDENTITY_CHANGE, EVENT_LINK_QR,
-    EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT, EVENT_TYPING, Event, FLAG_OUTGOING,
+    EVENT_ATTACHMENT, EVENT_ATTACHMENT_SENT, EVENT_CONTACT, EVENT_CONTACT_SYNC_BEGIN,
+    EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED, EVENT_GROUP, EVENT_GROUP_MEMBER,
+    EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN, EVENT_GROUP_SYNC_END, EVENT_IDENTITY_ACCEPTED,
+    EVENT_IDENTITY_CHANGE, EVENT_LINK_QR, EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT, EVENT_TYPING,
+    Event, FLAG_OUTGOING,
 };
 
 const MESSAGE_PROJECTION_CLIENT: &str = "signal-purple-v1";
+const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
+const MAX_MESSAGE_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
+const MAX_QUEUED_EVENT_BYTES: usize = 64 * 1024 * 1024;
 
 pub struct Config {
     pub store_path: String,
@@ -51,6 +56,17 @@ pub enum Command {
         request_id: u64,
         group_key: String,
         message: String,
+    },
+    SendAttachment {
+        request_id: u64,
+        recipient: String,
+        filename: String,
+        content_type: String,
+        data: Vec<u8>,
+        group: bool,
+    },
+    CancelAttachment {
+        request_id: u64,
     },
     SetTyping {
         request_id: u64,
@@ -94,6 +110,7 @@ impl MessageProjection {
 struct EventSink {
     sender: mpsc::SyncSender<Event>,
     overflowed: Arc<AtomicBool>,
+    queued_bytes: Arc<AtomicUsize>,
 }
 
 impl EventSink {
@@ -101,11 +118,27 @@ impl EventSink {
         if self.overflowed.load(Ordering::Acquire) {
             return;
         }
-        if matches!(
-            self.sender.try_send(event),
-            Err(mpsc::TrySendError::Full(_))
-        ) {
+        let event_bytes = event.data.len();
+        if event_bytes > 0
+            && self
+                .queued_bytes
+                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
+                    queued
+                        .checked_add(event_bytes)
+                        .filter(|total| *total <= MAX_QUEUED_EVENT_BYTES)
+                })
+                .is_err()
+        {
             self.overflowed.store(true, Ordering::Release);
+            return;
+        }
+        if let Err(error) = self.sender.try_send(event) {
+            if event_bytes > 0 {
+                self.queued_bytes.fetch_sub(event_bytes, Ordering::AcqRel);
+            }
+            if matches!(error, mpsc::TrySendError::Full(_)) {
+                self.overflowed.store(true, Ordering::Release);
+            }
         }
     }
 }
@@ -116,11 +149,13 @@ pub fn run_worker(
     shutdown: watch::Receiver<bool>,
     events: mpsc::SyncSender<Event>,
     overflowed: Arc<AtomicBool>,
+    queued_bytes: Arc<AtomicUsize>,
     ready: Arc<AtomicBool>,
 ) {
     let sink = EventSink {
         sender: events,
         overflowed,
+        queued_bytes,
     };
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -309,6 +344,8 @@ async fn receive_and_command_loop(
     let mut synchronized = false;
     let mut groups_dirty = false;
     let mut projection = MessageProjection::default();
+    let mut attachment_tasks = tokio::task::JoinSet::new();
+    let mut attachment_aborts = HashMap::new();
     let mut retry_tick = tokio::time::interval(std::time::Duration::from_secs(5));
     retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
@@ -369,6 +406,33 @@ async fn receive_and_command_loop(
             command = commands.recv() => {
                 match command {
                     None => return Ok(()),
+                    Some(Command::SendAttachment {
+                        request_id,
+                        recipient,
+                        filename,
+                        content_type,
+                        data,
+                        group,
+                    }) => {
+                        let mut attachment_manager = manager.clone();
+                        let abort = attachment_tasks.spawn_local(async move {
+                            let result = upload_and_send_attachment(
+                                &mut attachment_manager,
+                                &recipient,
+                                filename,
+                                content_type,
+                                data,
+                                group,
+                            ).await;
+                            (request_id, result)
+                        });
+                        attachment_aborts.insert(request_id, abort);
+                    }
+                    Some(Command::CancelAttachment { request_id }) => {
+                        if let Some(abort) = attachment_aborts.remove(&request_id) {
+                            abort.abort();
+                        }
+                    }
                     Some(command) => {
                         if handle_command_interruptibly(
                             &mut manager,
@@ -380,6 +444,19 @@ async fn receive_and_command_loop(
                             return Ok(());
                         }
                         emit_identity_changes(&manager, &sink).await;
+                    }
+                }
+            }
+            completed = attachment_tasks.join_next(), if !attachment_tasks.is_empty() => {
+                if let Some(Ok((request_id, result))) = completed {
+                    attachment_aborts.remove(&request_id);
+                    match result {
+                        Ok(()) => sink.emit(Event {
+                            kind: EVENT_ATTACHMENT_SENT,
+                            request_id,
+                            ..Event::default()
+                        }),
+                        Err(error) => sink.emit(Event::request_error(request_id, error)),
                     }
                 }
             }
@@ -645,6 +722,83 @@ async fn enqueue_and_send(
     result
 }
 
+async fn upload_and_send_attachment(
+    manager: &mut Manager<SqliteStore, Registered>,
+    recipient: &str,
+    filename: String,
+    content_type: String,
+    data: Vec<u8>,
+    group: bool,
+) -> Result<(), String> {
+    if data.is_empty() || data.len() > MAX_ATTACHMENT_BYTES {
+        return Err("Attachment size is outside the supported range".into());
+    }
+    let pointer = manager
+        .upload_attachment(
+            AttachmentSpec {
+                content_type,
+                length: data.len(),
+                file_name: Some(filename),
+                preview: None,
+                voice_note: None,
+                borderless: None,
+                width: None,
+                height: None,
+                caption: None,
+                blur_hash: None,
+            },
+            data,
+        )
+        .await
+        .map_err(|error| error.to_string())?
+        .map_err(|error| error.to_string())?;
+    let timestamp = now_ms();
+    if group {
+        let key = resolve_group_key(manager, recipient)
+            .await?
+            .ok_or_else(|| "Signal group is not available in the encrypted store".to_owned())?;
+        let revision = manager
+            .store()
+            .group(key)
+            .await
+            .ok()
+            .flatten()
+            .map_or(0, |group| group.revision);
+        manager
+            .send_message_to_group(
+                &key,
+                DataMessage {
+                    attachments: vec![pointer],
+                    timestamp: Some(timestamp),
+                    group_v2: Some(GroupContextV2 {
+                        master_key: Some(key.to_vec()),
+                        revision: Some(revision),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+                timestamp,
+            )
+            .await
+            .map_err(|error| error.to_string())
+    } else {
+        let recipient = parse_recipient(recipient)
+            .ok_or_else(|| "Recipient is not a canonical Signal service identifier".to_owned())?;
+        manager
+            .send_message(
+                recipient,
+                DataMessage {
+                    attachments: vec![pointer],
+                    timestamp: Some(timestamp),
+                    ..Default::default()
+                },
+                timestamp,
+            )
+            .await
+            .map_err(|error| error.to_string())
+    }
+}
+
 async fn replay_unprojected_messages(
     manager: &mut Manager<SqliteStore, Registered>,
     sink: &EventSink,
@@ -865,6 +1019,7 @@ async fn handle_command(
             };
             (request_id, result)
         }
+        Command::SendAttachment { .. } | Command::CancelAttachment { .. } => unreachable!(),
         Command::AcknowledgeMessage { .. } => unreachable!(),
         Command::AcceptIdentity { .. } | Command::DismissIdentity { .. } => unreachable!(),
         Command::MarkRead { .. } => unreachable!(),
@@ -1024,6 +1179,49 @@ async fn emit_data_message(
         .and_then(|group| group.master_key.as_deref())
         .and_then(|key| <[u8; 32]>::try_from(key).ok());
     let flags = if outgoing { FLAG_OUTGOING } else { 0 };
+    let mut downloaded = Vec::new();
+    let mut downloaded_bytes = 0usize;
+    if !outgoing {
+        for attachment in &message.attachments {
+            let declared_size = attachment.size.unwrap_or_default() as usize;
+            if declared_size > MAX_ATTACHMENT_BYTES
+                || downloaded_bytes.saturating_add(declared_size) > MAX_MESSAGE_ATTACHMENT_BYTES
+            {
+                sink.emit(Event::error(
+                    format!(
+                        "Rejected Signal attachment larger than the configured {} MiB limit",
+                        MAX_ATTACHMENT_BYTES / (1024 * 1024)
+                    ),
+                    false,
+                ));
+                continue;
+            }
+            match manager.get_attachment(attachment).await {
+                Ok(data)
+                    if data.len() <= MAX_ATTACHMENT_BYTES
+                        && downloaded_bytes.saturating_add(data.len())
+                            <= MAX_MESSAGE_ATTACHMENT_BYTES =>
+                {
+                    downloaded_bytes += data.len();
+                    downloaded.push((attachment, data));
+                }
+                Ok(_) => sink.emit(Event::error(
+                    "Rejected a Signal attachment which exceeded its size limit after decryption",
+                    false,
+                )),
+                Err(error) => sink.emit(Event::error(
+                    format!("Could not download a Signal attachment: {error}"),
+                    false,
+                )),
+            }
+        }
+    }
+
+    let message_delivery_id = if downloaded.is_empty() {
+        delivery_id
+    } else {
+        0
+    };
 
     if let Some(group_key) = group_key {
         let title = manager
@@ -1044,7 +1242,7 @@ async fn emit_data_message(
         };
         sink.emit(Event {
             kind: EVENT_GROUP_MESSAGE,
-            request_id: delivery_id,
+            request_id: message_delivery_id,
             flags,
             peer_id: Some(group_peer),
             chat_id: Some(group_identifier(&group_key)),
@@ -1056,10 +1254,32 @@ async fn emit_data_message(
     } else {
         sink.emit(Event {
             kind: EVENT_MESSAGE,
-            request_id: delivery_id,
+            request_id: message_delivery_id,
             flags,
             peer_id: Some(peer.to_owned()),
             text: Some(text),
+            timestamp_ms: timestamp,
+            ..Event::default()
+        });
+    }
+
+    let attachment_count = downloaded.len();
+    for (index, (attachment, data)) in downloaded.into_iter().enumerate() {
+        sink.emit(Event {
+            kind: EVENT_ATTACHMENT,
+            request_id: if index + 1 == attachment_count {
+                delivery_id
+            } else {
+                0
+            },
+            peer_id: Some(peer.to_owned()),
+            chat_id: group_key.map(|key| group_identifier(&key)),
+            title: attachment
+                .file_name
+                .clone()
+                .or_else(|| Some("Signal attachment".into())),
+            text: attachment.content_type.clone(),
+            data,
             timestamp_ms: timestamp,
             ..Event::default()
         });
@@ -1251,6 +1471,7 @@ mod tests {
         let sink = EventSink {
             sender,
             overflowed: Arc::clone(&overflowed),
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
         };
 
         sink.emit(Event {
@@ -1265,6 +1486,40 @@ mod tests {
 
         assert!(overflowed.load(Ordering::Acquire));
         assert_eq!(receiver.try_recv().unwrap().kind, EVENT_MESSAGE);
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+    }
+
+    #[test]
+    fn bounds_binary_event_queue_memory() {
+        let (sender, receiver) = mpsc::sync_channel(4);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let queued_bytes = Arc::new(AtomicUsize::new(0));
+        let sink = EventSink {
+            sender,
+            overflowed: Arc::clone(&overflowed),
+            queued_bytes: Arc::clone(&queued_bytes),
+        };
+
+        sink.emit(Event {
+            kind: EVENT_ATTACHMENT,
+            data: vec![0; MAX_QUEUED_EVENT_BYTES],
+            ..Event::default()
+        });
+        sink.emit(Event {
+            kind: EVENT_ATTACHMENT,
+            data: vec![0],
+            ..Event::default()
+        });
+
+        assert!(overflowed.load(Ordering::Acquire));
+        assert_eq!(queued_bytes.load(Ordering::Acquire), MAX_QUEUED_EVENT_BYTES);
+        assert_eq!(
+            receiver.try_recv().unwrap().data.len(),
+            MAX_QUEUED_EVENT_BYTES
+        );
         assert!(matches!(
             receiver.try_recv(),
             Err(mpsc::TryRecvError::Empty)

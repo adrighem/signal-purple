@@ -167,12 +167,17 @@ main(int argc, char **argv)
     g_assert_nonnull(protocol->close);
     g_assert_nonnull(protocol->send_im);
     g_assert_nonnull(protocol->send_typing);
+    g_assert_nonnull(protocol->can_receive_file);
+    g_assert_nonnull(protocol->send_file);
+    g_assert_nonnull(protocol->new_xfer);
     g_assert_nonnull(protocol->blist_node_menu);
     g_assert_nonnull(protocol->chat_info);
     g_assert_nonnull(protocol->chat_info_defaults);
     g_assert_nonnull(protocol->join_chat);
     g_assert_nonnull(protocol->get_chat_name);
     g_assert_nonnull(protocol->chat_send);
+    g_assert_nonnull(protocol->chat_can_receive_file);
+    g_assert_nonnull(protocol->chat_send_file);
 
     chat_info = protocol->chat_info(NULL);
     g_assert_cmpuint(g_list_length(chat_info), ==, 1);

@@ -26,7 +26,8 @@ demonstrated. Version numbers are compatibility targets, not deadlines.
 
 ## Milestone 3: v0.3.0 attachments
 
-- Add bounded attachment transfer with safe temporary storage.
+- Add bounded direct and group attachment transfer without plaintext temporary
+  storage.
 - Verify cancellation, malformed input, and resource limits.
 
 ## Milestone 4: 1.0 release

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use std::ffi::{CString, c_char};
 
-pub const ABI_VERSION: u32 = 3;
+pub const ABI_VERSION: u32 = 4;
 
 pub const EVENT_LINK_QR: u32 = 1;
 pub const EVENT_READY: u32 = 2;
@@ -20,6 +20,8 @@ pub const EVENT_GROUP_SYNC_END: u32 = 15;
 pub const EVENT_GROUP_MEMBER: u32 = 16;
 pub const EVENT_IDENTITY_CHANGE: u32 = 17;
 pub const EVENT_IDENTITY_ACCEPTED: u32 = 18;
+pub const EVENT_ATTACHMENT: u32 = 19;
+pub const EVENT_ATTACHMENT_SENT: u32 = 20;
 
 pub const FLAG_OUTGOING: u32 = 1 << 0;
 pub const FLAG_FATAL: u32 = 1 << 1;

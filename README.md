@@ -25,8 +25,8 @@ to the Purple plugin.
 | Basic group messages | Implemented; live test pending |
 | Typing indicators | Implemented; live test pending |
 | Delivery receipts | Sent by the backend; Purple 2 has no receipt UI |
-| Incoming attachments | Shown as notices only |
-| File transfer, safety-number verification, calls | Not implemented |
+| Incoming and outgoing attachments | Implemented with 25 MiB per-file and bounded-memory limits; live test pending |
+| In-plugin safety-number comparison, calls | Not implemented |
 | Primary-device registration and contact discovery | Out of scope for now |
 
 Signal does not provide a stable third-party client API. Service changes can
@@ -123,15 +123,18 @@ database or secret requires linking a new device.
 
 ## Important limitations
 
-- Unknown contact identities use trust-on-first-use; changed identity keys are
-  rejected. This build has no per-contact acceptance workflow, so that contact
-  remains blocked in the current store. Verifying in an official client does
-  not update signal-purple's separate linked-device store. Pinned Presage can
-  skip an inbound identity error before this adapter sees it, so an affected
-  inbound message may disappear without a Purple warning; outbound sends fail
-  with a generic operation error.
-- Attachment contents are not downloaded or uploaded. Incoming attachment
-  names are rendered as notices.
+- Unknown contact identities use trust-on-first-use. A changed identity for an
+  unverified contact continues after a one-time warning. A changed identity for
+  an explicitly verified contact blocks sending until the buddy-menu acceptance
+  action is used. Acceptance requires out-of-band verification, resets affected
+  sessions, and marks the contact unverified without relinking the account.
+- Direct and group attachments use Purple's native file-transfer UI. Files are
+  limited to 25 MiB each and incoming messages to 50 MiB total. Decrypted
+  incoming data stays in memory while Purple asks for a save location; no
+  plaintext attachment cache is created. At most 64 MiB may wait in the backend
+  event queue and another 64 MiB in unresolved receive prompts. Excess data is
+  rejected visibly. Outgoing attachment uploads can be cancelled, but unlike
+  text messages they are not retained in the restart-persistent outbox.
 - Signal Storage Service groups are projected into Purple's `Signal groups`
   chat-list group. Complete snapshots create missing chats, update titles and
   active membership, flag administrators, remove stale plugin-managed chats,

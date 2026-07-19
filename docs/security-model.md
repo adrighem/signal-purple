@@ -43,6 +43,11 @@ and message bodies are sensitive. Production code must not log them.
 - Worker shutdown is joined before account state is freed.
 - Backend events use a bounded queue; overflow fails visibly and reconnects
   rather than allowing unbounded process memory growth.
+- Attachments are capped at 25 MiB each and 50 MiB per incoming message. Binary
+  backend events and unresolved receive prompts each have separate 64 MiB
+  ceilings. Decrypted incoming bytes remain in memory until saved or rejected;
+  the plugin creates no plaintext attachment cache. Remote filenames are reduced
+  to a basename before Purple uses them.
 - Message projection state is stored in the same SQLCipher database. Purple
   acknowledges a message event only after its synchronous conversation write;
   unacknowledged content is replayed after the next receive queue drain.
@@ -64,8 +69,9 @@ and message bodies are sensitive. Production code must not log them.
   therefore a confirmation that the user completed verification through
   another trusted channel, not an in-plugin cryptographic comparison. This
   path is unit-tested but still needs a controlled live identity replacement.
-- Attachments are names-only; file transfer security and encrypted caching are
-  not implemented.
+- Outgoing attachments are cancellable while their upload is active, but are not
+  restart-persistent like text messages. A crash or disconnect may require the
+  user to send the file again.
 - Pidgin/libpurple 2 is a legacy in-process plugin environment. A memory-safety
   flaw in the UI or another plugin can access this process.
 - Signal does not support third-party clients or promise protocol stability.

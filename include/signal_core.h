@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define SIGNAL_CORE_ABI_VERSION 3u
+#define SIGNAL_CORE_ABI_VERSION 4u
 
 typedef struct SignalCore SignalCore;
 
@@ -40,7 +40,9 @@ typedef enum {
     SIGNAL_EVENT_GROUP_SYNC_END = 15,
     SIGNAL_EVENT_GROUP_MEMBER = 16,
     SIGNAL_EVENT_IDENTITY_CHANGE = 17,
-    SIGNAL_EVENT_IDENTITY_ACCEPTED = 18
+    SIGNAL_EVENT_IDENTITY_ACCEPTED = 18,
+    SIGNAL_EVENT_ATTACHMENT = 19,
+    SIGNAL_EVENT_ATTACHMENT_SENT = 20
 } SignalEventKind;
 
 typedef enum {
@@ -93,6 +95,25 @@ SignalStatus signal_core_send_group_message(SignalCore *core,
                                             uint64_t request_id,
                                             const char *group_key,
                                             const char *message);
+
+SignalStatus signal_core_send_attachment(SignalCore *core,
+                                         uint64_t request_id,
+                                         const char *recipient,
+                                         const char *filename,
+                                         const char *content_type,
+                                         const uint8_t *data,
+                                         size_t data_len);
+
+SignalStatus signal_core_send_group_attachment(SignalCore *core,
+                                               uint64_t request_id,
+                                               const char *group_key,
+                                               const char *filename,
+                                               const char *content_type,
+                                               const uint8_t *data,
+                                               size_t data_len);
+
+SignalStatus signal_core_cancel_attachment(SignalCore *core,
+                                           uint64_t request_id);
 
 SignalStatus signal_core_set_typing(SignalCore *core,
                                     uint64_t request_id,
