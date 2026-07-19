@@ -1,0 +1,18 @@
+{
+  "$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+  "bootstrap-sha": "0db9d8d5330244208e111685d9d71df40aca02e0",
+  "packages": {
+    ".": {
+      "release-type": "simple",
+      "package-name": "signal-purple",
+      "initial-version": "0.1.0",
+      "include-component-in-tag": false,
+      "skip-github-release": true,
+      "extra-files": [
+        "rust/signal-core/Cargo.toml",
+        "rust/signal-core/Cargo.lock",
+        "CITATION.cff"
+      ]
+    }
+  }
+}

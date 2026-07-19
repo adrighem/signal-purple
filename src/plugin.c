@@ -2,7 +2,7 @@
 #include "signal_purple.h"
 
 #ifndef SIGNAL_PURPLE_VERSION
-#define SIGNAL_PURPLE_VERSION "0.1.0-dev"
+#define SIGNAL_PURPLE_VERSION "development"
 #endif
 
 static const char *

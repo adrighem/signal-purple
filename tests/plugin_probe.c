@@ -118,7 +118,8 @@ main(int argc, char **argv)
     g_assert_nonnull(plugin);
     g_assert_cmpstr(purple_plugin_get_id(plugin), ==, SIGNAL_PLUGIN_ID);
     g_assert_cmpstr(purple_plugin_get_name(plugin), ==, "Signal");
-    g_assert_cmpstr(purple_plugin_get_version(plugin), ==, "0.1.0");
+    g_assert_cmpstr(purple_plugin_get_version(plugin), ==,
+                    EXPECTED_PLUGIN_VERSION);
     g_assert_cmpint(plugin->info->type, ==, PURPLE_PLUGIN_PROTOCOL);
     g_assert_true(purple_plugin_load(plugin));
 

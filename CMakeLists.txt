@@ -1,7 +1,13 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 cmake_minimum_required(VERSION 3.25)
 
-project(signal-purple VERSION 0.1.0 LANGUAGES C)
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/version.txt"
+     SIGNAL_PURPLE_VERSION LIMIT_COUNT 1)
+if(NOT SIGNAL_PURPLE_VERSION MATCHES "^[0-9]+\\.[0-9]+\\.[0-9]+$")
+    message(FATAL_ERROR "version.txt must contain one semantic version")
+endif()
+
+project(signal-purple VERSION "${SIGNAL_PURPLE_VERSION}" LANGUAGES C)
 
 include(CTest)
 include(GNUInstallDirs)
@@ -17,6 +23,28 @@ set(SIGNAL_CORE_INSTALL_DIR "${SIGNAL_PURPLE_PLUGIN_DIR}/signal-purple"
     CACHE PATH "private signal-purple backend installation directory")
 
 set(SIGNAL_CORE_MANIFEST "${CMAKE_CURRENT_SOURCE_DIR}/rust/signal-core/Cargo.toml")
+file(STRINGS "${SIGNAL_CORE_MANIFEST}" SIGNAL_CORE_VERSION_LINE
+     REGEX "^version = " LIMIT_COUNT 1)
+if(NOT SIGNAL_CORE_VERSION_LINE MATCHES
+   "version = \"${PROJECT_VERSION}\"")
+    message(FATAL_ERROR "Rust and product versions do not match")
+endif()
+
+file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/CITATION.cff"
+     SIGNAL_CITATION_VERSION_LINE REGEX "^version: " LIMIT_COUNT 1)
+if(NOT SIGNAL_CITATION_VERSION_LINE MATCHES
+   "version: ${PROJECT_VERSION}")
+    message(FATAL_ERROR "Citation and product versions do not match")
+endif()
+
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/rust/signal-core/Cargo.lock"
+     SIGNAL_CORE_LOCK)
+string(FIND "${SIGNAL_CORE_LOCK}"
+       "name = \"signal-core\"\nversion = \"${PROJECT_VERSION}\""
+       SIGNAL_CORE_LOCK_VERSION_POSITION)
+if(SIGNAL_CORE_LOCK_VERSION_POSITION EQUAL -1)
+    message(FATAL_ERROR "Cargo lock and product versions do not match")
+endif()
 set(SIGNAL_CARGO_TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/rust/signal-core/target"
     CACHE PATH "Cargo target directory for the Signal backend")
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
@@ -108,7 +136,9 @@ if(BUILD_TESTING)
 
     add_executable(plugin-probe tests/plugin_probe.c)
     target_compile_features(plugin-probe PRIVATE c_std_11)
-    target_compile_definitions(plugin-probe PRIVATE PURPLE_PLUGINS)
+    target_compile_definitions(plugin-probe PRIVATE
+        PURPLE_PLUGINS
+        EXPECTED_PLUGIN_VERSION="${PROJECT_VERSION}")
     target_compile_options(plugin-probe PRIVATE -Wall -Wextra -Wpedantic)
     target_include_directories(plugin-probe PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
