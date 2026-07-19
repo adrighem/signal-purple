@@ -819,8 +819,7 @@ signal_identity_changed(SignalConnection *connection, const SignalEvent *event)
         connection->core, connection->next_request_id++, event->peer_id);
     if (status != SIGNAL_STATUS_OK)
         purple_debug_warning(
-            "signal-purple", "Could not dismiss identity notice for %s: %d\n",
-            event->peer_id, status);
+            "signal-purple", "Could not dismiss identity notice: %d\n", status);
 }
 
 static void
