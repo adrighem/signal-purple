@@ -60,6 +60,15 @@ Direct chats use canonical Signal service identifiers synchronized into the
 buddy list. Phone-number discovery is not implemented. Start with a synced
 contact rather than entering a phone number.
 
+## A sent message reports a failure
+
+Direct and group messages are stored in the encrypted outbox before the first
+network attempt. A transient failure leaves the original message queued with
+bounded exponential backoff, including across Pidgin restarts. Repeated
+notifications at later attempt thresholds mean the message is still queued,
+not that a new copy was created. Identity-blocked messages retry immediately
+after the changed identity is accepted.
+
 ## Identity changes block messages
 
 Incoming messages continue across an identity replacement to avoid losing an

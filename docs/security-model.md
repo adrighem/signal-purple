@@ -49,6 +49,9 @@ and message bodies are sensitive. Production code must not log them.
 - Read receipts are emitted only after Purple reports focus. Pending receipt
   metadata is held in process memory and is not written to Purple's plaintext
   configuration.
+- Unsent message bodies, recipients, timestamps, and retry counters remain in
+  the SQLCipher outbox. Purple receives errors at the first failure and at
+  bounded later attempts without logging the message body.
 
 ## Known gaps
 

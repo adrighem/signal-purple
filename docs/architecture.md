@@ -77,6 +77,10 @@ older messages from the primary phone or Signal service.
 - Read receipts are held until Purple reports that the direct or group
   conversation is focused. Background delivery and notification rendering do
   not mark a message read.
+- Direct and group sends are written to an encrypted outbox before network
+  submission. Failed entries retain their original Signal timestamp and retry
+  with bounded exponential backoff across reconnects. Accepting a verified
+  identity change immediately expedites that contact's queued messages.
 - Presage acknowledges an envelope to Signal before the Purple UI can display
   it, but saves supported content in SQLCipher first. signal-purple records a
   separate encrypted projection acknowledgment only after Purple accepts the

@@ -18,6 +18,7 @@ use presage::proto::{
 use presage::store::{ContentsStore, StateStore};
 use presage::{Manager, manager::Registered};
 use presage_store_sqlite::SqliteStore;
+use presage_store_sqlite::{ClientOutboxKind, ClientOutboxMessage};
 use qrcode::QrCode;
 use qrcode::types::Color;
 use sha2::{Digest, Sha256};
@@ -280,6 +281,11 @@ async fn receive_and_command_loop(
         .initialize_identity_change_tracking()
         .await
         .map_err(|error| format!("Could not initialize identity-change tracking: {error}"))?;
+    manager
+        .store()
+        .initialize_client_outbox()
+        .await
+        .map_err(|error| format!("Could not initialize the encrypted outbox: {error}"))?;
     let messages = {
         let mut receive = Box::pin(manager.receive_messages());
         tokio::select! {
@@ -303,6 +309,8 @@ async fn receive_and_command_loop(
     let mut synchronized = false;
     let mut groups_dirty = false;
     let mut projection = MessageProjection::default();
+    let mut retry_tick = tokio::time::interval(std::time::Duration::from_secs(5));
+    retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
     loop {
         tokio::select! {
@@ -325,6 +333,7 @@ async fn receive_and_command_loop(
                                 &mut projection,
                             ).await;
                             emit_identity_changes(&manager, &sink).await;
+                            retry_outbox(&mut manager, &sink).await;
                             groups_dirty = false;
                             synchronized = true;
                             ready.store(true, Ordering::Release);
@@ -373,6 +382,9 @@ async fn receive_and_command_loop(
                         emit_identity_changes(&manager, &sink).await;
                     }
                 }
+            }
+            _ = retry_tick.tick(), if synchronized => {
+                retry_outbox(&mut manager, &sink).await;
             }
             _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
         }
@@ -492,6 +504,147 @@ async fn emit_identity_changes(manager: &Manager<SqliteStore, Registered>, sink:
     }
 }
 
+fn retry_delay_ms(attempts: u32) -> u64 {
+    let exponent = attempts.min(9);
+    5_000u64.saturating_mul(1u64 << exponent).min(3_600_000)
+}
+
+async fn attempt_outbox_message(
+    manager: &mut Manager<SqliteStore, Registered>,
+    message: &ClientOutboxMessage,
+) -> Result<(), String> {
+    match message.kind {
+        ClientOutboxKind::Direct => {
+            let recipient = parse_recipient(&message.recipient).ok_or_else(|| {
+                "Recipient is not a canonical Signal service identifier".to_owned()
+            })?;
+            manager
+                .send_message(
+                    recipient,
+                    DataMessage {
+                        body: Some(message.body.clone()),
+                        timestamp: Some(message.timestamp),
+                        ..Default::default()
+                    },
+                    message.timestamp,
+                )
+                .await
+                .map_err(|error| error.to_string())
+        }
+        ClientOutboxKind::Group => {
+            let key = resolve_group_key(manager, &message.recipient)
+                .await?
+                .ok_or_else(|| "Signal group is not available in the encrypted store".to_owned())?;
+            let revision = manager
+                .store()
+                .group(key)
+                .await
+                .ok()
+                .flatten()
+                .map_or(0, |group| group.revision);
+            manager
+                .send_message_to_group(
+                    &key,
+                    DataMessage {
+                        body: Some(message.body.clone()),
+                        timestamp: Some(message.timestamp),
+                        group_v2: Some(GroupContextV2 {
+                            master_key: Some(key.to_vec()),
+                            revision: Some(revision),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    },
+                    message.timestamp,
+                )
+                .await
+                .map_err(|error| error.to_string())
+        }
+    }
+}
+
+async fn finish_outbox_attempt(
+    manager: &mut Manager<SqliteStore, Registered>,
+    message: &ClientOutboxMessage,
+    result: &Result<(), String>,
+) -> Result<(), String> {
+    match result {
+        Ok(()) => manager
+            .store()
+            .complete_client_message(message.id)
+            .await
+            .map_err(|error| {
+                format!("Message sent but its outbox entry could not be cleared: {error}")
+            }),
+        Err(_) => {
+            let attempts = message.attempts.saturating_add(1);
+            manager
+                .store()
+                .defer_client_message(
+                    message.id,
+                    attempts,
+                    now_ms().saturating_add(retry_delay_ms(attempts)),
+                )
+                .await
+                .map_err(|error| format!("Could not schedule message retry: {error}"))
+        }
+    }
+}
+
+async fn retry_outbox(manager: &mut Manager<SqliteStore, Registered>, sink: &EventSink) {
+    let messages = match manager.store().due_client_messages(now_ms()).await {
+        Ok(messages) => messages,
+        Err(error) => {
+            sink.emit(Event::error(
+                format!("Could not read the encrypted Signal outbox: {error}"),
+                false,
+            ));
+            return;
+        }
+    };
+    for message in messages {
+        let result = attempt_outbox_message(manager, &message).await;
+        if let Err(error) = finish_outbox_attempt(manager, &message, &result).await {
+            sink.emit(Event::error(error, false));
+        } else if let Err(error) = result
+            && matches!(message.attempts.saturating_add(1), 4 | 8)
+        {
+            sink.emit(Event::error(
+                format!(
+                    "A Signal message is still queued after {} attempts: {error}",
+                    message.attempts.saturating_add(1)
+                ),
+                false,
+            ));
+        }
+    }
+}
+
+async fn enqueue_and_send(
+    manager: &mut Manager<SqliteStore, Registered>,
+    kind: ClientOutboxKind,
+    recipient: String,
+    body: String,
+) -> Result<(), String> {
+    let timestamp = now_ms();
+    let id = manager
+        .store()
+        .enqueue_client_message(kind, &recipient, &body, timestamp)
+        .await
+        .map_err(|error| format!("Could not save the message in the encrypted outbox: {error}"))?;
+    let message = ClientOutboxMessage {
+        id,
+        kind,
+        recipient,
+        body,
+        timestamp,
+        attempts: 0,
+    };
+    let result = attempt_outbox_message(manager, &message).await;
+    finish_outbox_attempt(manager, &message, &result).await?;
+    result
+}
+
 async fn replay_unprojected_messages(
     manager: &mut Manager<SqliteStore, Registered>,
     sink: &EventSink,
@@ -595,12 +748,21 @@ async fn handle_command(
     } = command
     {
         match manager.store().accept_identity_change(&recipient).await {
-            Ok(true) => sink.emit(Event {
-                kind: EVENT_IDENTITY_ACCEPTED,
-                request_id,
-                peer_id: Some(recipient),
-                ..Event::default()
-            }),
+            Ok(true) => {
+                if let Err(error) = manager.store().expedite_client_messages(&recipient).await {
+                    sink.emit(Event::error(
+                        format!("Could not expedite queued Signal messages: {error}"),
+                        false,
+                    ));
+                }
+                sink.emit(Event {
+                    kind: EVENT_IDENTITY_ACCEPTED,
+                    request_id,
+                    peer_id: Some(recipient),
+                    ..Event::default()
+                });
+                retry_outbox(manager, sink).await;
+            }
             Ok(false) => sink.emit(Event::request_error(
                 request_id,
                 "No verified identity change is pending for this contact",
@@ -653,23 +815,10 @@ async fn handle_command(
             recipient,
             message,
         } => {
-            let result = match parse_recipient(&recipient) {
-                Some(recipient) => {
-                    let timestamp = now_ms();
-                    manager
-                        .send_message(
-                            recipient,
-                            DataMessage {
-                                body: Some(message),
-                                timestamp: Some(timestamp),
-                                ..Default::default()
-                            },
-                            timestamp,
-                        )
-                        .await
-                        .map_err(|error| error.to_string())
-                }
-                None => Err("Recipient is not a canonical Signal service identifier".into()),
+            let result = if parse_recipient(&recipient).is_some() {
+                enqueue_and_send(manager, ClientOutboxKind::Direct, recipient, message).await
+            } else {
+                Err("Recipient is not a canonical Signal service identifier".into())
             };
             (request_id, result)
         }
@@ -679,32 +828,8 @@ async fn handle_command(
             message,
         } => {
             let result = match resolve_group_key(manager, &group_key).await {
-                Ok(Some(key)) => {
-                    let timestamp = now_ms();
-                    let revision = manager
-                        .store()
-                        .group(key)
-                        .await
-                        .ok()
-                        .flatten()
-                        .map_or(0, |group| group.revision);
-                    manager
-                        .send_message_to_group(
-                            &key,
-                            DataMessage {
-                                body: Some(message),
-                                timestamp: Some(timestamp),
-                                group_v2: Some(GroupContextV2 {
-                                    master_key: Some(key.to_vec()),
-                                    revision: Some(revision),
-                                    ..Default::default()
-                                }),
-                                ..Default::default()
-                            },
-                            timestamp,
-                        )
-                        .await
-                        .map_err(|error| error.to_string())
+                Ok(Some(_)) => {
+                    enqueue_and_send(manager, ClientOutboxKind::Group, group_key, message).await
                 }
                 Ok(None) => Err("Signal group is not available in the encrypted store".into()),
                 Err(error) => Err(error),
@@ -1109,6 +1234,14 @@ mod tests {
 
         assert!(!content_has_group_context(&direct));
         assert!(content_has_group_context(&group));
+    }
+
+    #[test]
+    fn bounds_outbox_retry_backoff() {
+        assert_eq!(retry_delay_ms(0), 5_000);
+        assert_eq!(retry_delay_ms(1), 10_000);
+        assert_eq!(retry_delay_ms(4), 80_000);
+        assert_eq!(retry_delay_ms(32), 2_560_000);
     }
 
     #[test]
