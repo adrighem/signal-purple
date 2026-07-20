@@ -4,6 +4,25 @@ Live Signal compatibility is recorded per repository revision and test date.
 A partial pass does not establish complete compatibility with the production
 service.
 
+## 2026-07-20 legacy-contact migration and idle validation
+
+The installed ABI-v6 plugin was restarted against the normal desktop profile.
+Before the fix, the connected Signal account had 49 snapshot-confirmed contacts
+in the exact legacy `Signal` group, all created by an older plugin version and
+missing the current managed marker. After one authoritative contact snapshot,
+all 49 were marked and moved into the already-populated default `Buddies` group
+alongside its 68 non-Signal buddies. No Signal contacts remained in `Signal`,
+and all 11 managed Signal chats remained in `Chats`. Aggregate inspection found
+no custom placements, local aliases, merged contacts, duplicates, or
+cross-protocol entries in the migration source.
+
+The Signal account remained connected while a 30-second post-restart sample
+measured Pidgin at 0.03% of one CPU core and `signal-purple-core` at 0.00%. All
+22 process threads were sleeping or waiting; the Signal core was blocked in
+`do_epoll_wait`. The running process mapped the current installed plugin and
+core inodes with no deleted-library mappings. The reported full-core idle spin
+did not reproduce.
+
 ## 2026-07-20 basic-group implementation validation
 
 The current implementation and automated tests cover stable opaque Purple
@@ -11,8 +30,7 @@ conversation identity, local-alias preservation, exact Storage Service record
 completeness, current-state refresh of discovered and cached groups, atomic
 active-member reconciliation, and send/join rejection outside the active set.
 They also cover the confirmed remote-leave request and the rule that a managed
-Purple chat is removed only after a
-successful completion.
+Purple chat is removed only after a successful completion.
 
 Remote leave is implementation-tested, but it has not yet been exercised
 against the production Signal service. The authoritative refresh/pruning path
@@ -24,8 +42,8 @@ The previously installed ABI-v4 build was also sampled after a high-CPU report.
 No full-core spin reproduced during the sample: Pidgin averaged about 0.5% CPU,
 the Signal worker about 0.006%, and all threads slept normally. The sample did
 confirm approximately 50 idle GLib wakeups per second from the old 20 ms event
-poll. ABI v6 replaces that timer with descriptor-driven wakeups; its live idle
-CPU still needs confirmation after Pidgin loads the new libraries.
+poll. ABI v6 replaces that timer with descriptor-driven wakeups; the live check
+above confirms the new worker sleeps while idle.
 
 ## 2026-07-19 isolated-profile run
 

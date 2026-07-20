@@ -602,9 +602,10 @@ signal_add_contact(SignalConnection *connection, const SignalEvent *event)
     connection->contact_sync_contacts++;
     signal_contact_sync_mark(&connection->contact_sync, event->peer_id);
     account = purple_connection_get_account(connection->gc);
-    buddy = signal_blist_sync_find_buddy(account, event->peer_id);
-    if (buddy != NULL)
-        buddy = signal_blist_sync_migrate_buddy(buddy);
+    /* The snapshot is authoritative for this account and identifier, so an
+     * unmarked buddy in the exact group used by older signal-purple builds is
+     * safe to adopt. Custom placements and other accounts are not candidates. */
+    buddy = signal_blist_sync_adopt_legacy_buddy(account, event->peer_id);
     managed =
         buddy != NULL &&
         purple_blist_node_get_bool(PURPLE_BLIST_NODE(buddy),

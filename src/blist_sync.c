@@ -40,7 +40,8 @@ signal_blist_sync_find_buddy(PurpleAccount *account, const char *name)
 {
     GSList *buddies;
     PurpleBuddy *managed = NULL;
-    PurpleBuddy *legacy = NULL;
+    PurpleBuddy *managed_legacy = NULL;
+    PurpleBuddy *unmanaged_legacy = NULL;
     PurpleBuddy *fallback;
 
     g_return_val_if_fail(account != NULL, NULL);
@@ -50,25 +51,54 @@ signal_blist_sync_find_buddy(PurpleAccount *account, const char *name)
     buddies = purple_find_buddies(account, name);
     for (GSList *item = buddies; item != NULL; item = item->next) {
         PurpleBuddy *candidate = item->data;
+        gboolean candidate_managed = signal_blist_sync_is_managed(
+            PURPLE_BLIST_NODE(candidate), SIGNAL_SYNCED_BUDDY_KEY);
+        gboolean candidate_legacy = signal_blist_sync_group_is(
+            purple_buddy_get_group(candidate), SIGNAL_LEGACY_BUDDY_GROUP);
 
-        if (!signal_blist_sync_is_managed(PURPLE_BLIST_NODE(candidate),
-                                          SIGNAL_SYNCED_BUDDY_KEY))
-            continue;
-        if (signal_blist_sync_group_is(purple_buddy_get_group(candidate),
-                                       SIGNAL_LEGACY_BUDDY_GROUP)) {
-            legacy = candidate;
+        if (candidate_managed && candidate_legacy) {
+            managed_legacy = candidate;
             break;
         }
-        if (managed == NULL)
+        if (candidate_managed && managed == NULL)
             managed = candidate;
+        else if (!candidate_managed && candidate_legacy &&
+                 unmanaged_legacy == NULL)
+            unmanaged_legacy = candidate;
     }
     g_slist_free(buddies);
 
-    if (legacy != NULL)
-        return legacy;
+    if (managed_legacy != NULL)
+        return managed_legacy;
     if (managed != NULL)
         return managed;
+    if (unmanaged_legacy != NULL)
+        return unmanaged_legacy;
     return fallback;
+}
+
+PurpleBuddy *
+signal_blist_sync_adopt_legacy_buddy(PurpleAccount *account,
+                                     const char *name)
+{
+    PurpleBuddy *buddy;
+
+    g_return_val_if_fail(account != NULL, NULL);
+    g_return_val_if_fail(name != NULL && name[0] != '\0', NULL);
+
+    buddy = signal_blist_sync_find_buddy(account, name);
+    if (buddy == NULL)
+        return NULL;
+
+    if (!signal_blist_sync_is_managed(PURPLE_BLIST_NODE(buddy),
+                                      SIGNAL_SYNCED_BUDDY_KEY) &&
+        purple_buddy_get_account(buddy) == account &&
+        signal_blist_sync_group_is(purple_buddy_get_group(buddy),
+                                   SIGNAL_LEGACY_BUDDY_GROUP))
+        purple_blist_node_set_bool(PURPLE_BLIST_NODE(buddy),
+                                   SIGNAL_SYNCED_BUDDY_KEY, TRUE);
+
+    return signal_blist_sync_migrate_buddy(buddy);
 }
 
 PurpleBuddy *

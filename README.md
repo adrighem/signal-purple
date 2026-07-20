@@ -19,7 +19,7 @@ to the Purple plugin.
 | Fresh-store linked-device QR flow | Live isolated-profile test passed 2026-07-19 |
 | Existing linked-device reconnect | Live isolated-profile test passed 2026-07-19 |
 | SQLCipher store with libsecret key | Implemented |
-| Signal contact buddy-list create/update/delete | Implemented; 46-contact create/refresh live-tested and snapshot reconciliation unit-tested |
+| Signal contact buddy-list create/update/delete | Implemented; 46-contact creation and 49-contact legacy migration live-tested; snapshot reconciliation unit-tested |
 | Group discovery, active-membership reconciliation, and pruning | Implemented; earlier 11-group discovery and 3-member projection live-tested, authoritative refresh live test pending |
 | Plain-text direct messages | Live isolated-profile test passed 2026-07-19 |
 | Basic group messages | Implemented for refreshed active memberships; live send test pending |
@@ -160,8 +160,9 @@ database or secret requires linking a new device.
   Closing a conversation tab is also local-only and never leaves the group.
 - Synchronized contacts are projected into Purple's localized default buddy
   group (for example, `Friends` or `Buddies`). Each connection requests a fresh
-  contact sync from the primary phone. Existing managed contacts in the legacy
-  `Signal` group move to the default group on sync, while contact aliases,
+  contact sync from the primary phone. Existing contacts in the exact legacy
+  `Signal` group are adopted only when the current Signal snapshot confirms
+  their account and identifier, then move to the default group. Contact aliases,
   locally merged buddies, and custom placement are preserved.
   Complete snapshots create missing buddies, update server aliases, and remove
   previously synchronized contacts that are no longer present. Local aliases

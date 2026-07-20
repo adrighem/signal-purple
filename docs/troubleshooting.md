@@ -55,11 +55,12 @@ filter does not hide them in the default buddy group. Older builds require
 ## Contacts or chats remain in the old Signal groups
 
 Reconnect the account and let contact and group synchronization finish. The
-plugin moves its managed nodes from the exact legacy groups `Signal` and
-`Signal groups` into Purple's localized default buddy and chat groups. It does
-not move user-created nodes or managed nodes that you already placed in a
-custom group. After moving or removing its last managed node, the plugin
-removes the legacy group if it is empty.
+plugin adopts an unmarked contact in the exact legacy `Signal` group only when
+the current Signal snapshot confirms the same account and identifier. It then
+moves adopted contacts and managed chats from `Signal` and `Signal groups` into
+Purple's localized default buddy and chat groups. It does not move custom
+placements or unmatched user-created nodes. After moving or removing its last
+managed node, the plugin removes the legacy group if it is empty.
 
 ## Leaving or removing a Signal group
 

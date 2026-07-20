@@ -13,6 +13,10 @@
 void signal_blist_sync_add_buddy(PurpleBuddy *buddy);
 PurpleBuddy *signal_blist_sync_find_buddy(PurpleAccount *account,
                                           const char *name);
+/* Resolve a contact from an authoritative snapshot. An unmarked buddy is
+ * adopted only when it is the selected exact legacy-group match. */
+PurpleBuddy *signal_blist_sync_adopt_legacy_buddy(PurpleAccount *account,
+                                                  const char *name);
 PurpleBuddy *signal_blist_sync_migrate_buddy(PurpleBuddy *buddy);
 gboolean signal_blist_sync_is_legacy_buddy_group(PurpleGroup *group);
 void signal_blist_sync_remove_empty_legacy_buddy_group(void);

@@ -25,6 +25,12 @@ semantic versioning after the first stable release.
 
 ## [Unreleased]
 
+### Fixed
+
+- Adopt contacts from the exact legacy `Signal` group only when the current
+  authoritative snapshot confirms the same account and identifier, allowing
+  older profiles to migrate without moving custom or unrelated buddies.
+
 ### Changed
 
 - Place synchronized contacts and chats in Purple's localized default groups,

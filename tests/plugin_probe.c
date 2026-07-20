@@ -254,6 +254,117 @@ test_buddy_legacy_migration(PurpleAccount *account,
 }
 
 static void
+test_buddy_legacy_adoption(PurplePluginProtocolInfo *protocol,
+                           PurpleAccount *account,
+                           PurpleGroup *default_group)
+{
+    PurpleAccount *unrelated_account;
+    PurpleGroup *legacy_group;
+    PurpleGroup *custom_group;
+    PurpleBuddy *legacy;
+    PurpleBuddy *adopted;
+    PurpleBuddy *custom;
+    PurpleBuddy *managed_custom;
+    PurpleBuddy *priority_legacy;
+    PurpleBuddy *destination_duplicate;
+    PurpleBuddy *deduplicated;
+    PurpleBuddy *merged_unrelated;
+    PurpleBuddy *unrelated;
+    PurpleContact *contact;
+
+    unrelated_account =
+        purple_account_new("unrelated-test", "prpl-unrelated-test");
+    unrelated_account->presence =
+        purple_presence_new_for_account(unrelated_account);
+    purple_account_set_status_types(
+        unrelated_account, protocol->status_types(unrelated_account));
+    legacy_group = purple_group_new(SIGNAL_LEGACY_BUDDY_GROUP);
+    purple_blist_add_group(legacy_group, NULL);
+    custom_group = purple_group_new("Legacy adoption custom placement");
+    purple_blist_add_group(custom_group, NULL);
+
+    custom = add_buddy(account, custom_group, "custom-authoritative", FALSE);
+    purple_blist_alias_buddy(custom, "Custom local alias");
+    g_assert_true(signal_blist_sync_adopt_legacy_buddy(
+                      account, "custom-authoritative") == custom);
+    g_assert_true(purple_buddy_get_group(custom) == custom_group);
+    g_assert_cmpstr(purple_buddy_get_local_buddy_alias(custom), ==,
+                    "Custom local alias");
+    g_assert_false(purple_blist_node_get_bool(PURPLE_BLIST_NODE(custom),
+                                              SIGNAL_SYNCED_BUDDY_KEY));
+
+    unrelated = add_buddy(unrelated_account, legacy_group,
+                          "legacy-authoritative", FALSE);
+    legacy = add_buddy(account, legacy_group, "legacy-authoritative", FALSE);
+    purple_blist_alias_buddy(legacy, "Legacy local alias");
+    contact = purple_buddy_get_contact(legacy);
+    purple_blist_alias_contact(contact, "Merged legacy alias");
+    merged_unrelated =
+        purple_buddy_new(unrelated_account, "merged-unrelated", NULL);
+    purple_blist_add_buddy(merged_unrelated, contact, NULL, NULL);
+
+    adopted = signal_blist_sync_adopt_legacy_buddy(
+        account, "legacy-authoritative");
+    g_assert_nonnull(adopted);
+    g_assert_true(purple_buddy_get_account(adopted) == account);
+    g_assert_true(purple_buddy_get_group(adopted) == default_group);
+    g_assert_cmpstr(purple_buddy_get_local_buddy_alias(adopted), ==,
+                    "Legacy local alias");
+    g_assert_true(purple_buddy_get_contact(adopted) == contact);
+    g_assert_cmpstr(purple_contact_get_alias(contact), ==,
+                    "Merged legacy alias");
+    g_assert_true(purple_buddy_get_contact(merged_unrelated) == contact);
+    g_assert_true(purple_buddy_get_group(merged_unrelated) == default_group);
+    g_assert_false(purple_blist_node_get_bool(
+        PURPLE_BLIST_NODE(merged_unrelated), SIGNAL_SYNCED_BUDDY_KEY));
+    g_assert_true(purple_blist_node_get_bool(PURPLE_BLIST_NODE(adopted),
+                                             SIGNAL_SYNCED_BUDDY_KEY));
+    g_assert_true(purple_buddy_get_group(unrelated) == legacy_group);
+    g_assert_false(purple_blist_node_get_bool(PURPLE_BLIST_NODE(unrelated),
+                                              SIGNAL_SYNCED_BUDDY_KEY));
+
+    managed_custom = add_buddy(account, custom_group,
+                               "managed-custom-priority", TRUE);
+    purple_blist_alias_buddy(managed_custom, "Managed custom alias");
+    priority_legacy = add_buddy(account, legacy_group,
+                                "managed-custom-priority", FALSE);
+    g_assert_true(signal_blist_sync_find_buddy(
+                      account, "managed-custom-priority") == managed_custom);
+    g_assert_true(signal_blist_sync_adopt_legacy_buddy(
+                      account, "managed-custom-priority") == managed_custom);
+    g_assert_true(purple_buddy_get_group(managed_custom) == custom_group);
+    g_assert_cmpstr(purple_buddy_get_local_buddy_alias(managed_custom), ==,
+                    "Managed custom alias");
+    g_assert_true(purple_buddy_get_group(priority_legacy) == legacy_group);
+    g_assert_false(purple_blist_node_get_bool(
+        PURPLE_BLIST_NODE(priority_legacy), SIGNAL_SYNCED_BUDDY_KEY));
+
+    destination_duplicate = add_buddy(
+        account, default_group, "legacy-adoption-deduplicate", FALSE);
+    add_buddy(account, legacy_group, "legacy-adoption-deduplicate", FALSE);
+    deduplicated = signal_blist_sync_adopt_legacy_buddy(
+        account, "legacy-adoption-deduplicate");
+    g_assert_true(deduplicated == destination_duplicate);
+    g_assert_true(purple_buddy_get_group(deduplicated) == default_group);
+    g_assert_false(purple_blist_node_get_bool(PURPLE_BLIST_NODE(deduplicated),
+                                              SIGNAL_SYNCED_BUDDY_KEY));
+    g_assert_null(purple_find_buddy_in_group(
+        account, "legacy-adoption-deduplicate", legacy_group));
+
+    purple_blist_remove_buddy(priority_legacy);
+    purple_blist_remove_buddy(unrelated);
+    purple_blist_remove_buddy(merged_unrelated);
+    purple_blist_remove_buddy(adopted);
+    purple_blist_remove_buddy(deduplicated);
+    purple_blist_remove_buddy(managed_custom);
+    signal_blist_sync_remove_empty_legacy_buddy_group();
+    g_assert_null(purple_find_group(SIGNAL_LEGACY_BUDDY_GROUP));
+    purple_blist_remove_buddy(custom);
+    purple_blist_remove_group(custom_group);
+    purple_account_destroy(unrelated_account);
+}
+
+static void
 test_chat_legacy_migration(PurpleAccount *account,
                            PurpleGroup *default_group)
 {
@@ -631,6 +742,8 @@ main(int argc, char **argv)
     test_default_blist_placement(sync_account, &default_buddy_group,
                                  &default_chat_group);
     test_buddy_legacy_migration(sync_account, default_buddy_group);
+    test_buddy_legacy_adoption(protocol, sync_account,
+                               default_buddy_group);
     test_chat_legacy_migration(sync_account, default_chat_group);
 
     sync_group = purple_group_new("Group sync tests");
