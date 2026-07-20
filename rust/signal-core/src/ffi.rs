@@ -13,7 +13,7 @@ use zeroize::Zeroizing;
 
 const BACKEND_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
-use crate::backend::{self, Command, Config, EventNotification};
+use crate::backend::{self, Command, Config, EventNotification, WorkerContext};
 use crate::event::{ABI_VERSION, Event, OwnedEvent, SignalEvent};
 
 const MAX_RECIPIENT_BYTES: usize = 256;
@@ -206,17 +206,17 @@ pub unsafe extern "C" fn signal_core_new(
                 .name("signal-purple-core".into())
                 .stack_size(BACKEND_THREAD_STACK_BYTES)
                 .spawn(move || {
-                    backend::run_worker(
-                        worker_config,
-                        command_rx,
-                        shutdown_rx,
-                        event_tx,
-                        worker_event_notification,
-                        worker_event_notifier,
-                        worker_event_overflowed,
-                        worker_queued_event_bytes,
-                        worker_ready,
-                    );
+                    backend::run_worker(WorkerContext {
+                        config: worker_config,
+                        commands: command_rx,
+                        shutdown: shutdown_rx,
+                        events: event_tx,
+                        event_notification: worker_event_notification,
+                        event_notification_writer: worker_event_notifier,
+                        overflowed: worker_event_overflowed,
+                        queued_bytes: worker_queued_event_bytes,
+                        ready: worker_ready,
+                    });
                 })
                 .map_err(|_| SignalStatus::InternalError)
         );

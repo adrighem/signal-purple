@@ -49,6 +49,18 @@ pub struct Config {
     pub passphrase: Zeroizing<String>,
 }
 
+pub(crate) struct WorkerContext {
+    pub(crate) config: Config,
+    pub(crate) commands: tokio_mpsc::Receiver<Command>,
+    pub(crate) shutdown: watch::Receiver<bool>,
+    pub(crate) events: mpsc::SyncSender<Event>,
+    pub(crate) event_notification: Arc<EventNotification>,
+    pub(crate) event_notification_writer: Arc<UnixStream>,
+    pub(crate) overflowed: Arc<AtomicBool>,
+    pub(crate) queued_bytes: Arc<AtomicUsize>,
+    pub(crate) ready: Arc<AtomicBool>,
+}
+
 #[derive(Debug)]
 pub enum Command {
     SendMessage {
@@ -431,17 +443,18 @@ impl EventSink {
     }
 }
 
-pub fn run_worker(
-    config: Config,
-    commands: tokio_mpsc::Receiver<Command>,
-    shutdown: watch::Receiver<bool>,
-    events: mpsc::SyncSender<Event>,
-    event_notification: Arc<EventNotification>,
-    event_notification_writer: Arc<UnixStream>,
-    overflowed: Arc<AtomicBool>,
-    queued_bytes: Arc<AtomicUsize>,
-    ready: Arc<AtomicBool>,
-) {
+pub(crate) fn run_worker(context: WorkerContext) {
+    let WorkerContext {
+        config,
+        commands,
+        shutdown,
+        events,
+        event_notification,
+        event_notification_writer,
+        overflowed,
+        queued_bytes,
+        ready,
+    } = context;
     let sink = EventSink {
         sender: events,
         notification: event_notification,
@@ -1578,11 +1591,7 @@ async fn handle_content(
         ContentBody::DataMessage(message) => {
             let disposition = emit_data_message(
                 manager,
-                message,
-                &sender,
-                false,
-                timestamp,
-                delivery_id,
+                DataMessageProjection::incoming(message, &sender, timestamp, delivery_id),
                 sink,
                 departed_groups,
             )
@@ -1609,11 +1618,7 @@ async fn handle_content(
         }) => {
             return emit_data_message(
                 manager,
-                message,
-                &sender,
-                false,
-                timestamp,
-                delivery_id,
+                DataMessageProjection::incoming(message, &sender, timestamp, delivery_id),
                 sink,
                 departed_groups,
             )
@@ -1628,11 +1633,7 @@ async fn handle_content(
                     .map_or_else(|| sender.clone(), |id| id.service_id_string());
                 return emit_data_message(
                     manager,
-                    message,
-                    &peer,
-                    true,
-                    timestamp,
-                    delivery_id,
+                    DataMessageProjection::outgoing(message, &peer, timestamp, delivery_id),
                     sink,
                     departed_groups,
                 )
@@ -1647,11 +1648,7 @@ async fn handle_content(
                     .map_or_else(|| sender.clone(), |id| id.service_id_string());
                 return emit_data_message(
                     manager,
-                    message,
-                    &peer,
-                    true,
-                    timestamp,
-                    delivery_id,
+                    DataMessageProjection::outgoing(message, &peer, timestamp, delivery_id),
                     sink,
                     departed_groups,
                 )
@@ -1686,16 +1683,49 @@ async fn handle_content(
     ProjectionDisposition::Complete
 }
 
-async fn emit_data_message(
-    manager: &Manager<SqliteStore, Registered>,
-    message: &DataMessage,
-    peer: &str,
+struct DataMessageProjection<'a> {
+    message: &'a DataMessage,
+    peer: &'a str,
     outgoing: bool,
     timestamp: u64,
     delivery_id: u64,
+}
+
+impl<'a> DataMessageProjection<'a> {
+    fn incoming(message: &'a DataMessage, peer: &'a str, timestamp: u64, delivery_id: u64) -> Self {
+        Self {
+            message,
+            peer,
+            outgoing: false,
+            timestamp,
+            delivery_id,
+        }
+    }
+
+    fn outgoing(message: &'a DataMessage, peer: &'a str, timestamp: u64, delivery_id: u64) -> Self {
+        Self {
+            message,
+            peer,
+            outgoing: true,
+            timestamp,
+            delivery_id,
+        }
+    }
+}
+
+async fn emit_data_message(
+    manager: &Manager<SqliteStore, Registered>,
+    projection: DataMessageProjection<'_>,
     sink: &EventSink,
     departed_groups: &DepartedGroups,
 ) -> ProjectionDisposition {
+    let DataMessageProjection {
+        message,
+        peer,
+        outgoing,
+        timestamp,
+        delivery_id,
+    } = projection;
     let target = group_message_target(message);
     if target == GroupMessageTarget::Malformed {
         sink.emit(Event::error(
