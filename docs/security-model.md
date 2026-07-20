@@ -47,9 +47,14 @@ and message bodies are sensitive. Production code must not log them.
   rather than allowing unbounded process memory growth.
 - Attachments are capped at 25 MiB each and 50 MiB per incoming message. Binary
   backend events and unresolved receive prompts each have separate 64 MiB
-  ceilings. Decrypted incoming bytes remain in memory until saved or rejected;
-  the plugin creates no plaintext attachment cache. Remote filenames are reduced
-  to a basename before Purple uses them.
+  ceilings. Group images are eligible for inline display only when a JPEG or
+  PNG MIME type agrees with its file signature, the complete payload decodes,
+  and its dimensions are no larger than 8192 pixels per edge or 16 megapixels
+  total. Decoder validation is chunked, and rejected dimensions are scaled down
+  before allocation. Other data falls back to a receive prompt. Decrypted
+  incoming bytes remain in memory until the displayed image is released, saved,
+  or rejected; the plugin creates no plaintext attachment cache. Remote
+  filenames are reduced to a basename before Purple uses them.
 - Message projection state is stored in the same SQLCipher database. Purple
   acknowledges a message event only after its synchronous conversation write;
   unacknowledged content is replayed after the next receive queue drain.

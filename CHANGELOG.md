@@ -27,6 +27,9 @@ semantic versioning after the first stable release.
 
 ### Fixed
 
+- Render decoder-validated, dimension-bounded incoming JPEG and PNG images
+  inside their originating group conversation instead of presenting the MIME
+  type and a direct file transfer from the sender.
 - Adopt contacts from the exact legacy `Signal` group only when the current
   authoritative snapshot confirms the same account and identifier, allowing
   older profiles to migrate without moving custom or unrelated buddies.

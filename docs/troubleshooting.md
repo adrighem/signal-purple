@@ -128,3 +128,11 @@ sanitized and decrypted bytes are held in memory rather than a plugin-managed
 temporary cache. Outgoing file uploads can be cancelled, but they are not kept
 in the persistent text-message outbox, so send the file again after a restart or
 failed upload.
+
+Incoming group JPEG and PNG images are shown inline when their MIME type and
+file signature agree, the complete image decodes, and it is no larger than 8192
+pixels per edge or 16 megapixels total. Direct images, other image formats,
+ordinary files, invalid or oversized images, and content with mismatched
+metadata still use a receive prompt. If an eligible group JPEG or PNG still
+opens as a direct transfer after upgrading, fully quit and restart Pidgin so the
+old plugin module is unloaded before testing again.

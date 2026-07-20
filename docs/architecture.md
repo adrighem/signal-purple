@@ -94,14 +94,19 @@ older messages from the primary phone or Signal service.
   submission. Failed entries retain their original Signal timestamp and retry
   with bounded exponential backoff across reconnects. Accepting a verified
   identity change immediately expedites that contact's queued messages.
-- Incoming direct and group attachments are downloaded on the backend thread,
-  copied across the owned ABI, and offered through Purple's receive-file flow.
-  Outgoing transfers use Purple's direct and group send-file callbacks and a
-  cancellable backend upload task. Each file is capped at 25 MiB, each incoming
-  message at 50 MiB, queued binary events at 64 MiB, and unresolved Purple
-  receive prompts at 64 MiB. Decrypted attachment data is never written to a
-  plugin-managed plaintext cache. Attachment sends are not part of the durable
-  text-message outbox.
+- Incoming direct and group attachments are downloaded on the backend thread
+  and copied across the owned ABI. An incoming group JPEG or PNG whose declared
+  MIME type matches its file signature, passes decoder validation, and remains
+  within an 8192-pixel edge and 16-megapixel limit is copied into Purple's image
+  store and written to the originating chat with the Signal sender and
+  timestamp. If the UI does not retain the image, or validation fails, the
+  attachment falls back to Purple's receive-file flow. Outgoing transfers use
+  Purple's direct and group send-file callbacks and a cancellable backend upload
+  task.
+  Each file is capped at 25 MiB, each incoming message at 50 MiB, queued binary
+  events at 64 MiB, and unresolved Purple receive prompts at 64 MiB. Decrypted
+  attachment data is never written to a plugin-managed plaintext cache.
+  Attachment sends are not part of the durable text-message outbox.
 - Presage acknowledges an envelope to Signal before the Purple UI can display
   it, but saves supported content in SQLCipher first. signal-purple records a
   separate encrypted projection acknowledgment only after Purple accepts the

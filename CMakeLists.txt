@@ -15,6 +15,7 @@ find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(PURPLE REQUIRED IMPORTED_TARGET purple>=2.14)
 pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0>=2.70 gio-2.0 gthread-2.0)
+pkg_check_modules(GDK_PIXBUF REQUIRED IMPORTED_TARGET gdk-pixbuf-2.0>=2.42)
 pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1>=0.20)
 
 set(SIGNAL_PURPLE_PLUGIN_DIR "${CMAKE_INSTALL_LIBDIR}/purple-2"
@@ -105,6 +106,7 @@ add_library(signal-purple MODULE
     src/contact_sync.c
     src/connection.c
     src/group_sync.c
+    src/inline_image.c
     src/plugin.c
     src/util.c)
 add_dependencies(signal-purple signal-core-runtime)
@@ -118,7 +120,8 @@ target_include_directories(signal-purple PRIVATE
     "${CMAKE_CURRENT_SOURCE_DIR}/include"
     "${CMAKE_CURRENT_SOURCE_DIR}/src")
 target_link_libraries(signal-purple PRIVATE
-    PkgConfig::PURPLE PkgConfig::GLIB PkgConfig::LIBSECRET signal-core)
+    PkgConfig::PURPLE PkgConfig::GLIB PkgConfig::GDK_PIXBUF
+    PkgConfig::LIBSECRET signal-core)
 target_link_options(signal-purple PRIVATE "-Wl,--no-undefined")
 set_target_properties(signal-purple PROPERTIES
     BUILD_RPATH "$ORIGIN/signal-purple"
@@ -156,6 +159,18 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(test-contact-sync PRIVATE PkgConfig::GLIB)
     add_test(NAME contact-sync COMMAND test-contact-sync)
+
+    add_executable(test-inline-image
+        tests/test_inline_image.c
+        src/inline_image.c)
+    target_compile_features(test-inline-image PRIVATE c_std_11)
+    target_compile_options(test-inline-image PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wformat=2 -Wshadow)
+    target_include_directories(test-inline-image PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(test-inline-image PRIVATE
+        PkgConfig::PURPLE PkgConfig::GLIB PkgConfig::GDK_PIXBUF)
+    add_test(NAME inline-image COMMAND test-inline-image)
 
     add_executable(plugin-probe
         tests/plugin_probe.c

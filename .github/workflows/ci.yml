@@ -31,7 +31,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --no-install-recommends \
             build-essential clang cmake libclang-dev libglib2.0-dev \
-            libpurple-dev libsecret-1-dev libssl-dev ninja-build \
+            libgdk-pixbuf-2.0-dev libpurple-dev libsecret-1-dev libssl-dev ninja-build \
             pkg-config protobuf-compiler
 
       - name: Install pinned Rust toolchain

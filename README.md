@@ -26,7 +26,7 @@ to the Purple plugin.
 | Remote group leave | Implementation-tested; production-service validation pending |
 | Typing indicators | Implemented; live test pending |
 | Delivery receipts | Sent by the backend; Purple 2 has no receipt UI |
-| Incoming and outgoing attachments | Implemented with 25 MiB per-file and bounded-memory limits; live test pending |
+| Incoming and outgoing attachments | Group JPEG/PNG images render inline; other files use bounded Purple transfers; post-fix live image resend pending |
 | In-plugin safety-number comparison, calls | Not implemented |
 | Primary-device registration and contact discovery | Out of scope for now |
 
@@ -60,7 +60,7 @@ The supported baseline is Debian 13 with libpurple 2.14.14. Building requires:
 
 ```sh
 sudo apt install build-essential cmake ninja-build pkg-config \
-  libpurple-dev libglib2.0-dev libsecret-1-dev libssl-dev \
+  libpurple-dev libglib2.0-dev libgdk-pixbuf-2.0-dev libsecret-1-dev libssl-dev \
   clang libclang-dev protobuf-compiler
 ```
 
@@ -130,11 +130,16 @@ database or secret requires linking a new device.
   an explicitly verified contact blocks sending until the buddy-menu acceptance
   action is used. Acceptance requires out-of-band verification, resets affected
   sessions, and marks the contact unverified without relinking the account.
-- Direct and group attachments use Purple's native file-transfer UI. Files are
-  limited to 25 MiB each and incoming messages to 50 MiB total. Decrypted
-  incoming data stays in memory while Purple asks for a save location; no
-  plaintext attachment cache is created. At most 64 MiB may wait in the backend
-  event queue and another 64 MiB in unresolved receive prompts. Excess data is
+- Incoming JPEG and PNG images in group conversations are rendered inline when
+  their declared MIME type, file signature, decoder validation, and bounded
+  dimensions agree. They stay in Purple's in-memory image store while
+  displayed. Direct images, unsupported group image formats, images larger than
+  8192 pixels on either edge or 16 megapixels total, and other attachments use
+  Purple's native file-transfer UI. Files are limited to 25 MiB each and
+  incoming messages to 50 MiB total. Decrypted incoming data stays in memory
+  while displayed or while Purple asks for a save location; no plaintext
+  attachment cache is created. At most 64 MiB may wait in the backend event
+  queue and another 64 MiB in unresolved receive prompts. Excess data is
   rejected visibly. Outgoing attachment uploads can be cancelled, but unlike
   text messages they are not retained in the restart-persistent outbox.
 - Signal Storage Service groups are projected into Purple's localized default

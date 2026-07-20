@@ -6,6 +6,7 @@ Build-Depends:
  debhelper-compat (= 13),
  cargo (>= 1.94),
  cmake (>= 3.25),
+ libgdk-pixbuf-2.0-dev (>= 2.42),
  libglib2.0-dev (>= 2.70),
  libpurple-dev (>= 2.14),
  libsecret-1-dev (>= 0.20),

@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include "signal_purple.h"
+#include "inline_image.h"
 
 #include <errno.h>
 #include <glib-unix.h>
@@ -43,6 +44,23 @@ static gboolean signal_group_is_active(SignalConnection *connection,
                                        const char *group_key);
 static gboolean signal_group_can_send(SignalConnection *connection,
                                       const char *group_key);
+static PurpleConversation *signal_open_group(SignalConnection *connection,
+                                             const char *group_key,
+                                             const char *title);
+static void signal_queue_read(SignalConnection *connection,
+                              PurpleConversation *conversation,
+                              const SignalEvent *event);
+
+static void
+signal_queue_final_group_read(SignalConnection *connection,
+                              PurpleConversation *conversation,
+                              const SignalEvent *event)
+{
+    /* The backend assigns the delivery ID only to the final projection event
+     * for one Signal message, so captions and multiple attachments read once. */
+    if (conversation != NULL && event->request_id != 0)
+        signal_queue_read(connection, conversation, event);
+}
 
 static void
 signal_outgoing_attachment_free(PurpleXfer *xfer)
@@ -244,20 +262,32 @@ signal_deliver_attachment(SignalConnection *connection,
                           const SignalEvent *event)
 {
     PurpleAccount *account;
+    PurpleConversation *conversation = NULL;
     PurpleXfer *xfer;
     SignalAttachment *attachment;
     g_autofree char *filename = NULL;
     const char *peer;
+    time_t timestamp;
 
-    if (event->data == NULL || event->data_len == 0)
+    if (event->chat_id != NULL && event->chat_id[0] != '\0') {
+        g_hash_table_add(connection->active_group_keys,
+                         g_strdup(event->chat_id));
+        conversation = signal_open_group(connection, event->chat_id, NULL);
+    }
+
+    if (event->data == NULL || event->data_len == 0) {
+        purple_notify_error(connection, "Signal attachment unavailable",
+                            "Signal delivered an empty attachment",
+                            "Ask the sender to resend the attachment.");
+        signal_queue_final_group_read(connection, conversation, event);
         return;
-    if (event->data_len > SIGNAL_MAX_ATTACHMENT_BYTES ||
-        signal_pending_attachment_bytes >
-            SIGNAL_MAX_PENDING_ATTACHMENT_BYTES - event->data_len) {
+    }
+    if (event->data_len > SIGNAL_MAX_ATTACHMENT_BYTES) {
         purple_notify_error(
             connection, "Signal attachment rejected",
-            "Too much attachment data is waiting for a save location",
-            "Save or reject pending transfers, then ask the sender to resend the attachment.");
+            "The Signal attachment exceeds the 25 MiB size limit",
+            "Ask the sender to resend a smaller attachment.");
+        signal_queue_final_group_read(connection, conversation, event);
         return;
     }
     peer = event->peer_id != NULL && event->peer_id[0] != '\0'
@@ -273,10 +303,40 @@ signal_deliver_attachment(SignalConnection *connection,
         filename = g_strdup("signal-attachment");
     }
 
+    if (conversation != NULL && event->peer_id != NULL &&
+        event->peer_id[0] != '\0') {
+        timestamp = event->timestamp_ms > 0
+                        ? (time_t)(event->timestamp_ms / 1000)
+                        : time(NULL);
+        if (signal_inline_image_deliver(
+                connection->gc,
+                purple_conv_chat_get_id(PURPLE_CONV_CHAT(conversation)),
+                event->peer_id, filename, event->text, event->data,
+                event->data_len, timestamp)) {
+            signal_queue_final_group_read(connection, conversation, event);
+            return;
+        }
+    }
+
+    if (signal_pending_attachment_bytes >
+        SIGNAL_MAX_PENDING_ATTACHMENT_BYTES - event->data_len) {
+        purple_notify_error(
+            connection, "Signal attachment rejected",
+            "Too much attachment data is waiting for a save location",
+            "Save or reject pending transfers, then ask the sender to resend the attachment.");
+        signal_queue_final_group_read(connection, conversation, event);
+        return;
+    }
+
     account = purple_connection_get_account(connection->gc);
     xfer = purple_xfer_new(account, PURPLE_XFER_RECEIVE, peer);
-    if (xfer == NULL)
+    if (xfer == NULL) {
+        purple_notify_error(connection, "Signal attachment unavailable",
+                            "Could not create a receive transfer",
+                            "Restart Pidgin, then ask the sender to resend the attachment.");
+        signal_queue_final_group_read(connection, conversation, event);
         return;
+    }
     attachment = g_new0(SignalAttachment, 1);
     attachment->bytes = g_bytes_new(event->data, event->data_len);
     attachment->size = event->data_len;
@@ -284,14 +344,13 @@ signal_deliver_attachment(SignalConnection *connection,
     xfer->data = attachment;
     purple_xfer_set_filename(xfer, filename);
     purple_xfer_set_size(xfer, event->data_len);
-    if (event->text != NULL && event->text[0] != '\0')
-        purple_xfer_set_message(xfer, event->text);
     purple_xfer_set_init_fnc(xfer, signal_attachment_init);
     purple_xfer_set_start_fnc(xfer, signal_attachment_start);
     purple_xfer_set_end_fnc(xfer, signal_attachment_free);
     purple_xfer_set_request_denied_fnc(xfer, signal_attachment_free);
     purple_xfer_set_cancel_recv_fnc(xfer, signal_attachment_cancel);
     purple_xfer_request(xfer);
+    signal_queue_final_group_read(connection, conversation, event);
 }
 
 static void
@@ -934,7 +993,7 @@ signal_deliver_group(SignalConnection *connection, const SignalEvent *event)
                      signal_message_flags(
                          (event->flags & SIGNAL_EVENT_FLAG_OUTGOING) != 0),
                      escaped, timestamp);
-    signal_queue_read(connection, conversation, event);
+    signal_queue_final_group_read(connection, conversation, event);
 }
 
 static void

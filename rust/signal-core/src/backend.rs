@@ -1713,6 +1713,43 @@ impl<'a> DataMessageProjection<'a> {
     }
 }
 
+fn inline_group_image_matches(content_type: Option<&str>, data: &[u8]) -> bool {
+    match content_type {
+        Some(content_type) if content_type.eq_ignore_ascii_case("image/jpeg") => {
+            data.starts_with(&[0xff, 0xd8, 0xff])
+        }
+        Some(content_type) if content_type.eq_ignore_ascii_case("image/png") => {
+            data.starts_with(b"\x89PNG\r\n\x1a\n")
+        }
+        _ => false,
+    }
+}
+
+fn should_inline_group_image(
+    outgoing: bool,
+    group: bool,
+    content_type: Option<&str>,
+    data: Option<&[u8]>,
+) -> bool {
+    !outgoing && group && data.is_some_and(|data| inline_group_image_matches(content_type, data))
+}
+
+fn projected_data_message_text<'a>(
+    mut text: String,
+    attachments: impl IntoIterator<Item = (Option<&'a str>, bool)>,
+) -> Option<String> {
+    for (name, suppress_placeholder) in attachments {
+        if suppress_placeholder {
+            continue;
+        }
+        if !text.is_empty() {
+            text.push('\n');
+        }
+        text.push_str(&format!("[Attachment: {}]", name.unwrap_or("attachment")));
+    }
+    (!text.is_empty()).then_some(text)
+}
+
 async fn emit_data_message(
     manager: &Manager<SqliteStore, Registered>,
     projection: DataMessageProjection<'_>,
@@ -1741,14 +1778,7 @@ async fn emit_data_message(
     {
         text = format!("Reacted with {emoji}");
     }
-    for attachment in &message.attachments {
-        let name = attachment.file_name.as_deref().unwrap_or("attachment");
-        if !text.is_empty() {
-            text.push('\n');
-        }
-        text.push_str(&format!("[Attachment: {name}]"));
-    }
-    if text.is_empty() {
+    if text.is_empty() && message.attachments.is_empty() {
         return ProjectionDisposition::Complete;
     }
 
@@ -1774,7 +1804,7 @@ async fn emit_data_message(
     let mut downloaded = Vec::new();
     let mut downloaded_bytes = 0usize;
     if !outgoing {
-        for attachment in &message.attachments {
+        for (attachment_index, attachment) in message.attachments.iter().enumerate() {
             let declared_size = attachment.size.unwrap_or_default() as usize;
             if declared_size > MAX_ATTACHMENT_BYTES
                 || downloaded_bytes.saturating_add(declared_size) > MAX_MESSAGE_ATTACHMENT_BYTES
@@ -1789,13 +1819,17 @@ async fn emit_data_message(
                 continue;
             }
             match manager.get_attachment(attachment).await {
+                Ok(data) if data.is_empty() => sink.emit(Event::error(
+                    "Could not download a Signal attachment: decrypted attachment was empty",
+                    false,
+                )),
                 Ok(data)
                     if data.len() <= MAX_ATTACHMENT_BYTES
                         && downloaded_bytes.saturating_add(data.len())
                             <= MAX_MESSAGE_ATTACHMENT_BYTES =>
                 {
                     downloaded_bytes += data.len();
-                    downloaded.push((attachment, data));
+                    downloaded.push((attachment_index, attachment, data));
                 }
                 Ok(_) => sink.emit(Event::error(
                     "Rejected a Signal attachment which exceeded its size limit after decryption",
@@ -1809,13 +1843,39 @@ async fn emit_data_message(
         }
     }
 
+    let inline_attachment_indexes: HashSet<usize> = downloaded
+        .iter()
+        .filter_map(|(attachment_index, attachment, data)| {
+            should_inline_group_image(
+                outgoing,
+                group_key.is_some(),
+                attachment.content_type.as_deref(),
+                Some(data),
+            )
+            .then_some(*attachment_index)
+        })
+        .collect();
+    let text = projected_data_message_text(
+        text,
+        message
+            .attachments
+            .iter()
+            .enumerate()
+            .map(|(attachment_index, attachment)| {
+                (
+                    attachment.file_name.as_deref(),
+                    inline_attachment_indexes.contains(&attachment_index),
+                )
+            }),
+    );
+
     let message_delivery_id = if downloaded.is_empty() {
         delivery_id
     } else {
         0
     };
 
-    if let Some(group_key) = group_key {
+    if let (Some(group_key), Some(text)) = (group_key, text.as_ref()) {
         let group_peer = if outgoing {
             manager
                 .registration_data()
@@ -1832,11 +1892,11 @@ async fn emit_data_message(
             peer_id: Some(group_peer),
             chat_id: Some(group_identifier(&group_key)),
             title: group_title,
-            text: Some(text),
+            text: Some(text.clone()),
             timestamp_ms: timestamp,
             ..Event::default()
         });
-    } else {
+    } else if let Some(text) = text {
         sink.emit(Event {
             kind: EVENT_MESSAGE,
             request_id: message_delivery_id,
@@ -1849,7 +1909,7 @@ async fn emit_data_message(
     }
 
     let attachment_count = downloaded.len();
-    for (index, (attachment, data)) in downloaded.into_iter().enumerate() {
+    for (index, (_, attachment, data)) in downloaded.into_iter().enumerate() {
         sink.emit(Event {
             kind: EVENT_ATTACHMENT,
             request_id: if index + 1 == attachment_count {
@@ -2345,6 +2405,83 @@ mod tests {
                 ..DataMessage::default()
             }),
             GroupMessageTarget::Malformed
+        );
+    }
+
+    #[test]
+    fn recognizes_only_declared_jpeg_and_png_payloads_for_inline_display() {
+        let jpeg = [0xff, 0xd8, 0xff, 0xe0];
+        let png = b"\x89PNG\r\n\x1a\nrest";
+
+        assert!(inline_group_image_matches(Some("image/jpeg"), &jpeg));
+        assert!(inline_group_image_matches(Some("IMAGE/JPEG"), &jpeg));
+        assert!(inline_group_image_matches(Some("image/png"), png));
+        assert!(inline_group_image_matches(Some("IMAGE/PNG"), png));
+
+        assert!(!inline_group_image_matches(Some("image/png"), &jpeg));
+        assert!(!inline_group_image_matches(Some("image/jpeg"), png));
+        assert!(!inline_group_image_matches(Some("image/png"), b"\x89PNG"));
+        assert!(!inline_group_image_matches(Some("image/gif"), b"GIF89a"));
+        assert!(!inline_group_image_matches(
+            Some("image/jpeg; charset=binary"),
+            &jpeg
+        ));
+        assert!(!inline_group_image_matches(None, &jpeg));
+    }
+
+    #[test]
+    fn inlines_only_downloaded_incoming_group_images() {
+        let jpeg = [0xff, 0xd8, 0xff, 0xe0];
+
+        assert!(should_inline_group_image(
+            false,
+            true,
+            Some("image/jpeg"),
+            Some(&jpeg)
+        ));
+        assert!(!should_inline_group_image(
+            false,
+            false,
+            Some("image/jpeg"),
+            Some(&jpeg)
+        ));
+        assert!(!should_inline_group_image(
+            true,
+            true,
+            Some("image/jpeg"),
+            Some(&jpeg)
+        ));
+        assert!(!should_inline_group_image(
+            false,
+            true,
+            Some("application/octet-stream"),
+            Some(&jpeg)
+        ));
+        assert!(!should_inline_group_image(
+            false,
+            true,
+            Some("image/jpeg"),
+            None
+        ));
+    }
+
+    #[test]
+    fn suppresses_only_inline_image_placeholders_from_projected_text() {
+        assert_eq!(
+            projected_data_message_text(String::new(), [(Some("photo.jpg"), true)]),
+            None
+        );
+        assert_eq!(
+            projected_data_message_text("caption".to_owned(), [(Some("photo.jpg"), true)]),
+            Some("caption".to_owned())
+        );
+        assert_eq!(
+            projected_data_message_text(String::new(), [(Some("photo.jpg"), false)]),
+            Some("[Attachment: photo.jpg]".to_owned())
+        );
+        assert_eq!(
+            projected_data_message_text(String::new(), [(Some("inline.png"), true), (None, false)]),
+            Some("[Attachment: attachment]".to_owned())
         );
     }
 

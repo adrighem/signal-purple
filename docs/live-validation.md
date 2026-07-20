@@ -68,7 +68,7 @@ service, and an isolated temporary Pidgin profile.
 | Group master-key confinement | Passed; persisted chats contained opaque `group-id` values and no raw group master keys |
 | Group send/receive | Not exercised |
 | Typing and receipts | Direct typing, delivery receipts, and focus-gated direct/group read receipts are implemented and unit/build tested; not exercised against another live client |
-| Attachments | Direct/group incoming download and outgoing upload use Purple's native transfer UI with cancellation, filename sanitization, and bounded memory; build and ABI tests pass, but another-client transfer and malformed/corrupt input remain to be exercised live |
+| Attachments | Group JPEG/PNG inline routing, decoder/dimension validation, image-store ownership, UI-retention fallback, and placeholder suppression pass focused C/Rust tests; a resend of the reported live group image is pending. Other direct/group attachments use bounded Purple transfers; another-client transfer remains to be exercised live |
 | Second linked-device synchronization | Not exercised |
 
 The installed plugin also passed the headless module probe. The live run proved

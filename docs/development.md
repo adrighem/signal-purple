@@ -9,7 +9,7 @@ Install system dependencies:
 
 ```sh
 sudo apt install build-essential cmake ninja-build pkg-config \
-  libpurple-dev libglib2.0-dev libsecret-1-dev libssl-dev \
+  libpurple-dev libglib2.0-dev libgdk-pixbuf-2.0-dev libsecret-1-dev libssl-dev \
   clang libclang-dev protobuf-compiler
 rustup toolchain install 1.95.0 --component rustfmt,clippy
 ```
@@ -31,10 +31,12 @@ ctest --test-dir build --output-on-failure
 ```
 
 The C tests include a headless libpurple core that probes and loads the actual
-plugin module plus focused markup and contact-snapshot reconciliation. The
-Rust tests cover owned ABI payloads, FFI error outputs, bounded event overflow,
-QR PNG generation, and group-key validation. Live compatibility tests require dedicated
-non-production Signal accounts and are not run for untrusted pull requests.
+plugin module plus focused markup, inline-image ownership and routing, and
+contact-snapshot reconciliation. The Rust tests cover owned ABI payloads, FFI
+error outputs, bounded event overflow, QR PNG generation, group-key validation,
+and group-image placeholder projection. Live compatibility tests require
+dedicated non-production Signal accounts and are not run for untrusted pull
+requests.
 
 ## C rules
 
