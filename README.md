@@ -199,6 +199,16 @@ database or secret requires linking a new device.
 Please use [GitHub issues](https://github.com/adrighem/signal-purple/issues) for
 ordinary bugs and follow [SECURITY.md](SECURITY.md) for vulnerabilities.
 
+## Acknowledgements
+
+- [tdlib-purple](https://github.com/ars3niy/tdlib-purple) provided a practical
+  precedent for adapting a modern messaging stack to libpurple and Pidgin.
+- [Flare](https://gitlab.com/schmiddi-on-mobile/flare) provided an architectural
+  reference for building a Signal client around Presage.
+
+`signal-purple` is an independent implementation; these acknowledgements do
+not imply copied code, endorsement, or affiliation.
+
 ## License and trademarks
 
 Original C plugin code and general project material are licensed under
