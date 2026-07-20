@@ -44,6 +44,8 @@ is linked from the release issue or release pull request.
 
 - [ ] Network loss, reconnect, rate limits, and remote protocol errors recover.
 - [ ] Corrupt state, unavailable key storage, and full disk fail safely.
+- [ ] An idle connected account has no recurring backend poll wakeups or hot
+  Pidgin/`signal-purple-core` thread.
 - [ ] Sensitive values never appear in logs, crashes, or generated diagnostics.
 - [x] ABI inputs have sanitizer and malformed-input coverage.
 - [ ] Upgrade and rollback procedures preserve or explicitly migrate state.

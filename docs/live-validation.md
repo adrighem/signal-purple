@@ -4,6 +4,29 @@ Live Signal compatibility is recorded per repository revision and test date.
 A partial pass does not establish complete compatibility with the production
 service.
 
+## 2026-07-20 basic-group implementation validation
+
+The current implementation and automated tests cover stable opaque Purple
+conversation identity, local-alias preservation, exact Storage Service record
+completeness, current-state refresh of discovered and cached groups, atomic
+active-member reconciliation, and send/join rejection outside the active set.
+They also cover the confirmed remote-leave request and the rule that a managed
+Purple chat is removed only after a
+successful completion.
+
+Remote leave is implementation-tested, but it has not yet been exercised
+against the production Signal service. The authoritative refresh/pruning path
+also needs a controlled live mutation in which a group disappears or this
+account leaves it. Purple's built-in **Remove Chat** and closing a conversation
+remain intentionally local-only and are not substitutes for that test.
+
+The previously installed ABI-v4 build was also sampled after a high-CPU report.
+No full-core spin reproduced during the sample: Pidgin averaged about 0.5% CPU,
+the Signal worker about 0.006%, and all threads slept normally. The sample did
+confirm approximately 50 idle GLib wakeups per second from the old 20 ms event
+poll. ABI v6 replaces that timer with descriptor-driven wakeups; its live idle
+CPU still needs confirmation after Pidgin loads the new libraries.
+
 ## 2026-07-19 isolated-profile run
 
 Environment: Debian 13, Pidgin and libpurple 2.14.14, production Signal

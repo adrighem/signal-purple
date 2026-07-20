@@ -15,6 +15,10 @@ demonstrated. Version numbers are compatibility targets, not deadlines.
 - Produce a reproducible Debian 13 package.
 - Discover all current Signal groups, synchronize them into Purple's chat list,
   and refresh membership and titles without waiting for a new group message.
+- Keep stable opaque group conversation identities, preserve local aliases, and
+  publish only a fully refreshed active-member set before pruning stale groups.
+- Provide an explicit confirmed remote-leave action while keeping Purple 2's
+  generic chat removal and conversation close operations local-only.
 - Complete group, contact, offline-message, and resilience testing against real
   Signal clients.
 

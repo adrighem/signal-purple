@@ -21,9 +21,13 @@ Automated update pull requests may open for visibility, but compilation alone
 does not authorize merging them.
 
 The Presage dependency currently uses the public
-[`adrighem/presage`](https://github.com/adrighem/presage) fork at
-`c8ee98cf944897812d9375effb98657f537e8b09`. Its parent is the previously
-audited upstream pin `63482efd0cbdc0780baf0650517c7d55f1cac05d`; the fork adds
-only read-only Storage Service group synchronization plus its error plumbing
-and focused test. Treat any rebase or additional fork commit as a full
-Signal-stack update under the policy above.
+[`adrighem/presage`](https://github.com/adrighem/presage) fork at the exact Git
+revision `5e584595b3723e6904a09246deaa830b93bbae7b`. The fork carries the
+Storage Service group refresh needed to build and atomically reconcile an
+authoritative active set, together with the remote group-leave operation and
+focused tests. Its nested libsignal-service dependency is the public
+[`adrighem/libsignal-service-rs`](https://github.com/adrighem/libsignal-service-rs)
+fork at `c41a2d0332634dd3cbc830d0d4a77bdc0e9d2cae`, whose only fork change
+preserves Storage response keys for exact completeness validation. Treat any
+rebase or additional fork commit as a full Signal-stack update under the policy
+above.

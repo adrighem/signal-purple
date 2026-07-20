@@ -32,8 +32,10 @@ and message bodies are sensitive. Production code must not log them.
   buddy menu, at which point sessions are reset and the contact is downgraded
   to unverified.
 - Group master keys remain in the encrypted Rust store. Purple persists only a
-  domain-separated SHA-256 group identifier, which the backend resolves against
-  the store for sends.
+  domain-separated SHA-256 group identifier. Before publishing membership, the
+  backend verifies the exact Storage Service record-key set, refreshes every
+  discovered or cached candidate from GroupsV2, and commits the result in one
+  SQLite transaction. Group sends resolve only against that active set.
 - Remote message text is escaped before Purple renders it.
 - Conversation logging is disabled on every Signal conversation. Text messages
   use normal send/receive flags because Pidgin renders Purple's per-message
@@ -61,10 +63,11 @@ and message bodies are sensitive. Production code must not log them.
 ## Known gaps
 
 - No independent security audit has occurred.
-- Live direct-message, contact-sync, group-discovery, and
-  group-membership paths have been verified. The full supported-client and
-  failure-mode matrix, including startup backlog exactly-once behavior, remains
-  a release gate.
+- Live direct-message, contact-sync, group-discovery, and earlier membership
+  projection paths have been verified. Controlled production-service tests of
+  authoritative pruning and remote leave are still pending. The full
+  supported-client and failure-mode matrix, including startup backlog
+  exactly-once behavior, remains a release gate.
 - Purple does not display or compare the numeric safety number. Acceptance is
   therefore a confirmation that the user completed verification through
   another trusted channel, not an in-plugin cryptographic comparison. This

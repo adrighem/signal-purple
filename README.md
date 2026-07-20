@@ -20,9 +20,10 @@ to the Purple plugin.
 | Existing linked-device reconnect | Live isolated-profile test passed 2026-07-19 |
 | SQLCipher store with libsecret key | Implemented |
 | Signal contact buddy-list create/update/delete | Implemented; 46-contact create/refresh live-tested and snapshot reconciliation unit-tested |
-| Group discovery, chat-list reconciliation, and membership | Implemented; 11-group reconnect/deduplication and 3-member chat live-tested |
+| Group discovery, active-membership reconciliation, and pruning | Implemented; earlier 11-group discovery and 3-member projection live-tested, authoritative refresh live test pending |
 | Plain-text direct messages | Live isolated-profile test passed 2026-07-19 |
-| Basic group messages | Implemented; live test pending |
+| Basic group messages | Implemented for refreshed active memberships; live send test pending |
+| Remote group leave | Implementation-tested; production-service validation pending |
 | Typing indicators | Implemented; live test pending |
 | Delivery receipts | Sent by the backend; Purple 2 has no receipt UI |
 | Incoming and outgoing attachments | Implemented with 25 MiB per-file and bounded-memory limits; live test pending |
@@ -40,7 +41,7 @@ Pidgin / libpurple 2
         │
         ▼
 libsignal-purple.so       C, GLib main thread, Purple lifecycle and UI
-        │ owned polling ABI
+        │ owned event ABI + private wake descriptor
         ▼
 libsignal_core.so         Rust actor thread, Tokio LocalSet, SQLCipher
         │
@@ -49,7 +50,8 @@ Presage → libsignal-service-rs → Signal libsignal
 ```
 
 The Purple side never calls Signal libraries directly. Each account owns one
-backend actor and polls owned events on the GLib main context. Details are in
+backend actor; a private nonblocking descriptor wakes the GLib main context to
+drain owned events without an idle polling timer. Details are in
 [architecture.md](docs/architecture.md).
 
 ## Requirements
@@ -135,14 +137,32 @@ database or secret requires linking a new device.
   event queue and another 64 MiB in unresolved receive prompts. Excess data is
   rejected visibly. Outgoing attachment uploads can be cancelled, but unlike
   text messages they are not retained in the restart-persistent outbox.
-- Signal Storage Service groups are projected into Purple's `Signal groups`
-  chat-list group. Complete snapshots create missing chats, update titles and
-  active membership, flag administrators, remove stale plugin-managed chats,
-  and collapse plugin-created duplicates by stable opaque group identifier.
-  User-created chats are preserved. Opening a synchronized chat does not send
-  a message, and closing it never leaves the Signal group.
-- Synchronized contacts are projected into Purple's `Signal` buddy-list group.
-  Each connection requests a fresh contact sync from the primary phone.
+- Signal Storage Service groups are projected into Purple's localized default
+  chat-list group (normally `Chats`). A complete refresh validates every group
+  record returned for the current Storage Service manifest, then checks both
+  discovered and previously cached groups against current GroupsV2 state before
+  publishing an authoritative active-group snapshot. Only groups which Signal
+  confirms are inaccessible or no longer contain this account are pruned from
+  the encrypted cache and managed Purple chat list. An incomplete refresh does
+  not trigger destructive pruning. Group joins and sends are limited to that
+  refreshed active set; a failed refresh is retried in-session while group
+  operations remain unavailable.
+  Purple uses the stable opaque group identifier as the conversation identity,
+  while the Signal title remains presentation data; a user-set local chat alias
+  is preserved across title refreshes. Existing managed chats in the legacy
+  `Signal groups` group move to the default group on sync, while custom
+  placement and user-created chats are preserved.
+- To leave an active group remotely, right-click its managed chat and choose
+  **Leave Signal group…**, then confirm. The plugin removes the managed local
+  chat only after Signal confirms the leave. Purple 2 does not provide protocol
+  plugins with a callback for its built-in **Remove Chat** operation, so that
+  action remains local-only and the chat can return after synchronization.
+  Closing a conversation tab is also local-only and never leaves the group.
+- Synchronized contacts are projected into Purple's localized default buddy
+  group (for example, `Friends` or `Buddies`). Each connection requests a fresh
+  contact sync from the primary phone. Existing managed contacts in the legacy
+  `Signal` group move to the default group on sync, while contact aliases,
+  locally merged buddies, and custom placement are preserved.
   Complete snapshots create missing buddies, update server aliases, and remove
   previously synchronized contacts that are no longer present. Local aliases
   remain local. A synchronized phone number is the display fallback when no

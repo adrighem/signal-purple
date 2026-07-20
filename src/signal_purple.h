@@ -5,6 +5,7 @@
 #include <glib.h>
 #include <purple.h>
 
+#include "blist_sync.h"
 #include "contact_sync.h"
 #include "group_sync.h"
 #include "signal_core.h"
@@ -21,10 +22,13 @@ typedef struct {
     GHashTable *group_keys_by_id;
     GHashTable *group_titles_by_key;
     GHashTable *group_members_by_key;
+    GHashTable *active_group_keys;
+    GHashTable *pending_group_leaves;
     GHashTable *identity_changes_seen;
     GHashTable *pending_identity_changes;
     GHashTable *outgoing_attachments;
     GPtrArray *pending_reads;
+    GPtrArray *group_leave_requests;
     SignalContactSync contact_sync;
     SignalContactSync group_sync;
     GBytes *link_qr;

@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use std::ffi::{CStr, c_char};
+use std::io::Read;
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
@@ -10,7 +13,7 @@ use zeroize::Zeroizing;
 
 const BACKEND_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
-use crate::backend::{self, Command, Config};
+use crate::backend::{self, Command, Config, EventNotification};
 use crate::event::{ABI_VERSION, Event, OwnedEvent, SignalEvent};
 
 const MAX_RECIPIENT_BYTES: usize = 256;
@@ -43,6 +46,8 @@ pub struct SignalCore {
     commands: tokio_mpsc::Sender<Command>,
     shutdown: watch::Sender<bool>,
     events: Mutex<mpsc::Receiver<Event>>,
+    event_notifier: UnixStream,
+    event_notification: Arc<EventNotification>,
     event_overflowed: Arc<AtomicBool>,
     queued_event_bytes: Arc<AtomicUsize>,
     ready: Arc<AtomicBool>,
@@ -105,6 +110,26 @@ pub extern "C" fn signal_core_abi_version() -> u32 {
 }
 
 #[unsafe(no_mangle)]
+/// Returns the borrowed file descriptor which becomes readable when an event
+/// is queued, or `-1` for an invalid core.
+///
+/// # Safety
+///
+/// `core` must be null or point to a live core. The descriptor remains owned
+/// by the core and must not be closed by the caller.
+pub unsafe extern "C" fn signal_core_event_fd(core: *const SignalCore) -> RawFd {
+    catch_unwind(AssertUnwindSafe(|| {
+        if core.is_null() {
+            return -1;
+        }
+        // SAFETY: checked above; the caller keeps the core live while using
+        // the borrowed descriptor.
+        unsafe { &*core }.event_notifier.as_raw_fd()
+    }))
+    .unwrap_or(-1)
+}
+
+#[unsafe(no_mangle)]
 /// Creates a backend core and transfers its allocation through `out_core`.
 ///
 /// # Safety
@@ -149,6 +174,21 @@ pub unsafe extern "C" fn signal_core_new(
         let (command_tx, command_rx) = tokio_mpsc::channel(128);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (event_tx, event_rx) = mpsc::sync_channel(EVENT_QUEUE_CAPACITY);
+        let (event_notifier, event_notifier_writer) =
+            status_try!(UnixStream::pair().map_err(|_| SignalStatus::InternalError));
+        status_try!(
+            event_notifier
+                .set_nonblocking(true)
+                .map_err(|_| SignalStatus::InternalError)
+        );
+        status_try!(
+            event_notifier_writer
+                .set_nonblocking(true)
+                .map_err(|_| SignalStatus::InternalError)
+        );
+        let worker_event_notifier = Arc::new(event_notifier_writer);
+        let event_notification = Arc::new(EventNotification::new());
+        let worker_event_notification = Arc::clone(&event_notification);
         let event_overflowed = Arc::new(AtomicBool::new(false));
         let worker_event_overflowed = Arc::clone(&event_overflowed);
         let queued_event_bytes = Arc::new(AtomicUsize::new(0));
@@ -171,6 +211,8 @@ pub unsafe extern "C" fn signal_core_new(
                         command_rx,
                         shutdown_rx,
                         event_tx,
+                        worker_event_notification,
+                        worker_event_notifier,
                         worker_event_overflowed,
                         worker_queued_event_bytes,
                         worker_ready,
@@ -183,6 +225,8 @@ pub unsafe extern "C" fn signal_core_new(
             commands: command_tx,
             shutdown: shutdown_tx,
             events: Mutex::new(event_rx),
+            event_notifier,
+            event_notification,
             event_overflowed,
             queued_event_bytes,
             ready,
@@ -260,6 +304,38 @@ pub unsafe extern "C" fn signal_core_send_group_message(
                 request_id,
                 group_key,
                 message,
+            },
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Queues a request to leave one synchronized Signal group.
+///
+/// # Safety
+///
+/// `core` must be live and exclusively serialized with teardown. `group_key`
+/// must be a valid NUL-terminated opaque group identifier.
+pub unsafe extern "C" fn signal_core_leave_group(
+    core: *mut SignalCore,
+    request_id: u64,
+    group_key: *const c_char,
+) -> SignalStatus {
+    ffi_guard(|| {
+        if core.is_null() || request_id == 0 {
+            return SignalStatus::InvalidArgument;
+        }
+        // SAFETY: copied immediately after validation.
+        let group_key = status_try!(unsafe { required_string(group_key, 64) });
+        if group_key.len() != 64 || hex::decode(&group_key).map_or(true, |v| v.len() != 32) {
+            return SignalStatus::InvalidArgument;
+        }
+        // SAFETY: `core` is live and C serializes this call with teardown.
+        queue_command(
+            unsafe { &*core },
+            Command::LeaveGroup {
+                request_id,
+                group_key,
             },
         )
     })
@@ -563,6 +639,7 @@ pub unsafe extern "C" fn signal_core_poll_event(
         }
         // SAFETY: checked above; C serializes poll/free with core teardown.
         let core = unsafe { &*core };
+        let _notification_guard = core.event_notification.lock();
         if core.event_overflowed.swap(false, Ordering::AcqRel) {
             let overflow = Event::error(
                 "Signal event queue overflowed; reconnect to resynchronize messages",
@@ -585,8 +662,16 @@ pub unsafe extern "C" fn signal_core_poll_event(
                 unsafe { *out_event = OwnedEvent::into_raw(event) };
                 1
             }
-            Err(mpsc::TryRecvError::Empty) => 0,
-            Err(mpsc::TryRecvError::Disconnected) => -1,
+            Err(error) => {
+                let mut token = [0u8; 1];
+                let mut notifier = &core.event_notifier;
+                let _ = notifier.read(&mut token);
+                core.event_notification.clear_pending();
+                match error {
+                    mpsc::TryRecvError::Empty => 0,
+                    mpsc::TryRecvError::Disconnected => -1,
+                }
+            }
         }
     }))
     .unwrap_or(-1)
@@ -653,6 +738,7 @@ pub unsafe extern "C" fn signal_core_free(core: *mut SignalCore) {
 mod tests {
     use super::*;
     use std::ffi::CString;
+    use std::io::Write;
 
     fn test_core(
         commands: tokio_mpsc::Sender<Command>,
@@ -661,15 +747,68 @@ mod tests {
         ready: bool,
     ) -> SignalCore {
         let (_event_sender, events) = mpsc::sync_channel(1);
+        let (event_notifier, _event_notifier_writer) = UnixStream::pair().unwrap();
+        event_notifier.set_nonblocking(true).unwrap();
         SignalCore {
             commands,
             shutdown,
             events: Mutex::new(events),
+            event_notifier,
+            event_notification: Arc::new(EventNotification::new()),
             event_overflowed: Arc::new(AtomicBool::new(false)),
             queued_event_bytes: Arc::new(AtomicUsize::new(0)),
             ready: Arc::new(AtomicBool::new(ready)),
             join: Mutex::new(join),
         }
+    }
+
+    fn event_test_core(capacity: usize) -> (SignalCore, mpsc::SyncSender<Event>, UnixStream) {
+        let (commands, _command_receiver) = tokio_mpsc::channel(1);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let (event_sender, events) = mpsc::sync_channel(capacity);
+        let (event_notifier, event_notifier_writer) = UnixStream::pair().unwrap();
+        event_notifier.set_nonblocking(true).unwrap();
+        event_notifier_writer.set_nonblocking(true).unwrap();
+        let event_notification = Arc::new(EventNotification::new());
+        (
+            SignalCore {
+                commands,
+                shutdown,
+                events: Mutex::new(events),
+                event_notifier,
+                event_notification,
+                event_overflowed: Arc::new(AtomicBool::new(false)),
+                queued_event_bytes: Arc::new(AtomicUsize::new(0)),
+                ready: Arc::new(AtomicBool::new(true)),
+                join: Mutex::new(None),
+            },
+            event_sender,
+            event_notifier_writer,
+        )
+    }
+
+    fn enqueue_test_event(
+        core: &SignalCore,
+        sender: &mpsc::SyncSender<Event>,
+        writer: &mut UnixStream,
+        event: Event,
+    ) {
+        let _guard = core.event_notification.lock();
+        sender.try_send(event).unwrap();
+        if !core.event_notification.mark_pending() {
+            writer.write_all(&[1]).unwrap();
+        }
+    }
+
+    fn assert_notification_readable(
+        core: &SignalCore,
+        writer: &mut UnixStream,
+        token: &mut [u8; 1],
+    ) {
+        let _guard = core.event_notification.lock();
+        assert_eq!((&core.event_notifier).read(token).unwrap(), 1);
+        assert_eq!(*token, [1]);
+        writer.write_all(&[1]).unwrap();
     }
 
     #[test]
@@ -694,6 +833,108 @@ mod tests {
 
         assert_eq!(result, -1);
         assert!(output.is_null());
+    }
+
+    #[test]
+    fn event_fd_is_borrowed_from_the_live_core() {
+        let (core, _sender, _writer) = event_test_core(1);
+
+        // SAFETY: `core` remains live for the duration of the call.
+        assert_eq!(
+            unsafe { signal_core_event_fd(&core) },
+            core.event_notifier.as_raw_fd()
+        );
+        // SAFETY: a null core is an explicitly supported error path.
+        assert_eq!(unsafe { signal_core_event_fd(std::ptr::null()) }, -1);
+    }
+
+    #[test]
+    fn exact_event_batch_keeps_one_level_trigger_until_empty() {
+        const BATCH_SIZE: usize = 64;
+        let (mut core, sender, mut writer) = event_test_core(BATCH_SIZE);
+
+        for request_id in 1..=BATCH_SIZE as u64 {
+            enqueue_test_event(
+                &core,
+                &sender,
+                &mut writer,
+                Event {
+                    kind: crate::event::EVENT_MESSAGE,
+                    request_id,
+                    ..Event::default()
+                },
+            );
+        }
+
+        let mut token = [0u8; 1];
+        assert_notification_readable(&core, &mut writer, &mut token);
+        for request_id in 1..=BATCH_SIZE as u64 {
+            let mut event = std::ptr::null_mut();
+            // SAFETY: the core and output pointer remain live for the call.
+            assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 1);
+            assert_eq!(unsafe { (*event).request_id }, request_id);
+            // SAFETY: this test uniquely owns the returned event.
+            unsafe { signal_event_free(event) };
+        }
+
+        assert!(core.event_notification.is_pending());
+        assert_notification_readable(&core, &mut writer, &mut token);
+        let mut event = std::ptr::dangling_mut::<SignalEvent>();
+        // SAFETY: the core and output pointer remain live for the call.
+        assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 0);
+        assert!(event.is_null());
+        assert!(!core.event_notification.is_pending());
+        assert_eq!(
+            (&core.event_notifier).read(&mut token).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+
+        enqueue_test_event(
+            &core,
+            &sender,
+            &mut writer,
+            Event {
+                kind: crate::event::EVENT_MESSAGE,
+                request_id: 65,
+                ..Event::default()
+            },
+        );
+        assert_eq!((&core.event_notifier).read(&mut token).unwrap(), 1);
+    }
+
+    #[test]
+    fn overflow_event_does_not_consume_a_real_event_notification() {
+        let (mut core, sender, mut writer) = event_test_core(1);
+        enqueue_test_event(
+            &core,
+            &sender,
+            &mut writer,
+            Event {
+                kind: crate::event::EVENT_MESSAGE,
+                request_id: 7,
+                ..Event::default()
+            },
+        );
+        core.event_overflowed.store(true, Ordering::Release);
+
+        let mut event = std::ptr::null_mut();
+        // SAFETY: the core and output pointer remain live for each call.
+        assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 1);
+        assert_eq!(unsafe { (*event).kind }, crate::event::EVENT_ERROR);
+        // SAFETY: this test uniquely owns the returned event.
+        unsafe { signal_event_free(event) };
+        assert!(core.event_notification.is_pending());
+        let mut token = [0u8; 1];
+        assert_notification_readable(&core, &mut writer, &mut token);
+
+        // SAFETY: the core and output pointer remain live for each call.
+        assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 1);
+        assert_eq!(unsafe { (*event).request_id }, 7);
+        // SAFETY: this test uniquely owns the returned event.
+        unsafe { signal_event_free(event) };
+        // SAFETY: the core and output pointer remain live for each call.
+        assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 0);
+        assert!(!core.event_notification.is_pending());
     }
 
     #[test]
@@ -847,6 +1088,46 @@ mod tests {
             )
         };
         assert_eq!(status, SignalStatus::InvalidArgument);
+    }
+
+    #[test]
+    fn leave_group_abi_validates_and_queues_the_identifier() {
+        let (commands, mut receiver) = tokio_mpsc::channel(1);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let mut core = test_core(commands, shutdown, None, true);
+        let group_id = CString::new("ab".repeat(32)).unwrap();
+
+        // SAFETY: the core and group identifier remain valid for this call.
+        let status = unsafe { signal_core_leave_group(&mut core, 23, group_id.as_ptr()) };
+
+        assert_eq!(status, SignalStatus::Ok);
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Command::LeaveGroup {
+                request_id: 23,
+                group_key,
+            }) if group_key == "ab".repeat(32)
+        ));
+    }
+
+    #[test]
+    fn leave_group_abi_rejects_missing_request_and_invalid_identifier() {
+        let (commands, _receiver) = tokio_mpsc::channel(1);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let mut core = test_core(commands, shutdown, None, true);
+        let valid = CString::new("ab".repeat(32)).unwrap();
+        let invalid = CString::new("not-a-group").unwrap();
+
+        // SAFETY: all pointers are valid for the duration of each call.
+        assert_eq!(
+            unsafe { signal_core_leave_group(&mut core, 0, valid.as_ptr()) },
+            SignalStatus::InvalidArgument
+        );
+        // SAFETY: all pointers are valid for the duration of each call.
+        assert_eq!(
+            unsafe { signal_core_leave_group(&mut core, 1, invalid.as_ptr()) },
+            SignalStatus::InvalidArgument
+        );
     }
 
     #[test]

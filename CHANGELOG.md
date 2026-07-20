@@ -25,8 +25,24 @@ semantic versioning after the first stable release.
 
 ## [Unreleased]
 
+### Changed
+
+- Place synchronized contacts and chats in Purple's localized default groups,
+  migrating plugin-managed nodes from the former Signal-specific groups while
+  preserving custom placement.
+- Use each group's stable opaque identifier as its Purple conversation identity
+  while preserving user-set local chat aliases across Signal title refreshes.
+- Replace the fixed 20 ms backend polling timer with descriptor-driven GLib
+  wakeups, eliminating roughly 50 idle main-loop wakeups per second per account.
+- Fully refresh Storage Service and cached group candidates before publishing
+  an authoritative snapshot, pruning only groups confirmed inaccessible or no
+  longer containing this account. Group joins and sends are restricted to the
+  active set.
+
 ### Added
 
+- Add a confirmed **Leave Signal group…** chat action which performs a remote
+  Signal leave and removes the managed Purple chat only after success.
 - Purple 2.14 protocol plugin with direct and group text-message routing.
 - Pinned Presage Rust backend with linked-device QR provisioning.
 - SQLCipher state protected by a libsecret-managed passphrase.

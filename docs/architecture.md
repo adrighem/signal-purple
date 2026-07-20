@@ -20,8 +20,9 @@ the lockfile. Purple never calls their unstable interfaces directly.
 ## ABI and ownership
 
 [`include/signal_core.h`](../include/signal_core.h) is the only C/Rust contract.
-It is versioned and exposes opaque cores, asynchronous commands, polling, and
-explicit event destruction.
+It is versioned and exposes opaque cores, asynchronous commands, a borrowed
+event-notifier descriptor, nonblocking event polling, and explicit event
+destruction.
 
 - C strings passed into a command are validated and copied before return.
 - Rust owns all event strings and blobs until `signal_event_free`.
@@ -31,8 +32,11 @@ explicit event destruction.
 - Fallible exported operations catch panics at the FFI boundary. Teardown is
   deliberately written from non-panicking primitives so the worker is always
   joined before its allocation is freed.
-- The C plugin polls on an explicitly owned GLib timeout source.
-- Teardown destroys the polling source, sends shutdown, joins the worker, then
+- A private nonblocking descriptor becomes readable after Rust queues an event.
+  GLib watches it and drains bounded event batches, so an idle account has no
+  recurring polling timer and incoming-event latency does not depend on a
+  backoff interval.
+- Teardown destroys the descriptor source, sends shutdown, joins the worker, then
   frees the core. No worker calls into C or Purple.
 
 ## Connection sequence
@@ -44,10 +48,16 @@ explicit event destruction.
    secondary-device provisioning and emits a QR PNG.
 5. The backend starts the receive stream and processes queued sync/session data.
 6. At the first `QueueEmpty`, the backend reads the account's Storage Service
-   manifest and refreshes every available group into the encrypted local store.
-7. Only after contact and group snapshots are emitted does the core become ready
-   and the Purple
-   account connected.
+   manifest, verifies the exact returned record-key set, and refreshes the union
+   of manifest-discovered and cached groups from current GroupsV2 state. A group
+   is active only while the linked account's own ACI is a current member. Only a
+   definitive inaccessible/deleted response or decrypted nonmembership permits
+   pruning. Network, authentication, decoding, completeness, or database errors
+   leave the entire prior set intact rather than applying a partial update.
+7. The core emits the contact snapshot and, after a successful refresh, the
+   authoritative group snapshot before becoming ready. If group refresh fails,
+   the account still connects for direct messaging, but group operations stay
+   unavailable while an in-session retry runs on a bounded interval.
 
 This ordering prevents sends before queued profile, session, and sender-key
 updates have been applied. The queue contains envelopes addressed to this
@@ -66,11 +76,14 @@ older messages from the primary phone or Signal service.
   not expose presence, contacts are marked reachable while the linked account
   is connected so Purple's default offline filter does not hide them.
 - Group master keys remain private 32-byte values in the encrypted backend
-  store. Purple receives a domain-separated SHA-256 identifier for persistence
-  and joining, then Rust resolves that identifier back to a stored group when
-  sending. Snapshot reconciliation updates titles and active membership,
-  removes stale plugin-managed entries, and collapses duplicate managed chats.
-  Each connection assigns a collision-free sequential Purple chat integer.
+  store. Purple receives a domain-separated SHA-256 identifier for persistence,
+  joining, and its internal conversation name. The Signal group title is
+  presentation data, so duplicate titles cannot collide and a user-set local
+  alias is not overwritten by a later Signal title refresh. Rust resolves the
+  opaque identifier only against the current authoritative active-group set
+  before a join, text send, or attachment send. Snapshot reconciliation removes
+  stale plugin-managed entries and collapses duplicate managed chats. Each
+  connection assigns a collision-free sequential Purple chat integer.
 - Incoming text is markup-escaped. Outgoing Purple markup is stripped.
 - Own-device `SynchronizeMessage` values render as outgoing messages.
 - Delivery receipts are sent when Presage marks an envelope as needing one.
@@ -99,6 +112,34 @@ older messages from the primary phone or Signal service.
 - Purple 2 has no robust per-message receipt update API, so received receipts
   are currently consumed without a misleading UI projection.
 
+## Group lifecycle actions
+
+The chat-node action **Leave Signal group…** is deliberately separate from
+Purple's generic removal UI. After confirmation, the C plugin submits an
+asynchronous leave command. The backend removes this account from the Signal
+group and reports completion; only a successful completion closes the managed
+conversation and removes its chat-list node. A failure leaves the local node in
+place so the UI does not claim a leave which the service rejected.
+
+Purple 2 does not expose a protocol-plugin callback for its built-in **Remove
+Chat** operation. It therefore removes only the local buddy-list node, which can
+return in the next authoritative snapshot. Closing a conversation tab is also
+local state and does not change Signal membership.
+
+| Pidgin action | Signal effect |
+| --- | --- |
+| Open or join a saved chat | Opens the local conversation; it does not join a Signal group. |
+| Send a message or file | Sends only after the refreshed state confirms current membership. |
+| Rename or move a saved chat | Changes only its local alias or buddy-list placement. |
+| Close the conversation tab | Local-only; membership is unchanged. |
+| Built-in **Remove Chat** | Removes the local node only; it may return on sync. |
+| **Leave Signal group…** | After confirmation, removes this account remotely and removes the managed local node only after acceptance. |
+
+Pidgin/Purple 2 exposes no compatible protocol actions here for inviting or
+removing other members, changing roles, editing group attributes, approving
+join requests, or managing invite links. Those Signal operations are not mapped
+or advertised by this basic group implementation.
+
 ## Identity replacement
 
 Rejecting every changed identity appears safe but can lose inbound messages:
@@ -117,7 +158,7 @@ the user previously chose one.
 
 ## Flare comparison
 
-Flare uses the same pinned Presage revision but presents contacts and groups as
+Flare also uses Presage but presents contacts and groups as
 conversation threads instead of a presence-oriented buddy list. Its UI exposes
 a manual
 [`sync-contacts` action](https://gitlab.com/schmiddi-on-mobile/flare/-/blob/484450e4cf8a34992a68df753a872e530a5b3d2c/src/gui/window.rs#L353)
@@ -141,8 +182,9 @@ Purple buddies. Because Purple normally hides offline buddies and Signal has no
 presence API, synchronized contacts are marked reachable while the account is
 connected. Contact names and synchronized phone numbers are used as aliases;
 profile enrichment is not implemented yet. For groups, signal-purple's pinned
-Presage fork adds a read-only Storage Service synchronization method so the chat
-list is complete without waiting for each group to receive a new message.
+Presage fork adds authoritative Storage Service refresh and pruning plus the
+remote group-leave operation, so the chat list is complete without waiting for
+each group to receive a new message and contains only active memberships.
 
 ## Deliberate boundaries
 

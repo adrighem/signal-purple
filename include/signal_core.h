@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define SIGNAL_CORE_ABI_VERSION 4u
+#define SIGNAL_CORE_ABI_VERSION 6u
 
 typedef struct SignalCore SignalCore;
 
@@ -42,7 +42,8 @@ typedef enum {
     SIGNAL_EVENT_IDENTITY_CHANGE = 17,
     SIGNAL_EVENT_IDENTITY_ACCEPTED = 18,
     SIGNAL_EVENT_ATTACHMENT = 19,
-    SIGNAL_EVENT_ATTACHMENT_SENT = 20
+    SIGNAL_EVENT_ATTACHMENT_SENT = 20,
+    SIGNAL_EVENT_GROUP_LEFT = 21
 } SignalEventKind;
 
 typedef enum {
@@ -96,6 +97,10 @@ SignalStatus signal_core_send_group_message(SignalCore *core,
                                             const char *group_key,
                                             const char *message);
 
+SignalStatus signal_core_leave_group(SignalCore *core,
+                                     uint64_t request_id,
+                                     const char *group_key);
+
 SignalStatus signal_core_send_attachment(SignalCore *core,
                                          uint64_t request_id,
                                          const char *recipient,
@@ -136,6 +141,10 @@ SignalStatus signal_core_mark_read(SignalCore *core,
                                    uint64_t request_id,
                                    const char *recipient,
                                    uint64_t timestamp);
+
+/* Returns a borrowed nonblocking event notifier descriptor, or -1.
+ * The descriptor remains owned by the core and must not be closed by C. */
+int signal_core_event_fd(SignalCore *core);
 
 /* Returns 1 when an event was returned, 0 when the queue is empty, or -1. */
 int signal_core_poll_event(SignalCore *core, SignalEvent **out_event);

@@ -101,6 +101,7 @@ set_target_properties(signal-core PROPERTIES IMPORTED_LOCATION
 add_dependencies(signal-core signal-core-build)
 
 add_library(signal-purple MODULE
+    src/blist_sync.c
     src/contact_sync.c
     src/connection.c
     src/group_sync.c
@@ -156,7 +157,10 @@ if(BUILD_TESTING)
     target_link_libraries(test-contact-sync PRIVATE PkgConfig::GLIB)
     add_test(NAME contact-sync COMMAND test-contact-sync)
 
-    add_executable(plugin-probe tests/plugin_probe.c src/group_sync.c)
+    add_executable(plugin-probe
+        tests/plugin_probe.c
+        src/blist_sync.c
+        src/group_sync.c)
     target_compile_features(plugin-probe PRIVATE c_std_11)
     target_compile_definitions(plugin-probe PRIVATE
         PURPLE_PLUGINS

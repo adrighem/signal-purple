@@ -4,12 +4,21 @@
 
 #include <purple.h>
 
-#define SIGNAL_SYNCED_GROUP_KEY "signal-purple-synced-group"
+#include "blist_sync.h"
+
 #define SIGNAL_GROUP_COMPONENT_KEY "group-id"
 #define SIGNAL_LEGACY_GROUP_COMPONENT_KEY "group-key"
+#define SIGNAL_SYNCED_GROUP_TITLE_KEY "signal-purple-synced-group-title"
 
+PurpleChat *signal_group_sync_lookup_chat(PurpleAccount *account,
+                                          const char *group_id);
 PurpleChat *signal_group_sync_find_chat(PurpleAccount *account,
                                         const char *group_id,
                                         guint *removed);
+const char *signal_group_sync_chat_id(PurpleChat *chat);
+guint signal_group_sync_remove_managed_chats(PurpleAccount *account,
+                                             const char *group_id);
+void signal_group_sync_update_title(PurpleChat *chat, const char *group_id,
+                                    const char *title);
 
 #endif

@@ -93,6 +93,7 @@ static PurplePluginProtocolInfo protocol_info = {
     .chat_send = signal_chat_send,
     .normalize = signal_normalize,
     .offline_message = signal_offline_message,
+    .find_blist_chat = signal_group_sync_lookup_chat,
     .struct_size = sizeof(PurplePluginProtocolInfo),
     .get_account_text_table = signal_account_text_table,
     .chat_can_receive_file = signal_chat_can_receive_file,

@@ -2,9 +2,12 @@
 #include <glib.h>
 #include <glib/gstdio.h>
 #include <purple.h>
+#include <errno.h>
 #include <sys/stat.h>
 
 #include "signal_purple.h"
+
+G_STATIC_ASSERT(SIGNAL_CORE_ABI_VERSION == 6u);
 
 typedef struct {
     PurpleInputFunction function;
@@ -99,8 +102,7 @@ remove_tree(const char *path)
 }
 
 static PurpleChat *
-add_group_chat(PurpleAccount *account, PurpleGroup *group,
-               const char *group_id, gboolean managed)
+new_group_chat(PurpleAccount *account, const char *group_id)
 {
     GHashTable *components = g_hash_table_new_full(
         g_str_hash, g_str_equal, g_free, g_free);
@@ -109,11 +111,428 @@ add_group_chat(PurpleAccount *account, PurpleGroup *group,
     g_hash_table_insert(components, g_strdup(SIGNAL_GROUP_COMPONENT_KEY),
                         g_strdup(group_id));
     chat = purple_chat_new(account, "Test group", components);
+    return chat;
+}
+
+static PurpleChat *
+add_group_chat(PurpleAccount *account, PurpleGroup *group,
+               const char *group_id, gboolean managed)
+{
+    PurpleChat *chat = new_group_chat(account, group_id);
+
     purple_blist_add_chat(chat, group, NULL);
     if (managed)
         purple_blist_node_set_bool(PURPLE_BLIST_NODE(chat),
                                    SIGNAL_SYNCED_GROUP_KEY, TRUE);
     return chat;
+}
+
+static PurpleBuddy *
+add_buddy(PurpleAccount *account, PurpleGroup *group, const char *name,
+          gboolean managed)
+{
+    PurpleBuddy *buddy = purple_buddy_new(account, name, NULL);
+
+    purple_blist_add_buddy(buddy, NULL, group, NULL);
+    if (managed)
+        purple_blist_node_set_bool(PURPLE_BLIST_NODE(buddy),
+                                   SIGNAL_SYNCED_BUDDY_KEY, TRUE);
+    return buddy;
+}
+
+static void
+test_default_blist_placement(PurpleAccount *account,
+                             PurpleGroup **default_buddy_group,
+                             PurpleGroup **default_chat_group)
+{
+    PurpleBuddy *control_buddy;
+    PurpleBuddy *managed_buddy;
+    PurpleChat *control_chat;
+    PurpleChat *managed_chat;
+
+    control_buddy = purple_buddy_new(account, "default-control", NULL);
+    purple_blist_add_buddy(control_buddy, NULL, NULL, NULL);
+    *default_buddy_group = purple_buddy_get_group(control_buddy);
+
+    managed_buddy = purple_buddy_new(account, "default-managed", NULL);
+    signal_blist_sync_add_buddy(managed_buddy);
+    g_assert_true(purple_buddy_get_group(managed_buddy) ==
+                  *default_buddy_group);
+    g_assert_true(purple_blist_node_get_bool(PURPLE_BLIST_NODE(managed_buddy),
+                                             SIGNAL_SYNCED_BUDDY_KEY));
+
+    control_chat = new_group_chat(account, "default-chat-control");
+    purple_blist_add_chat(control_chat, NULL, NULL);
+    *default_chat_group = purple_chat_get_group(control_chat);
+
+    managed_chat = new_group_chat(account, "default-chat-managed");
+    signal_blist_sync_add_chat(managed_chat);
+    g_assert_true(purple_chat_get_group(managed_chat) == *default_chat_group);
+    g_assert_true(purple_blist_node_get_bool(PURPLE_BLIST_NODE(managed_chat),
+                                             SIGNAL_SYNCED_GROUP_KEY));
+}
+
+static void
+test_buddy_legacy_migration(PurpleAccount *account,
+                            PurpleGroup *default_group)
+{
+    PurpleGroup *legacy_group;
+    PurpleGroup *custom_group;
+    PurpleBuddy *buddy;
+    PurpleBuddy *merged_buddy;
+    PurpleBuddy *migrated;
+    PurpleBuddy *unmanaged;
+    PurpleBuddy *destination_duplicate;
+    PurpleContact *contact;
+
+    legacy_group = purple_group_new(SIGNAL_LEGACY_BUDDY_GROUP);
+    purple_blist_add_group(legacy_group, NULL);
+    buddy = add_buddy(account, legacy_group, "legacy-managed", TRUE);
+    contact = purple_buddy_get_contact(buddy);
+    purple_blist_alias_contact(contact, "Merged local contact");
+    merged_buddy = purple_buddy_new(account, "locally-merged", NULL);
+    purple_blist_add_buddy(merged_buddy, contact, NULL, NULL);
+
+    migrated = signal_blist_sync_migrate_buddy(buddy);
+    g_assert_true(migrated == buddy);
+    g_assert_true(purple_buddy_get_group(migrated) == default_group);
+    g_assert_true(purple_buddy_get_contact(migrated) == contact);
+    g_assert_true(purple_buddy_get_contact(merged_buddy) == contact);
+    g_assert_true(purple_buddy_get_group(merged_buddy) == default_group);
+    g_assert_cmpstr(purple_contact_get_alias(contact), ==,
+                    "Merged local contact");
+    g_assert_true(purple_blist_node_get_bool(PURPLE_BLIST_NODE(migrated),
+                                             SIGNAL_SYNCED_BUDDY_KEY));
+    g_assert_null(purple_find_group(SIGNAL_LEGACY_BUDDY_GROUP));
+
+    legacy_group = purple_group_new(SIGNAL_LEGACY_BUDDY_GROUP);
+    purple_blist_add_group(legacy_group, NULL);
+    custom_group = purple_group_new("Signal managed custom placement");
+    purple_blist_add_group(custom_group, NULL);
+    buddy = add_buddy(account, custom_group, "custom-managed", TRUE);
+    migrated = signal_blist_sync_migrate_buddy(buddy);
+    g_assert_true(migrated == buddy);
+    g_assert_true(purple_buddy_get_group(migrated) == custom_group);
+    g_assert_true(purple_blist_node_get_bool(PURPLE_BLIST_NODE(migrated),
+                                             SIGNAL_SYNCED_BUDDY_KEY));
+    g_assert_true(purple_find_group(SIGNAL_LEGACY_BUDDY_GROUP) ==
+                  legacy_group);
+    purple_blist_remove_group(legacy_group);
+
+    legacy_group = purple_group_new(SIGNAL_LEGACY_BUDDY_GROUP);
+    purple_blist_add_group(legacy_group, NULL);
+    unmanaged = add_buddy(account, legacy_group, "legacy-unmanaged", FALSE);
+    migrated = signal_blist_sync_migrate_buddy(unmanaged);
+    g_assert_true(migrated == unmanaged);
+    g_assert_true(purple_buddy_get_group(unmanaged) == legacy_group);
+    g_assert_false(purple_blist_node_get_bool(PURPLE_BLIST_NODE(unmanaged),
+                                              SIGNAL_SYNCED_BUDDY_KEY));
+
+    buddy = add_buddy(account, legacy_group, "legacy-managed-retained", TRUE);
+    migrated = signal_blist_sync_migrate_buddy(buddy);
+    g_assert_true(migrated == buddy);
+    g_assert_true(purple_buddy_get_group(migrated) == default_group);
+    g_assert_true(purple_find_group(SIGNAL_LEGACY_BUDDY_GROUP) ==
+                  legacy_group);
+    g_assert_nonnull(
+        purple_blist_node_get_first_child(PURPLE_BLIST_NODE(legacy_group)));
+
+    destination_duplicate =
+        add_buddy(account, default_group, "legacy-deduplicate", FALSE);
+    buddy = add_buddy(account, legacy_group, "legacy-deduplicate", TRUE);
+    g_assert_true(signal_blist_sync_find_buddy(account,
+                                               "legacy-deduplicate") == buddy);
+    migrated = signal_blist_sync_migrate_buddy(buddy);
+    g_assert_true(migrated == destination_duplicate);
+    g_assert_true(purple_buddy_get_group(migrated) == default_group);
+    g_assert_false(purple_blist_node_get_bool(PURPLE_BLIST_NODE(migrated),
+                                              SIGNAL_SYNCED_BUDDY_KEY));
+
+    purple_blist_remove_buddy(unmanaged);
+    signal_blist_sync_remove_empty_legacy_buddy_group();
+    g_assert_null(purple_find_group(SIGNAL_LEGACY_BUDDY_GROUP));
+}
+
+static void
+test_chat_legacy_migration(PurpleAccount *account,
+                           PurpleGroup *default_group)
+{
+    PurpleGroup *legacy_group;
+    PurpleGroup *custom_group;
+    PurpleChat *chat;
+    PurpleChat *selected;
+    PurpleChat *unmanaged;
+    PurpleChat *user_chat;
+    guint removed = 0;
+
+    legacy_group = purple_group_new(SIGNAL_LEGACY_CHAT_GROUP);
+    purple_blist_add_group(legacy_group, NULL);
+    chat = add_group_chat(account, legacy_group, "legacy-chat-managed", TRUE);
+    signal_blist_sync_migrate_chat(chat);
+    g_assert_true(purple_chat_get_group(chat) == default_group);
+    g_assert_true(purple_blist_node_get_bool(PURPLE_BLIST_NODE(chat),
+                                             SIGNAL_SYNCED_GROUP_KEY));
+    g_assert_cmpstr(purple_chat_get_name(chat), ==, "Test group");
+    g_assert_cmpstr(g_hash_table_lookup(purple_chat_get_components(chat),
+                                       SIGNAL_GROUP_COMPONENT_KEY),
+                    ==, "legacy-chat-managed");
+    g_assert_null(purple_find_group(SIGNAL_LEGACY_CHAT_GROUP));
+
+    legacy_group = purple_group_new(SIGNAL_LEGACY_CHAT_GROUP);
+    purple_blist_add_group(legacy_group, NULL);
+    custom_group = purple_group_new("Signal chat custom placement");
+    purple_blist_add_group(custom_group, NULL);
+    chat = add_group_chat(account, custom_group, "custom-chat-managed", TRUE);
+    signal_blist_sync_migrate_chat(chat);
+    g_assert_true(purple_chat_get_group(chat) == custom_group);
+    g_assert_true(purple_blist_node_get_bool(PURPLE_BLIST_NODE(chat),
+                                             SIGNAL_SYNCED_GROUP_KEY));
+    g_assert_true(purple_find_group(SIGNAL_LEGACY_CHAT_GROUP) ==
+                  legacy_group);
+    purple_blist_remove_group(legacy_group);
+
+    legacy_group = purple_group_new(SIGNAL_LEGACY_CHAT_GROUP);
+    purple_blist_add_group(legacy_group, NULL);
+    unmanaged =
+        add_group_chat(account, legacy_group, "legacy-chat-unmanaged", FALSE);
+    signal_blist_sync_migrate_chat(unmanaged);
+    g_assert_true(purple_chat_get_group(unmanaged) == legacy_group);
+    g_assert_false(purple_blist_node_get_bool(PURPLE_BLIST_NODE(unmanaged),
+                                              SIGNAL_SYNCED_GROUP_KEY));
+
+    chat =
+        add_group_chat(account, legacy_group, "legacy-chat-retained", TRUE);
+    signal_blist_sync_migrate_chat(chat);
+    g_assert_true(purple_chat_get_group(chat) == default_group);
+    g_assert_true(purple_find_group(SIGNAL_LEGACY_CHAT_GROUP) == legacy_group);
+    g_assert_nonnull(
+        purple_blist_node_get_first_child(PURPLE_BLIST_NODE(legacy_group)));
+
+    purple_blist_remove_chat(unmanaged);
+    signal_blist_sync_remove_empty_legacy_chat_group();
+    g_assert_null(purple_find_group(SIGNAL_LEGACY_CHAT_GROUP));
+
+    legacy_group = purple_group_new(SIGNAL_LEGACY_CHAT_GROUP);
+    purple_blist_add_group(legacy_group, NULL);
+    user_chat = add_group_chat(account, default_group,
+                               "legacy-chat-duplicate", FALSE);
+    add_group_chat(account, legacy_group, "legacy-chat-duplicate", TRUE);
+    selected = signal_group_sync_find_chat(account, "legacy-chat-duplicate",
+                                           &removed);
+    g_assert_true(selected == user_chat);
+    g_assert_cmpuint(removed, ==, 1);
+    g_assert_null(purple_find_group(SIGNAL_LEGACY_CHAT_GROUP));
+}
+
+static void
+test_group_conversation_identity(PurplePlugin *plugin,
+                                 PurplePluginProtocolInfo *protocol,
+                                 PurpleAccount *account, PurpleGroup *group)
+{
+    PurpleConnection gc = {
+        .prpl = plugin,
+        .state = PURPLE_CONNECTED,
+        .account = account,
+    };
+    SignalConnection connection = {
+        .gc = &gc,
+        .group_ids_by_key = g_hash_table_new_full(
+            g_str_hash, g_str_equal, g_free, NULL),
+        .group_keys_by_id = g_hash_table_new_full(
+            g_direct_hash, g_direct_equal, NULL, g_free),
+        .group_titles_by_key = g_hash_table_new_full(
+            g_str_hash, g_str_equal, g_free, g_free),
+        .group_members_by_key = g_hash_table_new_full(
+            g_str_hash, g_str_equal, g_free,
+            (GDestroyNotify)g_ptr_array_unref),
+        .active_group_keys = g_hash_table_new_full(
+            g_str_hash, g_str_equal, g_free, NULL),
+        .pending_group_leaves = g_hash_table_new_full(
+            g_str_hash, g_str_equal, g_free, NULL),
+        .group_leave_requests = g_ptr_array_new(),
+        .next_group_id = 1,
+    };
+    PurpleChat *first;
+    PurpleChat *legacy;
+    PurpleChat *second;
+    PurpleConversation *first_conversation;
+    PurpleConversation *legacy_conversation;
+    PurpleConversation *second_conversation;
+    GHashTable *legacy_components;
+
+    purple_account_set_connection(account, &gc);
+    purple_connection_set_protocol_data(&gc, &connection);
+
+    first = add_group_chat(account, group, "stable-conversation-one", TRUE);
+    second = add_group_chat(account, group, "stable-conversation-two", FALSE);
+    legacy_components = g_hash_table_new_full(g_str_hash, g_str_equal, g_free,
+                                              g_free);
+    g_hash_table_insert(legacy_components,
+                        g_strdup(SIGNAL_LEGACY_GROUP_COMPONENT_KEY),
+                        g_strdup("stable-conversation-legacy"));
+    legacy = purple_chat_new(account, "Legacy local title", legacy_components);
+    purple_blist_add_chat(legacy, group, NULL);
+    purple_blist_alias_chat(first, "Shared Signal title");
+    purple_blist_alias_chat(second, "Shared Signal title");
+    g_hash_table_insert(connection.group_titles_by_key,
+                        g_strdup("stable-conversation-one"),
+                        g_strdup("Remote title one"));
+    g_hash_table_insert(connection.group_titles_by_key,
+                        g_strdup("stable-conversation-two"),
+                        g_strdup("Remote title two"));
+    g_hash_table_insert(connection.group_titles_by_key,
+                        g_strdup("stable-conversation-legacy"),
+                        g_strdup("Remote legacy title"));
+    g_hash_table_add(connection.active_group_keys,
+                     g_strdup("stable-conversation-one"));
+    g_hash_table_add(connection.active_group_keys,
+                     g_strdup("stable-conversation-two"));
+    g_hash_table_add(connection.active_group_keys,
+                     g_strdup("stable-conversation-legacy"));
+
+    g_assert_true(protocol->find_blist_chat(account,
+                                            "stable-conversation-one") ==
+                  first);
+    g_assert_true(protocol->find_blist_chat(account,
+                                            "stable-conversation-two") ==
+                  second);
+    g_assert_true(protocol->find_blist_chat(account,
+                                            "stable-conversation-legacy") ==
+                  legacy);
+    g_assert_true(purple_blist_find_chat(account,
+                                         "stable-conversation-one") == first);
+    g_assert_true(purple_blist_find_chat(account,
+                                         "stable-conversation-two") == second);
+
+    protocol->join_chat(&gc, purple_chat_get_components(first));
+    protocol->join_chat(&gc, purple_chat_get_components(second));
+    protocol->join_chat(&gc, purple_chat_get_components(legacy));
+    first_conversation = purple_find_chat(&gc, 1);
+    second_conversation = purple_find_chat(&gc, 2);
+    legacy_conversation = purple_find_chat(&gc, 3);
+    g_assert_nonnull(first_conversation);
+    g_assert_nonnull(second_conversation);
+    g_assert_nonnull(legacy_conversation);
+    g_assert_true(first_conversation != second_conversation);
+    g_assert_cmpstr(purple_conversation_get_name(first_conversation), ==,
+                    "stable-conversation-one");
+    g_assert_cmpstr(purple_conversation_get_name(second_conversation), ==,
+                    "stable-conversation-two");
+    g_assert_cmpstr(purple_conversation_get_name(legacy_conversation), ==,
+                    "stable-conversation-legacy");
+    g_assert_cmpstr(purple_conversation_get_title(first_conversation), ==,
+                    "Shared Signal title");
+    g_assert_cmpstr(purple_conversation_get_title(second_conversation), ==,
+                    "Shared Signal title");
+    g_assert_cmpstr(purple_conversation_get_title(legacy_conversation), ==,
+                    "Legacy local title");
+
+    GList *menu = protocol->blist_node_menu(PURPLE_BLIST_NODE(first));
+    g_assert_cmpuint(g_list_length(menu), ==, 1);
+    g_assert_cmpstr(((PurpleMenuAction *)menu->data)->label, ==,
+                    "Leave Signal group…");
+    g_list_free_full(menu, (GDestroyNotify)purple_menu_action_free);
+    g_assert_null(protocol->blist_node_menu(PURPLE_BLIST_NODE(second)));
+
+    g_hash_table_add(connection.pending_group_leaves,
+                     g_strdup("stable-conversation-one"));
+    g_assert_null(protocol->blist_node_menu(PURPLE_BLIST_NODE(first)));
+    g_assert_cmpint(protocol->chat_send(&gc, 1, "leaving", 0), ==, -ENOENT);
+    g_assert_false(protocol->chat_can_receive_file(&gc, 1));
+    g_hash_table_remove(connection.pending_group_leaves,
+                        "stable-conversation-one");
+    g_hash_table_remove(connection.active_group_keys,
+                        "stable-conversation-one");
+    g_assert_null(protocol->blist_node_menu(PURPLE_BLIST_NODE(first)));
+    g_assert_cmpint(protocol->chat_send(&gc, 1, "blocked", 0), ==, -ENOENT);
+    g_assert_false(protocol->chat_can_receive_file(&gc, 1));
+    g_hash_table_add(connection.active_group_keys,
+                     g_strdup("stable-conversation-one"));
+    g_assert_true(protocol->chat_can_receive_file(&gc, 1));
+
+    purple_blist_alias_chat(first, "Local display title");
+    protocol->join_chat(&gc, purple_chat_get_components(first));
+    g_assert_true(purple_find_chat(&gc, 1) == first_conversation);
+    g_assert_cmpstr(purple_conversation_get_title(first_conversation), ==,
+                    "Local display title");
+    g_assert_cmpstr(purple_conversation_get_title(second_conversation), ==,
+                    "Shared Signal title");
+
+    purple_conversation_destroy(legacy_conversation);
+    purple_conversation_destroy(second_conversation);
+    purple_conversation_destroy(first_conversation);
+    g_assert_null(gc.buddy_chats);
+    purple_blist_remove_chat(legacy);
+    purple_blist_remove_chat(second);
+    purple_blist_remove_chat(first);
+    purple_account_set_connection(account, NULL);
+    purple_connection_set_protocol_data(&gc, NULL);
+    g_ptr_array_unref(connection.group_leave_requests);
+    g_hash_table_unref(connection.pending_group_leaves);
+    g_hash_table_unref(connection.active_group_keys);
+    g_hash_table_unref(connection.group_members_by_key);
+    g_hash_table_unref(connection.group_titles_by_key);
+    g_hash_table_unref(connection.group_keys_by_id);
+    g_hash_table_unref(connection.group_ids_by_key);
+}
+
+static void
+test_remove_managed_group_chats(PurpleAccount *account, PurpleGroup *group)
+{
+    PurpleChat *unmanaged = add_group_chat(account, group,
+                                           "removed-managed-chats", FALSE);
+
+    add_group_chat(account, group, "removed-managed-chats", TRUE);
+    add_group_chat(account, group, "removed-managed-chats", TRUE);
+    g_assert_cmpuint(signal_group_sync_remove_managed_chats(
+                         account, "removed-managed-chats"),
+                     ==, 2);
+    g_assert_true(signal_group_sync_lookup_chat(account,
+                                                "removed-managed-chats") ==
+                  unmanaged);
+    purple_blist_remove_chat(unmanaged);
+}
+
+static void
+test_group_title_tracking(PurpleAccount *account, PurpleGroup *group)
+{
+    PurpleChat *chat;
+    PurpleChat *upgraded;
+
+    chat = add_group_chat(account, group, "tracked-title", TRUE);
+    upgraded = add_group_chat(account, group, "upgraded-local-title", TRUE);
+    purple_blist_alias_chat(chat, "Initial Signal title");
+    signal_group_sync_update_title(chat, "tracked-title",
+                                   "Initial Signal title");
+    signal_group_sync_update_title(chat, "tracked-title",
+                                   "Updated Signal title");
+    g_assert_cmpstr(purple_chat_get_name(chat), ==, "Updated Signal title");
+
+    purple_blist_alias_chat(chat, "Local display title");
+    signal_group_sync_update_title(chat, "tracked-title",
+                                   "Another Signal title");
+    g_assert_cmpstr(purple_chat_get_name(chat), ==, "Local display title");
+    g_assert_cmpstr(purple_blist_node_get_string(
+                        PURPLE_BLIST_NODE(chat),
+                        SIGNAL_SYNCED_GROUP_TITLE_KEY),
+                    ==, "Another Signal title");
+
+    /* In live Purple, a cleared alias resolves to the stable component.
+     * Model that resolved display name directly so this regression exercises
+     * signal-purple's title-following policy rather than Purple's fallback. */
+    purple_blist_alias_chat(chat, "tracked-title");
+    signal_group_sync_update_title(chat, "tracked-title",
+                                   "Restored Signal title");
+    g_assert_cmpstr(purple_chat_get_name(chat), ==, "Restored Signal title");
+
+    purple_blist_alias_chat(upgraded, "Pre-existing local title");
+    signal_group_sync_update_title(upgraded, "upgraded-local-title",
+                                   "Current Signal title");
+    g_assert_cmpstr(purple_chat_get_name(upgraded), ==,
+                    "Pre-existing local title");
+
+    purple_blist_remove_chat(upgraded);
+    purple_blist_remove_chat(chat);
 }
 
 int
@@ -126,6 +545,8 @@ main(int argc, char **argv)
     GHashTable *components;
     PurpleAccount *sync_account;
     PurpleGroup *sync_group;
+    PurpleGroup *default_buddy_group;
+    PurpleGroup *default_chat_group;
     PurpleChat *selected;
     PurpleChat *user_chat;
     guint removed = 0;
@@ -150,12 +571,16 @@ main(int argc, char **argv)
     }
     plugin = purple_plugin_probe(argv[1]);
     g_assert_nonnull(plugin);
+    purple_plugins_probe("signal-purple-test-no-such-extension");
+    plugin = purple_plugins_find_with_id(SIGNAL_PLUGIN_ID);
+    g_assert_nonnull(plugin);
     g_assert_cmpstr(purple_plugin_get_id(plugin), ==, SIGNAL_PLUGIN_ID);
     g_assert_cmpstr(purple_plugin_get_name(plugin), ==, "Signal");
     g_assert_cmpstr(purple_plugin_get_version(plugin), ==,
                     EXPECTED_PLUGIN_VERSION);
     g_assert_cmpint(plugin->info->type, ==, PURPLE_PLUGIN_PROTOCOL);
-    g_assert_true(purple_plugin_load(plugin));
+    if (!purple_plugin_is_loaded(plugin))
+        g_assert_true(purple_plugin_load(plugin));
 
     protocol = PURPLE_PLUGIN_PROTOCOL_INFO(plugin);
     g_assert_nonnull(protocol);
@@ -178,6 +603,7 @@ main(int argc, char **argv)
     g_assert_nonnull(protocol->chat_send);
     g_assert_nonnull(protocol->chat_can_receive_file);
     g_assert_nonnull(protocol->chat_send_file);
+    g_assert_nonnull(protocol->find_blist_chat);
 
     chat_info = protocol->chat_info(NULL);
     g_assert_cmpuint(g_list_length(chat_info), ==, 1);
@@ -199,8 +625,20 @@ main(int argc, char **argv)
     g_hash_table_unref(components);
 
     sync_account = purple_account_new("group-sync-test", SIGNAL_PLUGIN_ID);
+    if (purple_account_get_status_types(sync_account) == NULL)
+        purple_account_set_status_types(sync_account,
+                                        protocol->status_types(sync_account));
+    test_default_blist_placement(sync_account, &default_buddy_group,
+                                 &default_chat_group);
+    test_buddy_legacy_migration(sync_account, default_buddy_group);
+    test_chat_legacy_migration(sync_account, default_chat_group);
+
     sync_group = purple_group_new("Group sync tests");
     purple_blist_add_group(sync_group, NULL);
+    test_group_title_tracking(sync_account, sync_group);
+    test_remove_managed_group_chats(sync_account, sync_group);
+    test_group_conversation_identity(plugin, protocol, sync_account,
+                                     sync_group);
     add_group_chat(sync_account, sync_group, "stable-id", TRUE);
     add_group_chat(sync_account, sync_group, "stable-id", TRUE);
     add_group_chat(sync_account, sync_group, "stable-id", TRUE);

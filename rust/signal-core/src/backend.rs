@@ -1,16 +1,19 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, mpsc};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use futures::{StreamExt, channel::oneshot, pin_mut};
 use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::content::{Content, ContentBody, DataMessage, GroupContextV2};
 use presage::libsignal_service::groups_v2::Role;
-use presage::libsignal_service::protocol::ServiceId;
+use presage::libsignal_service::protocol::{Aci, ServiceId};
 use presage::libsignal_service::sender::AttachmentSpec;
+use presage::model::groups::Group;
 use presage::model::identity::OnNewIdentity;
 use presage::model::messages::Received;
 use presage::proto::{
@@ -23,12 +26,12 @@ use presage_store_sqlite::{ClientOutboxKind, ClientOutboxMessage};
 use qrcode::QrCode;
 use qrcode::types::Color;
 use sha2::{Digest, Sha256};
-use tokio::sync::{mpsc as tokio_mpsc, watch};
+use tokio::sync::{Mutex as AsyncMutex, mpsc as tokio_mpsc, watch};
 use zeroize::Zeroizing;
 
 use crate::event::{
     EVENT_ATTACHMENT, EVENT_ATTACHMENT_SENT, EVENT_CONTACT, EVENT_CONTACT_SYNC_BEGIN,
-    EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED, EVENT_GROUP, EVENT_GROUP_MEMBER,
+    EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED, EVENT_GROUP, EVENT_GROUP_LEFT, EVENT_GROUP_MEMBER,
     EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN, EVENT_GROUP_SYNC_END, EVENT_IDENTITY_ACCEPTED,
     EVENT_IDENTITY_CHANGE, EVENT_LINK_QR, EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT, EVENT_TYPING,
     Event, FLAG_OUTGOING,
@@ -38,6 +41,7 @@ const MESSAGE_PROJECTION_CLIENT: &str = "signal-purple-v1";
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_MESSAGE_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 const MAX_QUEUED_EVENT_BYTES: usize = 64 * 1024 * 1024;
+const GROUP_SYNC_RETRY_SECS: u64 = 30;
 
 pub struct Config {
     pub store_path: String,
@@ -56,6 +60,10 @@ pub enum Command {
         request_id: u64,
         group_key: String,
         message: String,
+    },
+    LeaveGroup {
+        request_id: u64,
+        group_key: String,
     },
     SendAttachment {
         request_id: u64,
@@ -97,6 +105,219 @@ struct MessageProjection {
     pending: HashMap<u64, Content>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ProjectionDisposition {
+    AwaitingAck,
+    Complete,
+    Retry,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct ProjectionEffect {
+    remove_pending: bool,
+    mark_projected: bool,
+}
+
+fn projection_effect(disposition: ProjectionDisposition) -> ProjectionEffect {
+    match disposition {
+        ProjectionDisposition::AwaitingAck => ProjectionEffect {
+            remove_pending: false,
+            mark_projected: false,
+        },
+        ProjectionDisposition::Complete => ProjectionEffect {
+            remove_pending: true,
+            mark_projected: true,
+        },
+        ProjectionDisposition::Retry => ProjectionEffect {
+            remove_pending: true,
+            mark_projected: false,
+        },
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GroupMessageTarget {
+    Direct,
+    Group([u8; 32]),
+    Malformed,
+}
+
+enum ProjectionGroup {
+    Active(Group),
+    Complete,
+    Retry,
+}
+
+fn group_message_target(message: &DataMessage) -> GroupMessageTarget {
+    let Some(group) = message.group_v2.as_ref() else {
+        return GroupMessageTarget::Direct;
+    };
+    match group
+        .master_key
+        .as_deref()
+        .and_then(|key| <[u8; 32]>::try_from(key).ok())
+    {
+        Some(key) => GroupMessageTarget::Group(key),
+        None => GroupMessageTarget::Malformed,
+    }
+}
+
+#[derive(Debug)]
+struct OutboxAttemptError {
+    message: String,
+    retryable: bool,
+}
+
+#[derive(Clone, Default)]
+struct DepartedGroups {
+    state: Arc<Mutex<GroupLeaveState>>,
+    operation: Arc<AsyncMutex<()>>,
+}
+
+#[derive(Default)]
+struct GroupLeaveState {
+    leaving: HashSet<String>,
+    departed: HashSet<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GroupDepartureState {
+    Active,
+    Leaving,
+    Departed,
+}
+
+fn departure_projection_disposition(state: GroupDepartureState) -> Option<ProjectionDisposition> {
+    match state {
+        GroupDepartureState::Active => None,
+        GroupDepartureState::Leaving => Some(ProjectionDisposition::Retry),
+        GroupDepartureState::Departed => Some(ProjectionDisposition::Complete),
+    }
+}
+
+impl DepartedGroups {
+    fn departure_state(&self, identifier: &str) -> GroupDepartureState {
+        let state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if state.departed.contains(identifier) {
+            GroupDepartureState::Departed
+        } else if state.leaving.contains(identifier) {
+            GroupDepartureState::Leaving
+        } else {
+            GroupDepartureState::Active
+        }
+    }
+
+    fn contains(&self, identifier: &str) -> bool {
+        self.departure_state(identifier) != GroupDepartureState::Active
+    }
+
+    fn is_departed(&self, identifier: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .departed
+            .contains(identifier)
+    }
+
+    fn begin_leave(&self, identifier: String) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .leaving
+            .insert(identifier);
+    }
+
+    fn cancel_leave(&self, identifier: &str) {
+        self.state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .leaving
+            .remove(identifier);
+    }
+
+    fn mark_departed(&self, identifier: String) {
+        let mut state = self
+            .state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.leaving.remove(&identifier);
+        state.departed.insert(identifier);
+    }
+
+    async fn lock_operation(&self) -> tokio::sync::MutexGuard<'_, ()> {
+        self.operation.lock().await
+    }
+}
+
+enum GroupLeaveCompletion {
+    Accepted {
+        peer_notification_sent: bool,
+        local_group_removed: bool,
+    },
+    Failed(String),
+}
+
+fn group_leave_completion_events(
+    departed_groups: &DepartedGroups,
+    request_id: u64,
+    group_key: &str,
+    completion: GroupLeaveCompletion,
+) -> Vec<Event> {
+    match completion {
+        GroupLeaveCompletion::Accepted {
+            peer_notification_sent,
+            local_group_removed,
+        } => {
+            departed_groups.mark_departed(group_key.to_owned());
+            let mut events = vec![Event {
+                kind: EVENT_GROUP_LEFT,
+                request_id,
+                chat_id: Some(group_key.to_owned()),
+                ..Event::default()
+            }];
+            events.extend(
+                group_leave_warning_messages(peer_notification_sent, local_group_removed)
+                    .into_iter()
+                    .map(|warning| Event::error(warning, false)),
+            );
+            events
+        }
+        GroupLeaveCompletion::Failed(error) => {
+            departed_groups.cancel_leave(group_key);
+            vec![Event::group_request_error(request_id, group_key, error)]
+        }
+    }
+}
+
+impl OutboxAttemptError {
+    fn permanent(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: false,
+        }
+    }
+
+    fn retryable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            retryable: true,
+        }
+    }
+
+    fn should_retry(&self) -> bool {
+        self.retryable
+    }
+}
+
+impl std::fmt::Display for OutboxAttemptError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
 impl MessageProjection {
     fn track(&mut self, content: Content) -> u64 {
         self.next_delivery_id = self.next_delivery_id.wrapping_add(1).max(1);
@@ -109,11 +330,71 @@ impl MessageProjection {
 #[derive(Clone)]
 struct EventSink {
     sender: mpsc::SyncSender<Event>,
+    notification: Arc<EventNotification>,
+    notification_writer: Arc<UnixStream>,
     overflowed: Arc<AtomicBool>,
     queued_bytes: Arc<AtomicUsize>,
 }
 
+pub(crate) struct EventNotification {
+    pending: AtomicBool,
+    serial: Mutex<()>,
+}
+
+impl EventNotification {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: AtomicBool::new(false),
+            serial: Mutex::new(()),
+        }
+    }
+
+    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.serial
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    pub(crate) fn mark_pending(&self) -> bool {
+        self.pending.swap(true, Ordering::AcqRel)
+    }
+
+    pub(crate) fn clear_pending(&self) {
+        self.pending.store(false, Ordering::Release);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn is_pending(&self) -> bool {
+        self.pending.load(Ordering::Acquire)
+    }
+}
+
 impl EventSink {
+    fn notify_locked(&self) {
+        if self.notification.mark_pending() {
+            return;
+        }
+
+        let mut writer = self.notification_writer.as_ref();
+        loop {
+            match writer.write(&[1]) {
+                Ok(1) => return,
+                Ok(_) => {
+                    self.notification.clear_pending();
+                    return;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                // A full socket means its peer is already readable, so the
+                // level-trigger invariant still holds.
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
+                Err(_) => {
+                    self.notification.clear_pending();
+                    return;
+                }
+            }
+        }
+    }
+
     fn emit(&self, event: Event) {
         if self.overflowed.load(Ordering::Acquire) {
             return;
@@ -129,15 +410,22 @@ impl EventSink {
                 })
                 .is_err()
         {
+            let _notification_guard = self.notification.lock();
             self.overflowed.store(true, Ordering::Release);
+            self.notify_locked();
             return;
         }
-        if let Err(error) = self.sender.try_send(event) {
-            if event_bytes > 0 {
-                self.queued_bytes.fetch_sub(event_bytes, Ordering::AcqRel);
-            }
-            if matches!(error, mpsc::TrySendError::Full(_)) {
-                self.overflowed.store(true, Ordering::Release);
+        let _notification_guard = self.notification.lock();
+        match self.sender.try_send(event) {
+            Ok(()) => self.notify_locked(),
+            Err(error) => {
+                if event_bytes > 0 {
+                    self.queued_bytes.fetch_sub(event_bytes, Ordering::AcqRel);
+                }
+                if matches!(error, mpsc::TrySendError::Full(_)) {
+                    self.overflowed.store(true, Ordering::Release);
+                    self.notify_locked();
+                }
             }
         }
     }
@@ -148,12 +436,16 @@ pub fn run_worker(
     commands: tokio_mpsc::Receiver<Command>,
     shutdown: watch::Receiver<bool>,
     events: mpsc::SyncSender<Event>,
+    event_notification: Arc<EventNotification>,
+    event_notification_writer: Arc<UnixStream>,
     overflowed: Arc<AtomicBool>,
     queued_bytes: Arc<AtomicUsize>,
     ready: Arc<AtomicBool>,
 ) {
     let sink = EventSink {
         sender: events,
+        notification: event_notification,
+        notification_writer: event_notification_writer,
         overflowed,
         queued_bytes,
     };
@@ -346,8 +638,14 @@ async fn receive_and_command_loop(
     let mut projection = MessageProjection::default();
     let mut attachment_tasks = tokio::task::JoinSet::new();
     let mut attachment_aborts = HashMap::new();
+    let departed_groups = DepartedGroups::default();
+    let mut groups_authoritative = false;
     let mut retry_tick = tokio::time::interval(std::time::Duration::from_secs(5));
     retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut group_sync_retry_tick =
+        tokio::time::interval(std::time::Duration::from_secs(GROUP_SYNC_RETRY_SECS));
+    group_sync_retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    group_sync_retry_tick.reset();
 
     loop {
         tokio::select! {
@@ -355,28 +653,48 @@ async fn receive_and_command_loop(
                 match received {
                     Some(Received::QueueEmpty) => {
                         if !synchronized {
-                            match Box::pin(manager.synchronize_storage_groups()).await {
-                                Ok(_) => {}
-                                Err(error) => sink.emit(Event::error(
-                                    format!("Could not synchronize Signal groups: {error}"),
-                                    false,
-                                )),
-                            }
+                            let groups_synchronized = match Box::pin(
+                                manager.synchronize_storage_groups(),
+                            )
+                            .await
+                            {
+                                Ok(_) => true,
+                                Err(error) => {
+                                    sink.emit(Event::error(
+                                        format!("Could not synchronize Signal groups: {error}"),
+                                        false,
+                                    ));
+                                    false
+                                }
+                            };
                             emit_contact_snapshot(&manager, &sink).await;
-                            emit_group_snapshot(&manager, &sink).await;
+                            if groups_synchronized {
+                                emit_group_snapshot(&manager, &sink, &departed_groups).await;
+                            }
+                            groups_authoritative = groups_synchronized;
+                            if !groups_authoritative {
+                                group_sync_retry_tick.reset();
+                            }
                             replay_unprojected_messages(
                                 &mut manager,
                                 &sink,
                                 &mut projection,
+                                &departed_groups,
+                                groups_authoritative,
                             ).await;
                             emit_identity_changes(&manager, &sink).await;
-                            retry_outbox(&mut manager, &sink).await;
+                            retry_outbox(
+                                &mut manager,
+                                &sink,
+                                &departed_groups,
+                                groups_authoritative,
+                            ).await;
                             groups_dirty = false;
                             synchronized = true;
                             ready.store(true, Ordering::Release);
                             sink.emit(Event { kind: EVENT_READY, ..Event::default() });
-                        } else if groups_dirty {
-                            emit_group_snapshot(&manager, &sink).await;
+                        } else if groups_dirty && groups_authoritative {
+                            emit_group_snapshot(&manager, &sink, &departed_groups).await;
                             groups_dirty = false;
                         }
                     }
@@ -389,6 +707,8 @@ async fn receive_and_command_loop(
                                 *content,
                                 &sink,
                                 &mut projection,
+                                &departed_groups,
+                                groups_authoritative,
                             ).await;
                             emit_identity_changes(&manager, &sink).await;
                         }
@@ -414,7 +734,15 @@ async fn receive_and_command_loop(
                         data,
                         group,
                     }) => {
+                        if group && !groups_authoritative {
+                            sink.emit(Event::request_error(
+                                request_id,
+                                "Signal groups are temporarily unavailable until authoritative synchronization succeeds",
+                            ));
+                            continue;
+                        }
                         let mut attachment_manager = manager.clone();
+                        let attachment_departed_groups = departed_groups.clone();
                         let abort = attachment_tasks.spawn_local(async move {
                             let result = upload_and_send_attachment(
                                 &mut attachment_manager,
@@ -423,6 +751,7 @@ async fn receive_and_command_loop(
                                 content_type,
                                 data,
                                 group,
+                                &attachment_departed_groups,
                             ).await;
                             (request_id, result)
                         });
@@ -434,12 +763,19 @@ async fn receive_and_command_loop(
                         }
                     }
                     Some(command) => {
+                        if groups_authoritative
+                            && let Command::LeaveGroup { group_key, .. } = &command
+                        {
+                            departed_groups.begin_leave(group_key.clone());
+                        }
                         if handle_command_interruptibly(
                             &mut manager,
                             command,
                             &mut shutdown,
                             &sink,
                             &mut projection,
+                            &departed_groups,
+                            groups_authoritative,
                         ).await {
                             return Ok(());
                         }
@@ -461,7 +797,27 @@ async fn receive_and_command_loop(
                 }
             }
             _ = retry_tick.tick(), if synchronized => {
-                retry_outbox(&mut manager, &sink).await;
+                retry_outbox(
+                    &mut manager,
+                    &sink,
+                    &departed_groups,
+                    groups_authoritative,
+                ).await;
+            }
+            _ = group_sync_retry_tick.tick(), if synchronized && !groups_authoritative => {
+                if Box::pin(manager.synchronize_storage_groups()).await.is_ok() {
+                    groups_authoritative = true;
+                    emit_group_snapshot(&manager, &sink, &departed_groups).await;
+                    groups_dirty = false;
+                    replay_unprojected_messages(
+                        &mut manager,
+                        &sink,
+                        &mut projection,
+                        &departed_groups,
+                        true,
+                    ).await;
+                    retry_outbox(&mut manager, &sink, &departed_groups, true).await;
+                }
             }
             _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
         }
@@ -474,8 +830,17 @@ async fn handle_command_interruptibly(
     shutdown: &mut watch::Receiver<bool>,
     sink: &EventSink,
     projection: &mut MessageProjection,
+    departed_groups: &DepartedGroups,
+    groups_authoritative: bool,
 ) -> bool {
-    let operation = handle_command(manager, command, sink, projection);
+    let operation = handle_command(
+        manager,
+        command,
+        sink,
+        projection,
+        departed_groups,
+        groups_authoritative,
+    );
     pin_mut!(operation);
 
     tokio::select! {
@@ -519,7 +884,11 @@ async fn emit_contact_snapshot(manager: &Manager<SqliteStore, Registered>, sink:
     }
 }
 
-async fn emit_group_snapshot(manager: &Manager<SqliteStore, Registered>, sink: &EventSink) {
+async fn emit_group_snapshot(
+    manager: &Manager<SqliteStore, Registered>,
+    sink: &EventSink,
+    departed_groups: &DepartedGroups,
+) {
     match manager.store().groups().await {
         Ok(groups) => match groups.collect::<Result<Vec<_>, _>>() {
             Ok(groups) => {
@@ -527,8 +896,14 @@ async fn emit_group_snapshot(manager: &Manager<SqliteStore, Registered>, sink: &
                     kind: EVENT_GROUP_SYNC_BEGIN,
                     ..Event::default()
                 });
+                let local_aci = manager.registration_data().service_ids.aci();
                 for (key, group) in groups {
                     let chat_id = group_identifier(&key);
+                    if departed_groups.contains(&chat_id)
+                        || !group_contains_local_aci(&group, &local_aci)
+                    {
+                        continue;
+                    }
                     sink.emit(Event {
                         kind: EVENT_GROUP,
                         chat_id: Some(chat_id.clone()),
@@ -589,11 +964,14 @@ fn retry_delay_ms(attempts: u32) -> u64 {
 async fn attempt_outbox_message(
     manager: &mut Manager<SqliteStore, Registered>,
     message: &ClientOutboxMessage,
-) -> Result<(), String> {
+    departed_groups: &DepartedGroups,
+) -> Result<(), OutboxAttemptError> {
     match message.kind {
         ClientOutboxKind::Direct => {
             let recipient = parse_recipient(&message.recipient).ok_or_else(|| {
-                "Recipient is not a canonical Signal service identifier".to_owned()
+                OutboxAttemptError::permanent(
+                    "Recipient is not a canonical Signal service identifier",
+                )
             })?;
             manager
                 .send_message(
@@ -606,19 +984,17 @@ async fn attempt_outbox_message(
                     message.timestamp,
                 )
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| OutboxAttemptError::retryable(error.to_string()))
         }
         ClientOutboxKind::Group => {
-            let key = resolve_group_key(manager, &message.recipient)
-                .await?
-                .ok_or_else(|| "Signal group is not available in the encrypted store".to_owned())?;
-            let revision = manager
-                .store()
-                .group(key)
+            let (key, group) = resolve_active_group(manager, &message.recipient, departed_groups)
                 .await
-                .ok()
-                .flatten()
-                .map_or(0, |group| group.revision);
+                .map_err(OutboxAttemptError::retryable)?
+                .ok_or_else(|| {
+                    OutboxAttemptError::permanent(
+                        "Signal group is unavailable or this account is no longer a member",
+                    )
+                })?;
             manager
                 .send_message_to_group(
                     &key,
@@ -627,7 +1003,7 @@ async fn attempt_outbox_message(
                         timestamp: Some(message.timestamp),
                         group_v2: Some(GroupContextV2 {
                             master_key: Some(key.to_vec()),
-                            revision: Some(revision),
+                            revision: Some(group.revision),
                             ..Default::default()
                         }),
                         ..Default::default()
@@ -635,7 +1011,7 @@ async fn attempt_outbox_message(
                     message.timestamp,
                 )
                 .await
-                .map_err(|error| error.to_string())
+                .map_err(|error| OutboxAttemptError::retryable(error.to_string()))
         }
     }
 }
@@ -643,7 +1019,7 @@ async fn attempt_outbox_message(
 async fn finish_outbox_attempt(
     manager: &mut Manager<SqliteStore, Registered>,
     message: &ClientOutboxMessage,
-    result: &Result<(), String>,
+    result: &Result<(), OutboxAttemptError>,
 ) -> Result<(), String> {
     match result {
         Ok(()) => manager
@@ -652,6 +1028,13 @@ async fn finish_outbox_attempt(
             .await
             .map_err(|error| {
                 format!("Message sent but its outbox entry could not be cleared: {error}")
+            }),
+        Err(error) if !error.should_retry() => manager
+            .store()
+            .complete_client_message(message.id)
+            .await
+            .map_err(|store_error| {
+                format!("Could not discard a terminal outbox entry: {store_error}")
             }),
         Err(_) => {
             let attempts = message.attempts.saturating_add(1);
@@ -668,7 +1051,12 @@ async fn finish_outbox_attempt(
     }
 }
 
-async fn retry_outbox(manager: &mut Manager<SqliteStore, Registered>, sink: &EventSink) {
+async fn retry_outbox(
+    manager: &mut Manager<SqliteStore, Registered>,
+    sink: &EventSink,
+    departed_groups: &DepartedGroups,
+    groups_authoritative: bool,
+) {
     let messages = match manager.store().due_client_messages(now_ms()).await {
         Ok(messages) => messages,
         Err(error) => {
@@ -680,21 +1068,35 @@ async fn retry_outbox(manager: &mut Manager<SqliteStore, Registered>, sink: &Eve
         }
     };
     for message in messages {
-        let result = attempt_outbox_message(manager, &message).await;
+        if !outbox_message_is_attemptable(&message.kind, groups_authoritative) {
+            continue;
+        }
+        let result = attempt_outbox_message(manager, &message, departed_groups).await;
         if let Err(error) = finish_outbox_attempt(manager, &message, &result).await {
             sink.emit(Event::error(error, false));
-        } else if let Err(error) = result
-            && matches!(message.attempts.saturating_add(1), 4 | 8)
-        {
-            sink.emit(Event::error(
-                format!(
-                    "A Signal message is still queued after {} attempts: {error}",
-                    message.attempts.saturating_add(1)
-                ),
-                false,
-            ));
+        } else if let Err(error) = result {
+            if !error.should_retry() {
+                sink.emit(Event::error(
+                    format!(
+                        "Discarded a queued Signal message that can no longer be sent: {error}"
+                    ),
+                    false,
+                ));
+            } else if matches!(message.attempts.saturating_add(1), 4 | 8) {
+                sink.emit(Event::error(
+                    format!(
+                        "A Signal message is still queued after {} attempts: {error}",
+                        message.attempts.saturating_add(1)
+                    ),
+                    false,
+                ));
+            }
         }
     }
+}
+
+fn outbox_message_is_attemptable(kind: &ClientOutboxKind, groups_authoritative: bool) -> bool {
+    groups_authoritative || matches!(kind, ClientOutboxKind::Direct)
 }
 
 async fn enqueue_and_send(
@@ -702,6 +1104,7 @@ async fn enqueue_and_send(
     kind: ClientOutboxKind,
     recipient: String,
     body: String,
+    departed_groups: &DepartedGroups,
 ) -> Result<(), String> {
     let timestamp = now_ms();
     let id = manager
@@ -717,9 +1120,9 @@ async fn enqueue_and_send(
         timestamp,
         attempts: 0,
     };
-    let result = attempt_outbox_message(manager, &message).await;
+    let result = attempt_outbox_message(manager, &message, departed_groups).await;
     finish_outbox_attempt(manager, &message, &result).await?;
-    result
+    result.map_err(|error| error.to_string())
 }
 
 async fn upload_and_send_attachment(
@@ -729,10 +1132,22 @@ async fn upload_and_send_attachment(
     content_type: String,
     data: Vec<u8>,
     group: bool,
+    departed_groups: &DepartedGroups,
 ) -> Result<(), String> {
     if data.is_empty() || data.len() > MAX_ATTACHMENT_BYTES {
         return Err("Attachment size is outside the supported range".into());
     }
+    let group_target = if group {
+        Some(
+            resolve_active_group(manager, recipient, departed_groups)
+                .await?
+                .ok_or_else(|| {
+                    "Signal group is unavailable or this account is no longer a member".to_owned()
+                })?,
+        )
+    } else {
+        None
+    };
     let pointer = manager
         .upload_attachment(
             AttachmentSpec {
@@ -754,16 +1169,13 @@ async fn upload_and_send_attachment(
         .map_err(|error| error.to_string())?;
     let timestamp = now_ms();
     if group {
-        let key = resolve_group_key(manager, recipient)
+        let (key, _) = group_target.expect("group target was resolved before upload");
+        let _operation = departed_groups.lock_operation().await;
+        let group = active_group_by_key(manager, key, departed_groups)
             .await?
-            .ok_or_else(|| "Signal group is not available in the encrypted store".to_owned())?;
-        let revision = manager
-            .store()
-            .group(key)
-            .await
-            .ok()
-            .flatten()
-            .map_or(0, |group| group.revision);
+            .ok_or_else(|| {
+                "Signal group became unavailable before the attachment could be sent".to_owned()
+            })?;
         manager
             .send_message_to_group(
                 &key,
@@ -772,7 +1184,7 @@ async fn upload_and_send_attachment(
                     timestamp: Some(timestamp),
                     group_v2: Some(GroupContextV2 {
                         master_key: Some(key.to_vec()),
-                        revision: Some(revision),
+                        revision: Some(group.revision),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -803,6 +1215,8 @@ async fn replay_unprojected_messages(
     manager: &mut Manager<SqliteStore, Registered>,
     sink: &EventSink,
     projection: &mut MessageProjection,
+    departed_groups: &DepartedGroups,
+    groups_authoritative: bool,
 ) {
     let messages = match manager
         .store()
@@ -820,7 +1234,15 @@ async fn replay_unprojected_messages(
     };
 
     for content in messages {
-        project_content(manager, content, sink, projection).await;
+        project_content(
+            manager,
+            content,
+            sink,
+            projection,
+            departed_groups,
+            groups_authoritative,
+        )
+        .await;
     }
 }
 
@@ -829,13 +1251,24 @@ async fn project_content(
     content: Content,
     sink: &EventSink,
     projection: &mut MessageProjection,
+    departed_groups: &DepartedGroups,
+    groups_authoritative: bool,
 ) {
+    if !content_is_projectable(&content.body, groups_authoritative) {
+        return;
+    }
     let delivery_id = projection.track(content.clone());
-    if handle_content(manager, content.clone(), delivery_id, sink).await {
+    let effect = projection_effect(
+        handle_content(manager, content.clone(), delivery_id, sink, departed_groups).await,
+    );
+    if !effect.remove_pending {
         return;
     }
 
     projection.pending.remove(&delivery_id);
+    if !effect.mark_projected {
+        return;
+    }
     if let Err(error) = manager
         .store()
         .mark_message_projected(MESSAGE_PROJECTION_CLIENT, &content)
@@ -870,11 +1303,17 @@ fn content_has_group_context(content: &ContentBody) -> bool {
     }
 }
 
+fn content_is_projectable(content: &ContentBody, groups_authoritative: bool) -> bool {
+    groups_authoritative || !content_has_group_context(content)
+}
+
 async fn handle_command(
     manager: &mut Manager<SqliteStore, Registered>,
     command: Command,
     sink: &EventSink,
     projection: &mut MessageProjection,
+    departed_groups: &DepartedGroups,
+    groups_authoritative: bool,
 ) {
     if let Command::AcknowledgeMessage { delivery_id } = command {
         let Some(content) = projection.pending.get(&delivery_id) else {
@@ -915,7 +1354,7 @@ async fn handle_command(
                     peer_id: Some(recipient),
                     ..Event::default()
                 });
-                retry_outbox(manager, sink).await;
+                retry_outbox(manager, sink, departed_groups, groups_authoritative).await;
             }
             Ok(false) => sink.emit(Event::request_error(
                 request_id,
@@ -963,6 +1402,77 @@ async fn handle_command(
         return;
     }
 
+    if let Command::LeaveGroup {
+        request_id,
+        group_key,
+    } = command
+    {
+        if !groups_authoritative {
+            departed_groups.cancel_leave(&group_key);
+            sink.emit(Event::group_request_error(
+                request_id,
+                group_key,
+                "Signal groups are temporarily unavailable until authoritative synchronization succeeds",
+            ));
+            return;
+        }
+        let group_operation = departed_groups.lock_operation().await;
+        let resolved = resolve_active_group_for_leave(manager, &group_key, departed_groups).await;
+        let Some((key, _)) = (match resolved {
+            Ok(group) => group,
+            Err(error) => {
+                departed_groups.cancel_leave(&group_key);
+                sink.emit(Event::group_request_error(request_id, group_key, error));
+                return;
+            }
+        }) else {
+            departed_groups.cancel_leave(&group_key);
+            sink.emit(Event::group_request_error(
+                request_id,
+                group_key,
+                "Signal group is unavailable or this account is no longer a member",
+            ));
+            return;
+        };
+
+        match manager.leave_group(&key).await {
+            Ok(outcome) => {
+                for event in group_leave_completion_events(
+                    departed_groups,
+                    request_id,
+                    &group_key,
+                    GroupLeaveCompletion::Accepted {
+                        peer_notification_sent: outcome.peer_notification_sent,
+                        local_group_removed: outcome.local_group_removed,
+                    },
+                ) {
+                    sink.emit(event);
+                }
+                drop(group_operation);
+                if let Err(error) = manager.store().expedite_client_messages(&group_key).await {
+                    sink.emit(Event::error(
+                        format!("Could not schedule stale group messages for cleanup: {error}"),
+                        false,
+                    ));
+                }
+                retry_outbox(manager, sink, departed_groups, groups_authoritative).await;
+            }
+            Err(error) => {
+                for event in group_leave_completion_events(
+                    departed_groups,
+                    request_id,
+                    &group_key,
+                    GroupLeaveCompletion::Failed(format!(
+                        "Could not leave the Signal group: {error}"
+                    )),
+                ) {
+                    sink.emit(event);
+                }
+            }
+        }
+        return;
+    }
+
     let (request_id, result) = match command {
         Command::SendMessage {
             request_id,
@@ -970,7 +1480,14 @@ async fn handle_command(
             message,
         } => {
             let result = if parse_recipient(&recipient).is_some() {
-                enqueue_and_send(manager, ClientOutboxKind::Direct, recipient, message).await
+                enqueue_and_send(
+                    manager,
+                    ClientOutboxKind::Direct,
+                    recipient,
+                    message,
+                    departed_groups,
+                )
+                .await
             } else {
                 Err("Recipient is not a canonical Signal service identifier".into())
             };
@@ -981,12 +1498,28 @@ async fn handle_command(
             group_key,
             message,
         } => {
-            let result = match resolve_group_key(manager, &group_key).await {
-                Ok(Some(_)) => {
-                    enqueue_and_send(manager, ClientOutboxKind::Group, group_key, message).await
+            let result = if !groups_authoritative {
+                Err(
+                    "Signal groups are temporarily unavailable until authoritative synchronization succeeds"
+                        .into(),
+                )
+            } else {
+                match resolve_active_group(manager, &group_key, departed_groups).await {
+                    Ok(Some(_)) => {
+                        enqueue_and_send(
+                            manager,
+                            ClientOutboxKind::Group,
+                            group_key,
+                            message,
+                            departed_groups,
+                        )
+                        .await
+                    }
+                    Ok(None) => Err(
+                        "Signal group is unavailable or this account is no longer a member".into(),
+                    ),
+                    Err(error) => Err(error),
                 }
-                Ok(None) => Err("Signal group is not available in the encrypted store".into()),
-                Err(error) => Err(error),
             };
             (request_id, result)
         }
@@ -1020,6 +1553,7 @@ async fn handle_command(
             (request_id, result)
         }
         Command::SendAttachment { .. } | Command::CancelAttachment { .. } => unreachable!(),
+        Command::LeaveGroup { .. } => unreachable!(),
         Command::AcknowledgeMessage { .. } => unreachable!(),
         Command::AcceptIdentity { .. } | Command::DismissIdentity { .. } => unreachable!(),
         Command::MarkRead { .. } => unreachable!(),
@@ -1035,13 +1569,14 @@ async fn handle_content(
     content: Content,
     delivery_id: u64,
     sink: &EventSink,
-) -> bool {
+    departed_groups: &DepartedGroups,
+) -> ProjectionDisposition {
     let timestamp = content_timestamp(&content);
     let sender = content.metadata.sender.service_id_string();
 
     match &content.body {
         ContentBody::DataMessage(message) => {
-            let projected = emit_data_message(
+            let disposition = emit_data_message(
                 manager,
                 message,
                 &sender,
@@ -1049,6 +1584,7 @@ async fn handle_content(
                 timestamp,
                 delivery_id,
                 sink,
+                departed_groups,
             )
             .await;
             if content.metadata.needs_receipt {
@@ -1065,7 +1601,7 @@ async fn handle_content(
                     .await;
                 });
             }
-            return projected;
+            return disposition;
         }
         ContentBody::EditMessage(EditMessage {
             data_message: Some(message),
@@ -1079,6 +1615,7 @@ async fn handle_content(
                 timestamp,
                 delivery_id,
                 sink,
+                departed_groups,
             )
             .await;
         }
@@ -1097,6 +1634,7 @@ async fn handle_content(
                     timestamp,
                     delivery_id,
                     sink,
+                    departed_groups,
                 )
                 .await;
             } else if let Some(EditMessage {
@@ -1115,6 +1653,7 @@ async fn handle_content(
                     timestamp,
                     delivery_id,
                     sink,
+                    departed_groups,
                 )
                 .await;
             }
@@ -1144,7 +1683,7 @@ async fn handle_content(
         )),
         _ => {}
     }
-    false
+    ProjectionDisposition::Complete
 }
 
 async fn emit_data_message(
@@ -1155,7 +1694,17 @@ async fn emit_data_message(
     timestamp: u64,
     delivery_id: u64,
     sink: &EventSink,
-) -> bool {
+    departed_groups: &DepartedGroups,
+) -> ProjectionDisposition {
+    let target = group_message_target(message);
+    if target == GroupMessageTarget::Malformed {
+        sink.emit(Event::error(
+            "Ignored a Signal group message with a missing or malformed group master key",
+            false,
+        ));
+        return ProjectionDisposition::Complete;
+    }
+
     let mut text = message.body.clone().unwrap_or_default();
     if let Some(reaction) = &message.reaction
         && let Some(emoji) = &reaction.emoji
@@ -1170,14 +1719,27 @@ async fn emit_data_message(
         text.push_str(&format!("[Attachment: {name}]"));
     }
     if text.is_empty() {
-        return false;
+        return ProjectionDisposition::Complete;
     }
 
-    let group_key = message
-        .group_v2
-        .as_ref()
-        .and_then(|group| group.master_key.as_deref())
-        .and_then(|key| <[u8; 32]>::try_from(key).ok());
+    let group_key = match target {
+        GroupMessageTarget::Direct => None,
+        GroupMessageTarget::Group(key) => Some(key),
+        GroupMessageTarget::Malformed => unreachable!(),
+    };
+    let group_title = if let Some(group_key) = group_key {
+        match group_for_projection(manager, group_key, departed_groups).await {
+            Ok(ProjectionGroup::Active(group)) => Some(group.title),
+            Ok(ProjectionGroup::Complete) => return ProjectionDisposition::Complete,
+            Ok(ProjectionGroup::Retry) => return ProjectionDisposition::Retry,
+            Err(error) => {
+                sink.emit(Event::error(error, false));
+                return ProjectionDisposition::Retry;
+            }
+        }
+    } else {
+        None
+    };
     let flags = if outgoing { FLAG_OUTGOING } else { 0 };
     let mut downloaded = Vec::new();
     let mut downloaded_bytes = 0usize;
@@ -1224,13 +1786,6 @@ async fn emit_data_message(
     };
 
     if let Some(group_key) = group_key {
-        let title = manager
-            .store()
-            .group(group_key)
-            .await
-            .ok()
-            .flatten()
-            .map(|group| group.title);
         let group_peer = if outgoing {
             manager
                 .registration_data()
@@ -1246,7 +1801,7 @@ async fn emit_data_message(
             flags,
             peer_id: Some(group_peer),
             chat_id: Some(group_identifier(&group_key)),
-            title,
+            title: group_title,
             text: Some(text),
             timestamp_ms: timestamp,
             ..Event::default()
@@ -1284,7 +1839,7 @@ async fn emit_data_message(
             ..Event::default()
         });
     }
-    true
+    ProjectionDisposition::AwaitingAck
 }
 
 async fn send_delivery_receipt(
@@ -1343,10 +1898,117 @@ fn group_identifier(group_key: &[u8; 32]) -> String {
     hex::encode(digest.finalize())
 }
 
-async fn resolve_group_key(
+fn group_leave_warning_messages(
+    peer_notification_sent: bool,
+    local_group_removed: bool,
+) -> Vec<&'static str> {
+    let mut warnings = Vec::new();
+    if !peer_notification_sent {
+        warnings.push(
+            "Signal accepted the group leave, but some remaining members could not be notified",
+        );
+    }
+    if !local_group_removed {
+        warnings.push(
+            "Signal accepted the group leave, but the encrypted local group cache could not be removed; reconnect to retry cleanup",
+        );
+    }
+    warnings
+}
+
+fn contains_local_aci<'a>(mut members: impl Iterator<Item = &'a Aci>, local_aci: &Aci) -> bool {
+    members.any(|member| member == local_aci)
+}
+
+fn group_contains_local_aci(group: &Group, local_aci: &Aci) -> bool {
+    contains_local_aci(group.members.iter().map(|member| &member.aci), local_aci)
+}
+
+async fn group_for_projection(
+    manager: &Manager<SqliteStore, Registered>,
+    key: [u8; 32],
+    departed_groups: &DepartedGroups,
+) -> Result<ProjectionGroup, String> {
+    let identifier = group_identifier(&key);
+    if let Some(disposition) =
+        departure_projection_disposition(departed_groups.departure_state(&identifier))
+    {
+        return Ok(match disposition {
+            ProjectionDisposition::Retry => ProjectionGroup::Retry,
+            ProjectionDisposition::Complete => ProjectionGroup::Complete,
+            ProjectionDisposition::AwaitingAck => unreachable!(),
+        });
+    }
+
+    let local_aci = manager.registration_data().service_ids.aci();
+    let group = manager
+        .store()
+        .group(key)
+        .await
+        .map_err(|error| format!("Could not read Signal group membership: {error}"))?;
+
+    if let Some(disposition) =
+        departure_projection_disposition(departed_groups.departure_state(&identifier))
+    {
+        return Ok(match disposition {
+            ProjectionDisposition::Retry => ProjectionGroup::Retry,
+            ProjectionDisposition::Complete => ProjectionGroup::Complete,
+            ProjectionDisposition::AwaitingAck => unreachable!(),
+        });
+    }
+
+    Ok(
+        match group.filter(|group| group_contains_local_aci(group, &local_aci)) {
+            Some(group) => ProjectionGroup::Active(group),
+            None => ProjectionGroup::Complete,
+        },
+    )
+}
+
+async fn active_group_by_key(
+    manager: &Manager<SqliteStore, Registered>,
+    key: [u8; 32],
+    departed_groups: &DepartedGroups,
+) -> Result<Option<Group>, String> {
+    if departed_groups.contains(&group_identifier(&key)) {
+        return Ok(None);
+    }
+    let local_aci = manager.registration_data().service_ids.aci();
+    manager
+        .store()
+        .group(key)
+        .await
+        .map(|group| group.filter(|group| group_contains_local_aci(group, &local_aci)))
+        .map_err(|error| format!("Could not read Signal group membership: {error}"))
+}
+
+async fn resolve_active_group(
     manager: &Manager<SqliteStore, Registered>,
     identifier: &str,
-) -> Result<Option<[u8; 32]>, String> {
+    departed_groups: &DepartedGroups,
+) -> Result<Option<([u8; 32], Group)>, String> {
+    if departed_groups.contains(identifier) {
+        return Ok(None);
+    }
+    resolve_active_group_in_store(manager, identifier).await
+}
+
+async fn resolve_active_group_for_leave(
+    manager: &Manager<SqliteStore, Registered>,
+    identifier: &str,
+    departed_groups: &DepartedGroups,
+) -> Result<Option<([u8; 32], Group)>, String> {
+    if departed_groups.is_departed(identifier) {
+        return Ok(None);
+    }
+    resolve_active_group_in_store(manager, identifier).await
+}
+
+async fn resolve_active_group_in_store(
+    manager: &Manager<SqliteStore, Registered>,
+    identifier: &str,
+) -> Result<Option<([u8; 32], Group)>, String> {
+    let local_aci = manager.registration_data().service_ids.aci();
     let groups = manager
         .store()
         .groups()
@@ -1354,10 +2016,9 @@ async fn resolve_group_key(
         .map_err(|error| format!("Could not read Signal groups: {error}"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| format!("Could not decode Signal groups: {error}"))?;
-    Ok(groups
-        .into_iter()
-        .map(|(key, _)| key)
-        .find(|key| group_identifier(key) == identifier))
+    Ok(groups.into_iter().find(|(key, group)| {
+        group_identifier(key) == identifier && group_contains_local_aci(group, &local_aci)
+    }))
 }
 
 fn content_timestamp(content: &Content) -> u64 {
@@ -1425,6 +2086,14 @@ fn qr_png(value: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Read;
+
+    fn test_notification() -> (Arc<EventNotification>, Arc<UnixStream>, UnixStream) {
+        let (reader, writer) = UnixStream::pair().unwrap();
+        reader.set_nonblocking(true).unwrap();
+        writer.set_nonblocking(true).unwrap();
+        (Arc::new(EventNotification::new()), Arc::new(writer), reader)
+    }
 
     #[test]
     fn derives_stable_non_secret_group_identifiers() {
@@ -1435,6 +2104,136 @@ mod tests {
         assert_eq!(first, group_identifier(&[0; 32]));
         assert_ne!(first, hex::encode([0; 32]));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn recognizes_only_groups_containing_the_local_aci() {
+        let Some(ServiceId::Aci(local)) =
+            ServiceId::parse_from_service_id_string("11111111-1111-4111-8111-111111111111")
+        else {
+            panic!("test ACI must parse");
+        };
+        let Some(ServiceId::Aci(other)) =
+            ServiceId::parse_from_service_id_string("22222222-2222-4222-8222-222222222222")
+        else {
+            panic!("test ACI must parse");
+        };
+
+        assert!(contains_local_aci([&other, &local].into_iter(), &local));
+        assert!(!contains_local_aci([&other].into_iter(), &local));
+    }
+
+    #[test]
+    fn classifies_inactive_group_outbox_entries_as_terminal() {
+        let terminal = OutboxAttemptError::permanent("not a member");
+        let transient = OutboxAttemptError::retryable("network unavailable");
+
+        assert!(!terminal.should_retry());
+        assert!(transient.should_retry());
+    }
+
+    #[test]
+    fn quarantines_group_outbox_until_membership_is_authoritative() {
+        assert!(outbox_message_is_attemptable(
+            &ClientOutboxKind::Direct,
+            false
+        ));
+        assert!(!outbox_message_is_attemptable(
+            &ClientOutboxKind::Group,
+            false
+        ));
+        assert!(outbox_message_is_attemptable(
+            &ClientOutboxKind::Group,
+            true
+        ));
+    }
+
+    #[test]
+    fn remembers_departed_groups_across_worker_clones() {
+        let departed = DepartedGroups::default();
+        let worker_copy = departed.clone();
+
+        assert!(!worker_copy.contains("opaque-group-id"));
+        departed.mark_departed("opaque-group-id".to_owned());
+        assert!(worker_copy.contains("opaque-group-id"));
+    }
+
+    #[test]
+    fn failed_leave_preserves_group_and_reports_its_identity() {
+        let departed = DepartedGroups::default();
+        departed.begin_leave("opaque-group-id".to_owned());
+        assert!(departed.contains("opaque-group-id"));
+        let events = group_leave_completion_events(
+            &departed,
+            41,
+            "opaque-group-id",
+            GroupLeaveCompletion::Failed("server rejected leave".to_owned()),
+        );
+
+        assert!(!departed.contains("opaque-group-id"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, crate::event::EVENT_ERROR);
+        assert_eq!(events[0].request_id, 41);
+        assert_eq!(events[0].chat_id.as_deref(), Some("opaque-group-id"));
+        assert_eq!(events[0].text.as_deref(), Some("server rejected leave"));
+    }
+
+    #[test]
+    fn accepted_leave_is_terminal_before_success_is_reported() {
+        let departed = DepartedGroups::default();
+        departed.begin_leave("opaque-group-id".to_owned());
+        let events = group_leave_completion_events(
+            &departed,
+            42,
+            "opaque-group-id",
+            GroupLeaveCompletion::Accepted {
+                peer_notification_sent: true,
+                local_group_removed: true,
+            },
+        );
+
+        assert!(departed.contains("opaque-group-id"));
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].kind, EVENT_GROUP_LEFT);
+        assert_eq!(events[0].request_id, 42);
+        assert_eq!(events[0].chat_id.as_deref(), Some("opaque-group-id"));
+    }
+
+    #[test]
+    fn leave_waits_for_an_in_flight_group_operation_before_departing() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let groups = DepartedGroups::default();
+            let attachment_operation = groups.lock_operation().await;
+            groups.begin_leave("opaque-group-id".to_owned());
+
+            let leave_groups = groups.clone();
+            let leave_entered = Arc::new(AtomicBool::new(false));
+            let leave_entered_task = Arc::clone(&leave_entered);
+            let leave = tokio::spawn(async move {
+                let _leave_operation = leave_groups.lock_operation().await;
+                leave_entered_task.store(true, Ordering::Release);
+                leave_groups.mark_departed("opaque-group-id".to_owned());
+            });
+
+            tokio::task::yield_now().await;
+            assert!(!leave_entered.load(Ordering::Acquire));
+            drop(attachment_operation);
+            leave.await.unwrap();
+            assert!(leave_entered.load(Ordering::Acquire));
+            assert!(groups.is_departed("opaque-group-id"));
+        });
+    }
+
+    #[test]
+    fn warns_only_for_incomplete_post_leave_cleanup() {
+        assert!(group_leave_warning_messages(true, true).is_empty());
+        assert_eq!(group_leave_warning_messages(false, true).len(), 1);
+        assert_eq!(group_leave_warning_messages(true, false).len(), 1);
+        assert_eq!(group_leave_warning_messages(false, false).len(), 2);
     }
 
     #[test]
@@ -1454,6 +2253,89 @@ mod tests {
 
         assert!(!content_has_group_context(&direct));
         assert!(content_has_group_context(&group));
+        assert!(content_is_projectable(&direct, false));
+        assert!(!content_is_projectable(&group, false));
+        assert!(content_is_projectable(&group, true));
+    }
+
+    #[test]
+    fn projection_dispositions_preserve_retryable_content() {
+        assert_eq!(
+            projection_effect(ProjectionDisposition::AwaitingAck),
+            ProjectionEffect {
+                remove_pending: false,
+                mark_projected: false,
+            }
+        );
+        assert_eq!(
+            projection_effect(ProjectionDisposition::Complete),
+            ProjectionEffect {
+                remove_pending: true,
+                mark_projected: true,
+            }
+        );
+        assert_eq!(
+            projection_effect(ProjectionDisposition::Retry),
+            ProjectionEffect {
+                remove_pending: true,
+                mark_projected: false,
+            }
+        );
+    }
+
+    #[test]
+    fn parses_direct_valid_and_malformed_group_contexts() {
+        assert_eq!(
+            group_message_target(&DataMessage::default()),
+            GroupMessageTarget::Direct
+        );
+        assert_eq!(
+            group_message_target(&DataMessage {
+                group_v2: Some(GroupContextV2 {
+                    master_key: Some(vec![7; 32]),
+                    ..GroupContextV2::default()
+                }),
+                ..DataMessage::default()
+            }),
+            GroupMessageTarget::Group([7; 32])
+        );
+        assert_eq!(
+            group_message_target(&DataMessage {
+                group_v2: Some(GroupContextV2 {
+                    master_key: Some(vec![7; 31]),
+                    ..GroupContextV2::default()
+                }),
+                ..DataMessage::default()
+            }),
+            GroupMessageTarget::Malformed
+        );
+        assert_eq!(
+            group_message_target(&DataMessage {
+                group_v2: Some(GroupContextV2::default()),
+                ..DataMessage::default()
+            }),
+            GroupMessageTarget::Malformed
+        );
+    }
+
+    #[test]
+    fn pending_leave_retries_projection_but_departure_completes_it() {
+        let groups = DepartedGroups::default();
+        groups.begin_leave("opaque-group-id".to_owned());
+        assert_eq!(
+            departure_projection_disposition(groups.departure_state("opaque-group-id")),
+            Some(ProjectionDisposition::Retry)
+        );
+
+        groups.mark_departed("opaque-group-id".to_owned());
+        assert_eq!(
+            departure_projection_disposition(groups.departure_state("opaque-group-id")),
+            Some(ProjectionDisposition::Complete)
+        );
+        assert_eq!(
+            departure_projection_disposition(GroupDepartureState::Active),
+            None
+        );
     }
 
     #[test]
@@ -1467,9 +2349,12 @@ mod tests {
     #[test]
     fn reports_event_queue_overflow_without_growing_the_queue() {
         let (sender, receiver) = mpsc::sync_channel(1);
+        let (notification, notification_writer, mut notification_reader) = test_notification();
         let overflowed = Arc::new(AtomicBool::new(false));
         let sink = EventSink {
             sender,
+            notification: Arc::clone(&notification),
+            notification_writer,
             overflowed: Arc::clone(&overflowed),
             queued_bytes: Arc::new(AtomicUsize::new(0)),
         };
@@ -1485,6 +2370,14 @@ mod tests {
         sink.emit(Event::default());
 
         assert!(overflowed.load(Ordering::Acquire));
+        assert!(notification.is_pending());
+        let mut token = [0u8; 1];
+        assert_eq!(notification_reader.read(&mut token).unwrap(), 1);
+        assert_eq!(token, [1]);
+        assert_eq!(
+            notification_reader.read(&mut token).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
         assert_eq!(receiver.try_recv().unwrap().kind, EVENT_MESSAGE);
         assert!(matches!(
             receiver.try_recv(),
@@ -1495,10 +2388,13 @@ mod tests {
     #[test]
     fn bounds_binary_event_queue_memory() {
         let (sender, receiver) = mpsc::sync_channel(4);
+        let (notification, notification_writer, _notification_reader) = test_notification();
         let overflowed = Arc::new(AtomicBool::new(false));
         let queued_bytes = Arc::new(AtomicUsize::new(0));
         let sink = EventSink {
             sender,
+            notification,
+            notification_writer,
             overflowed: Arc::clone(&overflowed),
             queued_bytes: Arc::clone(&queued_bytes),
         };
@@ -1524,5 +2420,100 @@ mod tests {
             receiver.try_recv(),
             Err(mpsc::TryRecvError::Empty)
         ));
+    }
+
+    #[test]
+    fn notifies_when_binary_overflow_happens_before_any_enqueue() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (notification, notification_writer, mut notification_reader) = test_notification();
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let sink = EventSink {
+            sender,
+            notification: Arc::clone(&notification),
+            notification_writer,
+            overflowed: Arc::clone(&overflowed),
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+        };
+
+        sink.emit(Event {
+            kind: EVENT_ATTACHMENT,
+            data: vec![0; MAX_QUEUED_EVENT_BYTES + 1],
+            ..Event::default()
+        });
+
+        assert!(overflowed.load(Ordering::Acquire));
+        assert!(notification.is_pending());
+        assert!(matches!(
+            receiver.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        let mut token = [0u8; 1];
+        assert_eq!(notification_reader.read(&mut token).unwrap(), 1);
+        assert_eq!(token, [1]);
+    }
+
+    #[test]
+    fn failed_notification_write_does_not_leave_pending_set() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let (reader, writer) = UnixStream::pair().unwrap();
+        writer.set_nonblocking(true).unwrap();
+        drop(reader);
+        let notification = Arc::new(EventNotification::new());
+        let sink = EventSink {
+            sender,
+            notification: Arc::clone(&notification),
+            notification_writer: Arc::new(writer),
+            overflowed: Arc::new(AtomicBool::new(false)),
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+        };
+
+        sink.emit(Event {
+            kind: EVENT_MESSAGE,
+            ..Event::default()
+        });
+
+        assert!(!notification.is_pending());
+        assert_eq!(receiver.try_recv().unwrap().kind, EVENT_MESSAGE);
+    }
+
+    #[test]
+    fn coalesces_notifications_until_the_event_queue_is_observed_empty() {
+        let (sender, receiver) = mpsc::sync_channel(2);
+        let (notification, notification_writer, mut notification_reader) = test_notification();
+        let sink = EventSink {
+            sender,
+            notification: Arc::clone(&notification),
+            notification_writer,
+            overflowed: Arc::new(AtomicBool::new(false)),
+            queued_bytes: Arc::new(AtomicUsize::new(0)),
+        };
+        let mut token = [0u8; 1];
+
+        sink.emit(Event {
+            kind: EVENT_MESSAGE,
+            ..Event::default()
+        });
+        assert_eq!(receiver.try_recv().unwrap().kind, EVENT_MESSAGE);
+        sink.emit(Event {
+            kind: EVENT_GROUP_MESSAGE,
+            ..Event::default()
+        });
+
+        assert_eq!(notification_reader.read(&mut token).unwrap(), 1);
+        assert_eq!(
+            notification_reader.read(&mut token).unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+        assert_eq!(receiver.try_recv().unwrap().kind, EVENT_GROUP_MESSAGE);
+
+        {
+            let _guard = notification.lock();
+            notification.clear_pending();
+        }
+        sink.emit(Event {
+            kind: EVENT_MESSAGE,
+            ..Event::default()
+        });
+        assert_eq!(notification_reader.read(&mut token).unwrap(), 1);
     }
 }

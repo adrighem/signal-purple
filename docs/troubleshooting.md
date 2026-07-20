@@ -30,6 +30,16 @@ The plugin waits for Presage's pending queue to empty before allowing sends.
 Large initial syncs can take time. A backend error should appear in Purple; use
 sanitized debug output when reporting it.
 
+## Pidgin uses excessive CPU while Signal is idle
+
+First confirm the hot process and thread rather than assuming every Pidgin CPU
+spike comes from Signal. Current builds use descriptor-driven event delivery and
+do not poll the backend on a fixed timer. After upgrading both plugin libraries,
+fully restart Pidgin so it does not keep an older deleted library mapping, then
+sample again. If the main Pidgin thread or `signal-purple-core` remains hot, run
+`pidgin --debug` and report which thread is busy; sanitize all identifiers and
+provisioning data before sharing output.
+
 ## The Signal buddy list is empty
 
 Reconnect the Signal account and allow the requested contact synchronization
@@ -39,8 +49,35 @@ Do not include contact identifiers in a public report.
 
 Signal does not expose contact presence. Current builds mark synchronized
 contacts reachable while the account is connected so Pidgin's default offline
-filter does not hide the entire `Signal` group. Older builds require **View >
-Show Offline Buddies**.
+filter does not hide them in the default buddy group. Older builds require
+**View > Show Offline Buddies**.
+
+## Contacts or chats remain in the old Signal groups
+
+Reconnect the account and let contact and group synchronization finish. The
+plugin moves its managed nodes from the exact legacy groups `Signal` and
+`Signal groups` into Purple's localized default buddy and chat groups. It does
+not move user-created nodes or managed nodes that you already placed in a
+custom group. After moving or removing its last managed node, the plugin
+removes the legacy group if it is empty.
+
+## Leaving or removing a Signal group
+
+To change Signal membership, right-click an active managed chat, choose **Leave
+Signal group…**, and confirm. The chat remains in Pidgin if the remote request
+fails; it is closed and removed only after the backend reports success.
+
+Pidgin's built-in **Remove Chat** operation is local-only because Purple 2 does
+not give protocol plugins a removal callback. A removed managed chat can
+therefore return after the next group synchronization. Closing the conversation
+tab is also local-only. Neither action leaves the Signal group.
+
+If **Leave Signal group…** is absent, allow a complete group refresh to finish.
+The plugin offers remote leave only for a synchronized group in which the
+account is currently an active member. Run `pidgin --debug` to inspect a failure,
+which reports identifier-free queued/completed/failed leave milestones. Sanitize
+any contact, group, or request identifiers from surrounding output before
+sharing the log.
 
 ## Messages sent while Pidgin was offline are missing
 
