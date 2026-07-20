@@ -1,38 +1,264 @@
 # signal-purple
 
-> **Pre-alpha and unofficial.** This project is not affiliated with or
-> supported by Signal. Only the scenarios listed in
-> [live validation](docs/live-validation.md) have been tested against the
-> production service. Do not treat this as a substitute for an official Signal
-> client.
+> [!WARNING]
+> **Pre-alpha, unofficial, and not supported by Signal.** There is no tagged or
+> supported release; `main` contains unreleased work. Test with a
+> non-production account, keep an official Signal client available, and expect
+> Signal service changes to break compatibility without warning.
 
-`signal-purple` is an experimental Signal protocol plugin for Pidgin and other
-libpurple 2 clients. It links as a secondary Signal device, keeps Signal
-protocol work in a pinned Rust/Presage backend, and exposes a small owned C ABI
-to the Purple plugin.
+`signal-purple` is an experimental Signal linked-device protocol plugin for
+Pidgin and libpurple 2. It adds synchronized Signal contacts, direct messages,
+and group conversations to Pidgin while a Rust/Presage backend handles the
+Signal protocol inside the same process.
 
-## Current status
+## Current state
 
-| Capability | Status |
+This README distinguishes production-service evidence from automated tests:
+
+- **Live-tested** means the behavior was exercised against Signal's production
+  service in a controlled Pidgin profile.
+- **Test-covered** means the current implementation is exercised by automated
+  tests, but still needs production-service validation.
+- **Implemented** means the code path exists and has focused coverage, but the
+  complete user-visible flow has not yet been validated end to end.
+
+| Area | Current evidence |
 | --- | --- |
-| Purple 2.14 plugin discovery/load | Implemented and tested |
-| Fresh-store linked-device QR flow | Live isolated-profile test passed 2026-07-19 |
-| Existing linked-device reconnect | Live isolated-profile test passed 2026-07-19 |
-| SQLCipher store with libsecret key | Implemented |
-| Signal contact buddy-list create/update/delete | Implemented; 46-contact creation and 49-contact legacy migration live-tested; snapshot reconciliation unit-tested |
-| Group discovery, active-membership reconciliation, and pruning | Implemented; earlier 11-group discovery and 3-member projection live-tested, authoritative refresh live test pending |
-| Plain-text direct messages | Live isolated-profile test passed 2026-07-19 |
-| Basic group messages | Implemented for refreshed active memberships; live send test pending |
-| Remote group leave | Implementation-tested; production-service validation pending |
-| Typing indicators | Implemented; live test pending |
-| Delivery receipts | Sent by the backend; Purple 2 has no receipt UI |
-| Incoming and outgoing attachments | Group JPEG/PNG images render inline; other files use bounded Purple transfers; post-fix live image resend pending |
-| In-plugin safety-number comparison, calls | Not implemented |
-| Primary-device registration and contact discovery | Out of scope for now |
+| Linked-device QR setup and encrypted-store reconnect | **Live-tested.** A fresh link and a restart without relinking both passed. |
+| Direct plain-text messages | **Live-tested** in both directions. |
+| Contacts | **Partly live-tested.** Contact creation and adoption from the legacy `Signal` buddy group passed live checks; update and removal snapshot decisions are test-covered. |
+| Group discovery and display | **Partly live-tested.** Discovery, reconnect deduplication, titles, members, and administrator flags passed live checks. Current authoritative refresh and pruning are test-covered. |
+| Group messages | **Implemented.** Routing and active-membership guards have automated coverage; current end-to-end send/receive still needs live validation. |
+| Remote group leave | **Test-covered.** The confirmed **Leave Signal group…** flow still needs live validation. |
+| Typing and receipts | **Test-covered.** Direct typing and outgoing delivery/focus-gated read receipts are implemented. Receipt updates received from other clients are not shown in Purple 2. |
+| Attachments | **Implemented.** Size limits, ABI handling, transfer presentation, and inline-image validation have focused tests. End-to-end transfers and the inline-image fix still need live checks. |
+| Delivery recovery | **Test-covered.** The encrypted text outbox and unacknowledged-message replay are implemented; controlled offline, crash, and network-loss checks remain. |
+| Identity replacement | **Test-covered.** Verified-contact sends block until the user accepts a changed identity after out-of-band verification. |
+| Idle event handling | **Live-tested.** Descriptor-driven wakeups replaced the old polling loop; an isolated idle sample found no hot Signal thread. |
 
-Signal does not provide a stable third-party client API. Service changes can
-break this plugin without warning. See [compatibility](docs/compatibility.md)
-and the [security model](docs/security-model.md) before using it.
+The latest recorded production-service validation was on 2026-07-20. See
+[live validation](docs/live-validation.md) for the exact scenarios, revisions,
+and outstanding checks. Passing automated tests does not establish general
+Signal compatibility.
+
+## Supported environment
+
+The supported baseline is:
+
+- Debian 13 with Pidgin and libpurple 2.14.x;
+- a desktop Secret Service provider accessible through libsecret;
+- an existing Signal account on a current official Android or iOS client; and
+- Rust 1.94 or newer to build the plugin (the repository pins Rust 1.95.0).
+
+Another Purple 2 UI may work if it supports the request fields, transfers, and
+image store used by the plugin, but only Pidgin is tested. Purple 3 and other
+operating-system baselines are not supported. See the full
+[compatibility policy](docs/compatibility.md).
+
+## Build and install
+
+### Dependencies
+
+On Debian 13:
+
+```sh
+sudo apt install pidgin git build-essential cmake ninja-build pkg-config \
+  libpurple-dev libglib2.0-dev libgdk-pixbuf-2.0-dev libsecret-1-dev \
+  libssl-dev clang libclang-dev protobuf-compiler
+```
+
+Install [rustup](https://rustup.rs/), then install the pinned toolchain when the
+system compiler is older:
+
+```sh
+rustup toolchain install 1.95.0 --component rustfmt,clippy
+```
+
+### Build and test
+
+```sh
+git clone https://github.com/adrighem/signal-purple.git
+cd signal-purple || exit
+
+cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX=/usr
+cmake --build build
+ctest --test-dir build --output-on-failure
+cargo test --locked --manifest-path rust/signal-core/Cargo.toml
+```
+
+A normal checkout downloads the exact Git dependencies recorded in
+[`Cargo.lock`](rust/signal-core/Cargo.lock) on its first build. Source archives
+generated by [`scripts/make-source-archive.sh`](scripts/make-source-archive.sh)
+vendor the locked dependency graph for offline Debian builds; see the
+[Debian packaging guide](docs/debian-packaging.md).
+
+### Install system-wide
+
+Fully quit Pidgin, including any process left in the notification area, then
+install both shared libraries from the same build:
+
+```sh
+sudo cmake --install build
+```
+
+Restart Pidgin and confirm that **Signal** appears under **Accounts → Manage
+Accounts → Add**. Never upgrade only `libsignal-purple.so` or only
+`libsignal_core.so`; their private ABI must match. A stale per-user plugin can
+also shadow a system installation, so use one installation scope at a time.
+See [upgrade, rollback, relink, and removal](docs/release-process.md#upgrade).
+
+### Try it in an isolated Pidgin profile
+
+For an isolated user-level test, install the plugin and backend into a separate
+Pidgin configuration directory:
+
+```sh
+SIGNAL_PURPLE_TEST_PROFILE="$HOME/.local/state/signal-purple-pidgin"
+
+cmake -S . -B build-user -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_INSTALL_PREFIX="$SIGNAL_PURPLE_TEST_PROFILE" \
+  -DSIGNAL_PURPLE_PLUGIN_DIR="$SIGNAL_PURPLE_TEST_PROFILE/plugins" \
+  -DSIGNAL_CORE_INSTALL_DIR="$SIGNAL_PURPLE_TEST_PROFILE/plugins/signal-purple"
+cmake --build build-user
+cmake --install build-user
+
+pidgin --config="$SIGNAL_PURPLE_TEST_PROFILE" --multiple --nologin
+```
+
+This keeps the test account, encrypted store, buddy list, and plugin copies
+away from the normal `~/.purple` profile. The database secret still uses the
+desktop's shared secret service; follow the
+[removal instructions](docs/release-process.md#relink-and-removal) when cleaning
+up a test link. A rootless installation into the normal profile can instead
+use `$HOME/.purple` as the install prefix,
+`$HOME/.purple/plugins` as the plugin directory, and
+`$HOME/.purple/plugins/signal-purple` as the backend directory, but that is
+not an isolated test.
+
+## Link an account
+
+1. In Pidgin, choose **Accounts → Manage Accounts → Add**.
+2. Select **Signal** and enter a unique local account label. Purple does not
+   store a Signal password.
+3. Enable the account. A new encrypted store starts the QR linking flow.
+4. On the primary phone, open **Signal Settings → Linked devices → Link new
+   device** and scan the QR code.
+5. Wait for pending Signal updates to finish. The plugin allows sends only
+   after the linked-device queue is ready.
+
+The encrypted SQLCipher database is stored under the Purple configuration
+directory, normally
+`~/.purple/signal-purple/<account-hash>.db3`. Its randomly generated
+passphrase is stored in the desktop secret service through libsecret. Losing
+either the database or its matching secret requires a new link. Treat the QR
+code and any provisioning URI as sensitive credentials.
+
+## How Signal maps into Pidgin
+
+### Contacts and conversations
+
+- Synchronized contacts appear in Pidgin's normal localized buddy group, such
+  as **Friends** or **Buddies**. Signal does not expose presence, so they are
+  shown as reachable while the account is connected.
+- Signal group chats appear in Pidgin's normal **Chats** group. Local aliases,
+  merged contacts, and custom placement are preserved during synchronization.
+- Snapshot-confirmed contacts in the legacy **Signal** group and plugin-managed
+  chats in **Signal groups** are moved to the normal groups; unrelated
+  user-created entries are left alone.
+- Direct and group messages are plain text. Incoming markup is escaped and
+  outgoing Purple markup is stripped. Reactions become a short text message,
+  and edits appear as new messages instead of changing earlier text. Outgoing
+  message text is limited to 64 KiB.
+- On reconnect, the plugin receives envelopes which Signal still has queued
+  for this linked device. It cannot fetch arbitrary history or import an
+  official client's local message database.
+
+### Group actions
+
+The plugin discovers current Signal groups; opening a saved Pidgin chat is a
+local UI action, not a Signal join. Group sends and management stay unavailable
+until an authoritative group refresh succeeds, and a failed refresh is retried
+within the session. To leave remotely, right-click an active managed chat,
+choose **Leave Signal group…**, and confirm. The chat is removed only after
+Signal confirms the leave.
+
+Pidgin's built-in **Remove Chat** and closing a conversation tab are local-only
+because Purple 2 provides no protocol callback for those actions. A locally
+removed chat can return after synchronization. Creating groups, inviting or
+removing members, changing roles, titles, avatars, links, or join requests is
+not implemented.
+
+### Attachments
+
+Valid, within-limit incoming and outgoing files use Purple's transfer UI. An
+incoming group JPEG or PNG renders inline only when its MIME type, signature,
+complete decode, and bounded dimensions agree; other valid attachments fall
+back to a transfer prompt. Empty, over-limit, or resource-exhausting content is
+rejected visibly. Each file is limited to 25 MiB and one incoming message to
+50 MiB; the [security model](docs/security-model.md) records the decoder and
+memory bounds.
+
+The plugin does not create a plaintext attachment cache. Inline images remain
+in memory while displayed; an accepted transfer is written as plaintext to the
+destination selected by the user. Outgoing file uploads are cancellable but,
+unlike text messages, are not retained for automatic retry after a failed
+upload or restart.
+
+## Important limitations
+
+- This is a secondary linked device only. Primary registration, account
+  recovery, phone-number discovery, and remote contact editing are absent.
+- Calls, stories, payments, backups, history import, disappearing-message
+  timers, remote deletion, and view-once enforcement are absent. View-once
+  media may therefore be exposed as a normal savable attachment.
+- There is no in-plugin numeric safety-number comparison. Verify contacts with
+  an official client or another trusted channel before accepting a changed
+  identity.
+- Signal-specific rich content is reduced or omitted; quotes, mentions,
+  stickers, reactions, edits, and similar features do not have full native
+  Purple representations.
+- Remote leave is the only implemented group-administration action. Other
+  group administration remains unavailable.
+
+## Security and local data
+
+Protocol state, identity/session keys, group secrets, the durable text outbox,
+and replay state are stored in SQLCipher. The database passphrase lives in the
+desktop secret service, and the plugin refuses to fall back to plaintext when
+that service is unavailable.
+
+Identity handling uses trust on first use. An identity replacement for an
+unverified contact produces a one-time warning and sending continues. A
+replacement for an explicitly verified contact blocks sending until the user
+accepts it after verification through another trusted channel.
+
+Pidgin is a legacy in-process client: the UI and other loaded plugins can access
+message memory. Signal conversation logging is disabled, but Purple still
+stores aliases, group titles, canonical contact identifiers, and opaque group
+identifiers in plaintext in `blist.xml`; a UI or another plugin may retain
+more. No independent security audit has occurred. Read the
+[security model](docs/security-model.md) before using a real account.
+
+## Troubleshooting and bug reports
+
+Use an isolated profile when collecting debug output so unrelated Purple
+accounts are not loaded:
+
+```sh
+pidgin --config="$HOME/.local/state/signal-purple-pidgin" \
+  --multiple --nologin --debug
+```
+
+Debug output can still contain private metadata. Never publish raw logs,
+message text, phone numbers, service identifiers, QR provisioning data, keys,
+or database secrets. Follow the [troubleshooting guide](docs/troubleshooting.md)
+and include the plugin revision, Debian version, Pidgin/libpurple versions,
+build command, and sanitized output in a report.
+
+Use [GitHub issues](https://github.com/adrighem/signal-purple/issues) for
+reproducible bugs and feature proposals, [SUPPORT.md](SUPPORT.md) for support
+guidance, and [SECURITY.md](SECURITY.md) for vulnerabilities.
 
 ## Architecture
 
@@ -49,160 +275,23 @@ libsignal_core.so         Rust actor thread, Tokio LocalSet, SQLCipher
 Presage → libsignal-service-rs → Signal libsignal
 ```
 
-The Purple side never calls Signal libraries directly. Each account owns one
-backend actor; a private nonblocking descriptor wakes the GLib main context to
-drain owned events without an idle polling timer. Details are in
-[architecture.md](docs/architecture.md).
+Purple calls stay on the GLib main thread. Each account owns one Rust backend
+actor, and a private nonblocking descriptor wakes the main context when events
+are ready. See [architecture.md](docs/architecture.md) for lifecycle, storage,
+message, contact, and group details.
 
-## Requirements
+## Project documentation
 
-The supported baseline is Debian 13 with libpurple 2.14.14. Building requires:
-
-```sh
-sudo apt install build-essential cmake ninja-build pkg-config \
-  libpurple-dev libglib2.0-dev libgdk-pixbuf-2.0-dev libsecret-1-dev libssl-dev \
-  clang libclang-dev protobuf-compiler
-```
-
-The pinned Presage SQLite stack currently requires Rust 1.94 or later. The
-repository pins Rust 1.95.0; install it with rustup when the distro compiler is
-older:
-
-```sh
-rustup toolchain install 1.95.0 --component rustfmt,clippy
-```
-
-## Build and test
-
-```sh
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX=/usr
-cmake --build build
-ctest --test-dir build --output-on-failure
-cargo test --locked --manifest-path rust/signal-core/Cargo.toml
-```
-
-The first build downloads exact Git revisions recorded in
-[`Cargo.lock`](rust/signal-core/Cargo.lock). Release source bundles will need to
-vendor these dependencies before Debian can build them without network access.
-
-Install system-wide with:
-
-```sh
-sudo cmake --install build
-```
-
-For a per-user test install, configure a separate build so CMake writes the
-correct relative runtime path:
-
-```sh
-cmake -S . -B build-user -G Ninja -DCMAKE_BUILD_TYPE=Release \
-  -DCMAKE_INSTALL_PREFIX="$HOME/.purple" \
-  -DSIGNAL_PURPLE_PLUGIN_DIR=plugins \
-  -DSIGNAL_CORE_INSTALL_DIR=plugins/signal-purple
-cmake --build build-user
-cmake --install build-user
-```
-
-The private backend subdirectory prevents Purple from probing
-`libsignal_core.so` as if it were another plugin.
-
-## Link an account
-
-1. In Pidgin, choose **Accounts → Manage Accounts → Add**.
-2. Select **Signal** and enter any local account label. No Signal password is
-   stored in Purple.
-3. Enable the account. For a new store, the plugin displays a QR code.
-4. On the primary phone, open **Signal Settings → Linked devices → Link new
-   device** and scan the QR code.
-5. Wait until pending Signal updates are synchronized. Only then does Purple
-   mark the account connected and allow sends.
-
-The encrypted database defaults to
-`~/.purple/signal-purple/<account-hash>.db3`. Its randomly generated passphrase
-is stored in the desktop secret service through libsecret. Losing either the
-database or secret requires linking a new device.
-
-## Important limitations
-
-- Unknown contact identities use trust-on-first-use. A changed identity for an
-  unverified contact continues after a one-time warning. A changed identity for
-  an explicitly verified contact blocks sending until the buddy-menu acceptance
-  action is used. Acceptance requires out-of-band verification, resets affected
-  sessions, and marks the contact unverified without relinking the account.
-- Incoming JPEG and PNG images in group conversations are rendered inline when
-  their declared MIME type, file signature, decoder validation, and bounded
-  dimensions agree. They stay in Purple's in-memory image store while
-  displayed. Direct images, unsupported group image formats, images larger than
-  8192 pixels on either edge or 16 megapixels total, and other attachments use
-  Purple's native file-transfer UI. Files are limited to 25 MiB each and
-  incoming messages to 50 MiB total. Decrypted incoming data stays in memory
-  while displayed or while Purple asks for a save location; no plaintext
-  attachment cache is created. At most 64 MiB may wait in the backend event
-  queue and another 64 MiB in unresolved receive prompts. Excess data is
-  rejected visibly. Outgoing attachment uploads can be cancelled, but unlike
-  text messages they are not retained in the restart-persistent outbox.
-- Signal Storage Service groups are projected into Purple's localized default
-  chat-list group (normally `Chats`). A complete refresh validates every group
-  record returned for the current Storage Service manifest, then checks both
-  discovered and previously cached groups against current GroupsV2 state before
-  publishing an authoritative active-group snapshot. Only groups which Signal
-  confirms are inaccessible or no longer contain this account are pruned from
-  the encrypted cache and managed Purple chat list. An incomplete refresh does
-  not trigger destructive pruning. Group joins and sends are limited to that
-  refreshed active set; a failed refresh is retried in-session while group
-  operations remain unavailable.
-  Purple uses the stable opaque group identifier as the conversation identity,
-  while the Signal title remains presentation data; a user-set local chat alias
-  is preserved across title refreshes. Existing managed chats in the legacy
-  `Signal groups` group move to the default group on sync, while custom
-  placement and user-created chats are preserved.
-- To leave an active group remotely, right-click its managed chat and choose
-  **Leave Signal group…**, then confirm. The plugin removes the managed local
-  chat only after Signal confirms the leave. Purple 2 does not provide protocol
-  plugins with a callback for its built-in **Remove Chat** operation, so that
-  action remains local-only and the chat can return after synchronization.
-  Closing a conversation tab is also local-only and never leaves the group.
-- Synchronized contacts are projected into Purple's localized default buddy
-  group (for example, `Friends` or `Buddies`). Each connection requests a fresh
-  contact sync from the primary phone. Existing contacts in the exact legacy
-  `Signal` group are adopted only when the current Signal snapshot confirms
-  their account and identifier, then move to the default group. Contact aliases,
-  locally merged buddies, and custom placement are preserved.
-  Complete snapshots create missing buddies, update server aliases, and remove
-  previously synchronized contacts that are no longer present. Local aliases
-  remain local. A synchronized phone number is the display fallback when no
-  contact name is available. Signal does not expose presence, so synchronized
-  contacts are shown as reachable while the account is connected. This does
-  not provide phone-number discovery or mutate Signal's remote contact data.
-- Message formatting is reduced to plain text. Incoming text is escaped before
-  entering Purple; outgoing Purple markup is stripped.
-- Reconnecting drains messages queued by Signal for this linked device until
-  Presage reports `QueueEmpty`. The plugin cannot request arbitrary older
-  conversation history from the phone or service, and it does not import an
-  official client's local message database.
-- Disappearing-message timers and remote deletions are not projected into
-  Purple. The plugin disables logging for every Signal conversation, but Purple
-  still stores contact aliases, group titles, and stable opaque identifiers in
-  plaintext in `blist.xml`; raw Signal group master keys remain confined to the
-  encrypted backend store. Another UI or plugin could retain additional
-  plaintext.
-- QR provisioning URIs are sensitive. The backend compiles out upstream
-  info-level tracing so Presage's provisioning message cannot log the URI.
-
-## Documentation
-
-- [Development guide](docs/development.md)
-- [Architecture](docs/architecture.md)
-- [Security model](docs/security-model.md)
-- [Compatibility policy](docs/compatibility.md)
-- [Live validation](docs/live-validation.md)
-- [Troubleshooting](docs/troubleshooting.md)
-- [Roadmap](ROADMAP.md)
-- [Licensing](docs/licensing.md)
-
-Please use [GitHub issues](https://github.com/adrighem/signal-purple/issues) for
-ordinary bugs and follow [SECURITY.md](SECURITY.md) for vulnerabilities.
+- [Changelog](CHANGELOG.md) and [roadmap](ROADMAP.md)
+- [Compatibility policy](docs/compatibility.md) and
+  [live-validation record](docs/live-validation.md)
+- [Architecture](docs/architecture.md) and
+  [security model](docs/security-model.md)
+- [Development guide](docs/development.md),
+  [dependency policy](docs/dependency-policy.md), and
+  [Debian packaging](docs/debian-packaging.md)
+- [Contributing](CONTRIBUTING.md), [support](SUPPORT.md), and
+  [licensing details](docs/licensing.md)
 
 ## Acknowledgements
 
