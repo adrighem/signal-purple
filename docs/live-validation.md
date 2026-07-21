@@ -4,6 +4,28 @@ Live Signal compatibility is recorded per repository revision and test date.
 A partial pass does not establish complete compatibility with the production
 service.
 
+## 2026-07-21 reconnect group-routing regression
+
+The headless Purple probe now reproduces Pidgin's reconnect-time title reset:
+an existing managed group conversation receives a membership update while the
+account is still connecting, and Pidgin's title autoset falls back to the
+opaque canonical group identifier. The adapter restores the saved local title
+after the membership refresh. The regression asserts that the conversation
+remains a chat, retains its stable internal identifier, uses the friendly
+display title, and does not create a direct-message conversation.
+
+Rust routing tests also distinguish locally authored durable rows from incoming
+messages, and successful plugin sends mark their stored text or attachment row
+as projected without retrying the network if that bookkeeping fails. The
+Release build, all 40 Rust tests, all four C/Purple tests, and the C adapter
+under AddressSanitizer and UndefinedBehaviorSanitizer passed. LeakSanitizer was
+disabled for the full Purple probe because process-global libpurple and media
+registries retain allocations at shutdown.
+
+The normal encrypted store had no pending message for the reported group when
+inspected, so a controlled production replay still requires a new group message
+to arrive while the account is offline.
+
 ## 2026-07-20 legacy-contact migration and idle validation
 
 The installed ABI-v6 plugin was restarted against the normal desktop profile.

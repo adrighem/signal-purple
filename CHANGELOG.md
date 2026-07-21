@@ -27,6 +27,11 @@ semantic versioning after the first stable release.
 
 ### Fixed
 
+- Keep replayed group messages in the saved Pidgin chat during reconnect by
+  restoring its local display title after membership refreshes.
+- Treat locally sent messages as outgoing during crash recovery and mark their
+  stored copies as projected after successful sends, avoiding misrouted or
+  duplicated conversations on reconnect.
 - Render decoder-validated, dimension-bounded incoming JPEG and PNG images
   inside their originating group conversation instead of presenting the MIME
   type and a direct file transfer from the sender.

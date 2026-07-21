@@ -819,21 +819,26 @@ signal_refresh_group_members(SignalConnection *connection,
 
     purple_conv_chat_clear_users(PURPLE_CONV_CHAT(conversation));
     members = signal_group_members(connection, group_key, FALSE);
-    if (members == NULL)
-        return;
-
-    for (guint index = 0; index < members->len; index++) {
-        SignalGroupMember *member = g_ptr_array_index(members, index);
-        users = g_list_prepend(users, member->peer_id);
-        flags = g_list_prepend(flags, GINT_TO_POINTER(member->flags));
+    if (members != NULL) {
+        for (guint index = 0; index < members->len; index++) {
+            SignalGroupMember *member = g_ptr_array_index(members, index);
+            users = g_list_prepend(users, member->peer_id);
+            flags = g_list_prepend(flags, GINT_TO_POINTER(member->flags));
+        }
+        users = g_list_reverse(users);
+        flags = g_list_reverse(flags);
+        if (users != NULL)
+            purple_conv_chat_add_users(PURPLE_CONV_CHAT(conversation), users,
+                                       NULL, flags, FALSE);
+        g_list_free(users);
+        g_list_free(flags);
     }
-    users = g_list_reverse(users);
-    flags = g_list_reverse(flags);
-    if (users != NULL)
-        purple_conv_chat_add_users(PURPLE_CONV_CHAT(conversation), users,
-                                   NULL, flags, FALSE);
-    g_list_free(users);
-    g_list_free(flags);
+
+    /* Pidgin autosets chat titles after membership changes. During reconnect,
+     * Purple cannot resolve saved chats yet and falls back to the stable group
+     * identifier, so restore the local display title after the refresh. */
+    purple_conversation_set_title(
+        conversation, signal_group_display_title(connection, group_key));
 }
 
 static void

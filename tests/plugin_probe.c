@@ -78,6 +78,21 @@ static PurpleCoreUiOps core_ops = {
     .get_ui_info = get_ui_info,
 };
 
+static guint member_update_title_autosets;
+
+static void
+autoset_title_after_chat_remove(PurpleConversation *conversation,
+                                GList *users)
+{
+    (void)users;
+    member_update_title_autosets++;
+    purple_conversation_autoset_title(conversation);
+}
+
+static PurpleConversationUiOps reconnect_conversation_ops = {
+    .chat_remove_users = autoset_title_after_chat_remove,
+};
+
 static void
 remove_tree(const char *path)
 {
@@ -537,6 +552,30 @@ test_group_conversation_identity(PurplePlugin *plugin,
                     "Shared Signal title");
     g_assert_cmpstr(purple_conversation_get_title(legacy_conversation), ==,
                     "Legacy local title");
+
+    /* Pidgin autosets the title after member updates. While the account is
+     * reconnecting, Purple cannot look up the saved chat and uses its opaque
+     * canonical name. A member refresh must restore the local group title. */
+    purple_blist_alias_chat(first, "Reconnect display title");
+    purple_conv_chat_add_user(PURPLE_CONV_CHAT(first_conversation),
+                              "existing-member", NULL,
+                              PURPLE_CBFLAGS_NONE, FALSE);
+    purple_conversation_set_ui_ops(first_conversation,
+                                   &reconnect_conversation_ops);
+    member_update_title_autosets = 0;
+    gc.state = PURPLE_CONNECTING;
+    protocol->join_chat(&gc, purple_chat_get_components(first));
+    g_assert_cmpuint(member_update_title_autosets, ==, 1);
+    g_assert_cmpint(purple_conversation_get_type(first_conversation), ==,
+                    PURPLE_CONV_TYPE_CHAT);
+    g_assert_cmpstr(purple_conversation_get_name(first_conversation), ==,
+                    "stable-conversation-one");
+    g_assert_cmpstr(purple_conversation_get_title(first_conversation), ==,
+                    "Reconnect display title");
+    g_assert_null(purple_find_conversation_with_account(
+        PURPLE_CONV_TYPE_IM, "stable-conversation-one", account));
+    purple_conversation_set_ui_ops(first_conversation, NULL);
+    gc.state = PURPLE_CONNECTED;
 
     GList *menu = protocol->blist_node_menu(PURPLE_BLIST_NODE(first));
     g_assert_cmpuint(g_list_length(menu), ==, 1);

@@ -19,7 +19,7 @@ use presage::model::messages::Received;
 use presage::proto::{
     EditMessage, ReceiptMessage, SyncMessage, TypingMessage, receipt_message, typing_message,
 };
-use presage::store::{ContentsStore, StateStore};
+use presage::store::{ContentsStore, StateStore, Thread};
 use presage::{Manager, manager::Registered};
 use presage_store_sqlite::SqliteStore;
 use presage_store_sqlite::{ClientOutboxKind, ClientOutboxMessage};
@@ -154,6 +154,17 @@ enum GroupMessageTarget {
     Malformed,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+struct BareDataMessageRoute {
+    peer: String,
+    outgoing: bool,
+}
+
+struct SentMessage {
+    thread: Thread,
+    timestamp: u64,
+}
+
 enum ProjectionGroup {
     Active(Group),
     Complete,
@@ -171,6 +182,26 @@ fn group_message_target(message: &DataMessage) -> GroupMessageTarget {
     {
         Some(key) => GroupMessageTarget::Group(key),
         None => GroupMessageTarget::Malformed,
+    }
+}
+
+fn bare_data_message_route(
+    sender: ServiceId,
+    destination: ServiceId,
+    local_aci: Aci,
+) -> BareDataMessageRoute {
+    let outgoing = sender == ServiceId::Aci(local_aci);
+    BareDataMessageRoute {
+        peer: if outgoing { destination } else { sender }.service_id_string(),
+        outgoing,
+    }
+}
+
+fn group_message_peer(outgoing: bool, peer: &str, local_aci: Aci) -> String {
+    if outgoing {
+        ServiceId::Aci(local_aci).service_id_string()
+    } else {
+        peer.to_owned()
     }
 }
 
@@ -800,11 +831,14 @@ async fn receive_and_command_loop(
                 if let Some(Ok((request_id, result))) = completed {
                     attachment_aborts.remove(&request_id);
                     match result {
-                        Ok(()) => sink.emit(Event {
-                            kind: EVENT_ATTACHMENT_SENT,
-                            request_id,
-                            ..Event::default()
-                        }),
+                        Ok(sent) => {
+                            mark_sent_message_projected_or_report(&manager, &sent, &sink).await;
+                            sink.emit(Event {
+                                kind: EVENT_ATTACHMENT_SENT,
+                                request_id,
+                                ..Event::default()
+                            });
+                        }
                         Err(error) => sink.emit(Event::request_error(request_id, error)),
                     }
                 }
@@ -978,7 +1012,7 @@ async fn attempt_outbox_message(
     manager: &mut Manager<SqliteStore, Registered>,
     message: &ClientOutboxMessage,
     departed_groups: &DepartedGroups,
-) -> Result<(), OutboxAttemptError> {
+) -> Result<SentMessage, OutboxAttemptError> {
     match message.kind {
         ClientOutboxKind::Direct => {
             let recipient = parse_recipient(&message.recipient).ok_or_else(|| {
@@ -997,7 +1031,11 @@ async fn attempt_outbox_message(
                     message.timestamp,
                 )
                 .await
-                .map_err(|error| OutboxAttemptError::retryable(error.to_string()))
+                .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
+            Ok(SentMessage {
+                thread: Thread::Contact(recipient),
+                timestamp: message.timestamp,
+            })
         }
         ClientOutboxKind::Group => {
             let (key, group) = resolve_active_group(manager, &message.recipient, departed_groups)
@@ -1024,18 +1062,47 @@ async fn attempt_outbox_message(
                     message.timestamp,
                 )
                 .await
-                .map_err(|error| OutboxAttemptError::retryable(error.to_string()))
+                .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
+            Ok(SentMessage {
+                thread: Thread::Group(key),
+                timestamp: message.timestamp,
+            })
         }
+    }
+}
+
+async fn mark_sent_message_projected(
+    store: &SqliteStore,
+    sent: &SentMessage,
+) -> Result<(), String> {
+    let content = store
+        .message(&sent.thread, sent.timestamp)
+        .await
+        .map_err(|error| format!("Could not read the sent Signal message: {error}"))?
+        .ok_or_else(|| "The sent Signal message was not found in the encrypted store".to_owned())?;
+    store
+        .mark_message_projected(MESSAGE_PROJECTION_CLIENT, &content)
+        .await
+        .map_err(|error| format!("Could not record the sent Signal message: {error}"))
+}
+
+async fn mark_sent_message_projected_or_report(
+    manager: &Manager<SqliteStore, Registered>,
+    sent: &SentMessage,
+    sink: &EventSink,
+) {
+    if let Err(error) = mark_sent_message_projected(manager.store(), sent).await {
+        sink.emit(Event::error(error, false));
     }
 }
 
 async fn finish_outbox_attempt(
     manager: &mut Manager<SqliteStore, Registered>,
     message: &ClientOutboxMessage,
-    result: &Result<(), OutboxAttemptError>,
+    result: &Result<SentMessage, OutboxAttemptError>,
 ) -> Result<(), String> {
     match result {
-        Ok(()) => manager
+        Ok(_) => manager
             .store()
             .complete_client_message(message.id)
             .await
@@ -1085,6 +1152,9 @@ async fn retry_outbox(
             continue;
         }
         let result = attempt_outbox_message(manager, &message, departed_groups).await;
+        if let Ok(sent) = &result {
+            mark_sent_message_projected_or_report(manager, sent, sink).await;
+        }
         if let Err(error) = finish_outbox_attempt(manager, &message, &result).await {
             sink.emit(Event::error(error, false));
         } else if let Err(error) = result {
@@ -1118,6 +1188,7 @@ async fn enqueue_and_send(
     recipient: String,
     body: String,
     departed_groups: &DepartedGroups,
+    sink: &EventSink,
 ) -> Result<(), String> {
     let timestamp = now_ms();
     let id = manager
@@ -1134,8 +1205,11 @@ async fn enqueue_and_send(
         attempts: 0,
     };
     let result = attempt_outbox_message(manager, &message, departed_groups).await;
+    if let Ok(sent) = &result {
+        mark_sent_message_projected_or_report(manager, sent, sink).await;
+    }
     finish_outbox_attempt(manager, &message, &result).await?;
-    result.map_err(|error| error.to_string())
+    result.map(|_| ()).map_err(|error| error.to_string())
 }
 
 async fn upload_and_send_attachment(
@@ -1146,7 +1220,7 @@ async fn upload_and_send_attachment(
     data: Vec<u8>,
     group: bool,
     departed_groups: &DepartedGroups,
-) -> Result<(), String> {
+) -> Result<SentMessage, String> {
     if data.is_empty() || data.len() > MAX_ATTACHMENT_BYTES {
         return Err("Attachment size is outside the supported range".into());
     }
@@ -1205,7 +1279,11 @@ async fn upload_and_send_attachment(
                 timestamp,
             )
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok(SentMessage {
+            thread: Thread::Group(key),
+            timestamp,
+        })
     } else {
         let recipient = parse_recipient(recipient)
             .ok_or_else(|| "Recipient is not a canonical Signal service identifier".to_owned())?;
@@ -1220,7 +1298,11 @@ async fn upload_and_send_attachment(
                 timestamp,
             )
             .await
-            .map_err(|error| error.to_string())
+            .map_err(|error| error.to_string())?;
+        Ok(SentMessage {
+            thread: Thread::Contact(recipient),
+            timestamp,
+        })
     }
 }
 
@@ -1499,6 +1581,7 @@ async fn handle_command(
                     recipient,
                     message,
                     departed_groups,
+                    sink,
                 )
                 .await
             } else {
@@ -1525,6 +1608,7 @@ async fn handle_command(
                             group_key,
                             message,
                             departed_groups,
+                            sink,
                         )
                         .await
                     }
@@ -1586,16 +1670,21 @@ async fn handle_content(
 ) -> ProjectionDisposition {
     let timestamp = content_timestamp(&content);
     let sender = content.metadata.sender.service_id_string();
+    let local_aci = manager.registration_data().service_ids.aci();
 
     match &content.body {
         ContentBody::DataMessage(message) => {
-            let disposition = emit_data_message(
-                manager,
-                DataMessageProjection::incoming(message, &sender, timestamp, delivery_id),
-                sink,
-                departed_groups,
-            )
-            .await;
+            let route = bare_data_message_route(
+                content.metadata.sender,
+                content.metadata.destination,
+                local_aci,
+            );
+            let projection = if route.outgoing {
+                DataMessageProjection::outgoing(message, &route.peer, timestamp, delivery_id)
+            } else {
+                DataMessageProjection::incoming(message, &route.peer, timestamp, delivery_id)
+            };
+            let disposition = emit_data_message(manager, projection, sink, departed_groups).await;
             if content.metadata.needs_receipt {
                 let mut receipt_manager = manager.clone();
                 let receipt_sink = sink.clone();
@@ -1616,13 +1705,17 @@ async fn handle_content(
             data_message: Some(message),
             ..
         }) => {
-            return emit_data_message(
-                manager,
-                DataMessageProjection::incoming(message, &sender, timestamp, delivery_id),
-                sink,
-                departed_groups,
-            )
-            .await;
+            let route = bare_data_message_route(
+                content.metadata.sender,
+                content.metadata.destination,
+                local_aci,
+            );
+            let projection = if route.outgoing {
+                DataMessageProjection::outgoing(message, &route.peer, timestamp, delivery_id)
+            } else {
+                DataMessageProjection::incoming(message, &route.peer, timestamp, delivery_id)
+            };
+            return emit_data_message(manager, projection, sink, departed_groups).await;
         }
         ContentBody::SynchronizeMessage(SyncMessage {
             sent: Some(sent), ..
@@ -1876,15 +1969,11 @@ async fn emit_data_message(
     };
 
     if let (Some(group_key), Some(text)) = (group_key, text.as_ref()) {
-        let group_peer = if outgoing {
-            manager
-                .registration_data()
-                .service_ids
-                .aci()
-                .service_id_string()
-        } else {
-            peer.to_owned()
-        };
+        let group_peer = group_message_peer(
+            outgoing,
+            peer,
+            manager.registration_data().service_ids.aci(),
+        );
         sink.emit(Event {
             kind: EVENT_GROUP_MESSAGE,
             request_id: message_delivery_id,
@@ -2406,6 +2495,53 @@ mod tests {
             }),
             GroupMessageTarget::Malformed
         );
+    }
+
+    #[test]
+    fn classifies_bare_messages_by_their_signal_author() {
+        let Some(ServiceId::Aci(local)) =
+            ServiceId::parse_from_service_id_string("11111111-1111-4111-8111-111111111111")
+        else {
+            panic!("local test ACI must parse");
+        };
+        let Some(ServiceId::Aci(remote)) =
+            ServiceId::parse_from_service_id_string("22222222-2222-4222-8222-222222222222")
+        else {
+            panic!("remote test ACI must parse");
+        };
+        let local_id = ServiceId::Aci(local);
+        let remote_id = ServiceId::Aci(remote);
+
+        assert_eq!(
+            bare_data_message_route(local_id, remote_id, local),
+            BareDataMessageRoute {
+                peer: remote_id.service_id_string(),
+                outgoing: true,
+            }
+        );
+        assert_eq!(
+            bare_data_message_route(remote_id, local_id, local),
+            BareDataMessageRoute {
+                peer: remote_id.service_id_string(),
+                outgoing: false,
+            }
+        );
+    }
+
+    #[test]
+    fn keeps_the_local_author_as_the_outgoing_group_peer() {
+        let Some(ServiceId::Aci(local)) =
+            ServiceId::parse_from_service_id_string("11111111-1111-4111-8111-111111111111")
+        else {
+            panic!("local test ACI must parse");
+        };
+        let remote = "aci:22222222-2222-4222-8222-222222222222";
+
+        assert_eq!(
+            group_message_peer(true, remote, local),
+            ServiceId::Aci(local).service_id_string()
+        );
+        assert_eq!(group_message_peer(false, remote, local), remote);
     }
 
     #[test]
