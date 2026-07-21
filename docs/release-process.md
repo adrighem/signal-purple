@@ -59,22 +59,34 @@ database secrets, or unredacted private paths.
 2. Keep a copy of the database path shown in the account's advanced settings.
    The matching secret-service entry is labelled `signal-purple database for
    <account>` and is required to open that copy.
-3. Install the complete new package or both libraries from one source build.
-   Never mix a plugin from one revision with a backend library from another.
+3. Install the complete new package or follow the source-install replacement
+   procedure below. Never mix a plugin from one revision with a backend library
+   from another.
 4. Start Pidgin, enable the account, and confirm it reconnects without a QR,
    then confirm contacts, groups, and a direct send/receive round trip.
 
 Store migrations are automatic and additive. Keep the pre-upgrade database and
 secret until the new version has completed its validation period.
 
+For a CMake source install, replace revisions instead of installing one over
+the other. Inspect the `install_manifest.txt` saved from the currently
+installed build, verify that every entry belongs to the active installation
+prefix, and remove exactly those files. Then run `cmake --install` from the
+complete target build. CMake can otherwise report a target artifact as
+`Up-to-date` when the installed file has the same or a newer timestamp,
+potentially leaving the plugin and backend on different revisions. Do not
+remove a plugin directory recursively.
+
 ## Rollback
 
-Close Pidgin and reinstall the previous complete package or both libraries from
-the previous source build. Restore the matching pre-upgrade database only if the
-older version cannot open the upgraded copy. Do not replace one of the two
-shared libraries independently. If a rollback cannot reconnect, return to the
-new build and its database rather than deleting state. Relinking is the last
-recovery option because it creates a new Signal linked device.
+Close Pidgin and reinstall the previous complete package. For a CMake source
+rollback, first remove exactly the files in the currently installed build's
+saved manifest as described above, then install the complete previous build.
+Do not run an older `cmake --install` over newer files or replace one shared
+library independently. Restore the matching pre-upgrade database only if the
+older version cannot open the upgraded copy. If a rollback cannot reconnect,
+return to the new build and its database rather than deleting state. Relinking
+is the last recovery option because it creates a new Signal linked device.
 
 The release owner decides to roll back when an upgrade cannot load, reconnect,
 or preserve the buddy/group projection, or when a security or message-delivery
@@ -92,10 +104,11 @@ only after the replacement works.
 
 Fully quit Pidgin before removing either library. A Debian package can be
 removed with the package manager. A CMake source install has no automated
-uninstall target: keep and inspect that build directory's
-`install_manifest.txt`, then remove exactly the files it lists. Do not remove a
-plugin directory recursively, and do not use a manifest from another prefix or
-revision. Remove both `libsignal-purple.so` and its private
+uninstall target: preserve the manifest when installing each revision and use
+the manifest from the currently installed build. Verify its prefix, then remove
+exactly the files it lists. Do not remove a plugin directory recursively, and
+do not use a manifest from another prefix or revision. Remove both
+`libsignal-purple.so` and its private
 `signal-purple/libsignal_core.so` from the same installation scope.
 
 Removing installed files leaves per-user account data intact.
