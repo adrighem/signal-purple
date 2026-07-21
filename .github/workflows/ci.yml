@@ -67,3 +67,84 @@ jobs:
             build/install_manifest.txt)"
           test -n "$plugin_path"
           G_DEBUG=fatal-warnings ./build/plugin-probe "$plugin_path"
+
+  debian-13-build-and-install:
+    runs-on: ubuntu-latest
+    container:
+      image: debian:13-slim@sha256:9bb8a3626890e084ab54e888fdd7c4b6d2f119071cd4c5dc5fecb4d73062aa5f
+    timeout-minutes: 60
+    env:
+      CARGO_NET_GIT_FETCH_WITH_CLI: "true"
+      CFLAGS: "-Werror"
+      DEBIAN_FRONTEND: noninteractive
+      RUST_ARCHIVE: rust-1.95.0-x86_64-unknown-linux-gnu.tar.gz
+      RUST_ARCHIVE_SHA256: a47ac940abd12399d59ad15c877e7113fa35f2b9ec7e6a8a045d4fd8b9741dea
+    steps:
+      - name: Install container dependencies
+        run: |
+          apt-get update
+          apt-get install --yes --no-install-recommends \
+            build-essential ca-certificates clang cmake curl git gzip \
+            libclang-dev libgdk-pixbuf-2.0-dev libglib2.0-dev libpurple-dev \
+            libsecret-1-dev libssl-dev ninja-build pkgconf protobuf-compiler tar
+
+      - name: Check out source
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+
+      - name: Install checksum-pinned Rust toolchain
+        shell: bash
+        run: |
+          archive="$RUNNER_TEMP/$RUST_ARCHIVE"
+          source_dir="$RUNNER_TEMP/${RUST_ARCHIVE%.tar.gz}"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --output "$archive" \
+            "https://static.rust-lang.org/dist/$RUST_ARCHIVE"
+          printf '%s  %s\n' "$RUST_ARCHIVE_SHA256" "$archive" \
+            | sha256sum --check
+          tar -xzf "$archive" -C "$RUNNER_TEMP"
+          "$source_dir/install.sh" --prefix=/usr/local --without=rust-docs
+          rustc --version --verbose
+          cargo --version --verbose
+
+      - name: Record Debian baseline
+        run: |
+          cat /etc/os-release
+          uname -m
+
+      - name: Configure release build
+        run: >-
+          cmake -S . -B build-debian-13 -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_INSTALL_PREFIX=/usr
+
+      - name: Build
+        run: cmake --build build-debian-13 --parallel 2
+
+      - name: Test C adapter and plugin
+        run: ctest --test-dir build-debian-13 --output-on-failure
+
+      - name: Stage and probe installed plugin
+        shell: bash
+        run: |
+          stage="$RUNNER_TEMP/signal-purple-stage"
+          DESTDIR="$stage" cmake --install build-debian-13
+          plugin_path="$(awk '/libsignal-purple\.so$/ { print; exit }' \
+            build-debian-13/install_manifest.txt)"
+          expected_plugin="$(pkg-config --variable=plugindir purple)/libsignal-purple.so"
+          test -n "$plugin_path"
+          test "$plugin_path" = "$expected_plugin"
+
+          installed_plugin="$stage$plugin_path"
+          installed_plugin_dir="$(dirname "$installed_plugin")"
+          installed_backend="$installed_plugin_dir/signal-purple/libsignal_core.so"
+          test -r "$installed_plugin"
+          test -r "$installed_backend"
+
+          ldd "$installed_plugin"
+          resolved_backend="$(ldd "$installed_plugin" \
+            | awk '$1 == "libsignal_core.so" { print $3; exit }')"
+          test "$resolved_backend" = "$installed_backend"
+          G_DEBUG=fatal-warnings \
+            ./build-debian-13/plugin-probe "$installed_plugin"
