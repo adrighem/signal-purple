@@ -105,11 +105,8 @@ sudo cmake --install build
 Restart Pidgin and confirm that **Signal** appears under **Accounts → Manage
 Accounts → Add**. Never upgrade only `libsignal-purple.so` or only
 `libsignal_core.so`; their private ABI must match. A stale per-user plugin can
-also shadow a system installation, so use one installation scope at a time. A
-CMake source install has no automated uninstall target; keep
-`build/install_manifest.txt` and follow the documented
-[upgrade and rollback](docs/release-process.md#upgrade) or
-[relink and removal](docs/release-process.md#relink-and-removal) procedure.
+also shadow a system installation, so use one installation scope at a time.
+See [upgrade, rollback, relink, and removal](docs/release-process.md#upgrade).
 
 ### Try it in an isolated Pidgin profile
 

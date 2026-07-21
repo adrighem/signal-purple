@@ -12,36 +12,15 @@ body:
   - type: input
     id: revision
     attributes:
-      label: signal-purple version or revision
-      description: Use the full source commit SHA or the installed package version.
-      placeholder: Full Git commit SHA or package version
+      label: signal-purple revision
+      placeholder: Git commit SHA
     validations:
       required: true
   - type: input
     id: environment
     attributes:
       label: Environment
-      description: Distro, architecture, Pidgin/libpurple version, and Rust version when built from source
-    validations:
-      required: true
-  - type: dropdown
-    id: installation
-    attributes:
-      label: Installation scope
-      options:
-        - System-wide source install
-        - Per-user source install
-        - Isolated Pidgin profile
-        - Debian package
-        - Other
-    validations:
-      required: true
-  - type: textarea
-    id: build_install
-    attributes:
-      label: Build and installation details
-      description: Include the build command or package identity and the loaded plugin/backend paths. Private path components may be redacted.
-      render: text
+      description: Distro, Pidgin/libpurple version, and Rust version
     validations:
       required: true
   - type: dropdown
@@ -53,14 +32,9 @@ body:
         - Plugin loading
         - Linking or reconnecting
         - Direct messages
-        - Contacts or buddy-list synchronization
-        - Group messages or synchronization
-        - Group management or leave
-        - Attachments or inline images
+        - Group messages
         - Typing or receipts
-        - Identity or safety-number handling
         - Storage or keyring
-        - Performance or CPU use
         - Other
     validations:
       required: true
@@ -71,33 +45,13 @@ body:
     validations:
       required: true
   - type: textarea
-    id: reproduction
-    attributes:
-      label: Reproduction steps
-    validations:
-      required: true
-  - type: textarea
     id: actual
     attributes:
-      label: Actual behavior
+      label: Actual behavior and reproduction
     validations:
       required: true
-  - type: checkboxes
-    id: restart
-    attributes:
-      label: Restart check
-      options:
-        - label: I fully restarted Pidgin after the latest install or upgrade, or this failure occurs before Pidgin can start.
-          required: true
   - type: textarea
     id: logs
     attributes:
       label: Sanitized logs
       render: text
-  - type: checkboxes
-    id: privacy
-    attributes:
-      label: Privacy check
-      options:
-        - label: I removed message contents, phone numbers, service identifiers, provisioning data, keys, database secrets, and private path components from this report.
-          required: true

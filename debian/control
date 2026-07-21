@@ -5,9 +5,7 @@ Maintainer: Vincent van Adrighem <vincent-git@vanadrighem.eu>
 Build-Depends:
  debhelper-compat (= 13),
  cargo (>= 1.94),
- clang,
  cmake (>= 3.25),
- libclang-dev,
  libgdk-pixbuf-2.0-dev (>= 2.42),
  libglib2.0-dev (>= 2.70),
  libpurple-dev (>= 2.14),
