@@ -2,14 +2,33 @@
 
 ## Signal does not appear in Pidgin
 
-Confirm both shared libraries are in the same Purple plugin directory:
+For a system install, confirm the Purple plugin and its private backend are in
+the expected relative locations:
 
 ```sh
-pkg-config --variable=plugindir purple
-ldd /path/to/libsignal-purple.so
+plugin_dir="$(pkg-config --variable=plugindir purple)"
+plugin="$plugin_dir/libsignal-purple.so"
+backend="$plugin_dir/signal-purple/libsignal_core.so"
+
+test -r "$plugin"
+test -r "$backend"
+ldd "$plugin" | grep -E 'libsignal_core|not found'
 ```
 
-Run Pidgin with `--debug` and look for loader errors. Build against the same
+`ldd` must resolve `libsignal_core.so` from the plugin's private
+`signal-purple` subdirectory and must not report it as missing. A per-user copy
+can shadow the system plugin, so check both scopes when the result is unexpected:
+
+```sh
+profile="${PURPLEHOME:-$HOME/.purple}"
+find "$profile/plugins" "$plugin_dir" -type f \
+  \( -name 'libsignal-purple.so' -o -name 'libsignal_core.so' \) -print \
+  2>/dev/null
+```
+
+Use only one installation scope at a time and install both libraries from the
+same build. Fully quit every Pidgin process after replacing either library, then
+run Pidgin with `--debug` and look for loader errors. Build against the same
 libpurple family used at runtime.
 
 ## The database key cannot be loaded
