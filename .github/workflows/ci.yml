@@ -30,9 +30,9 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends \
-            build-essential clang cmake libclang-dev libglib2.0-dev \
+            build-essential clang cmake git libclang-dev libglib2.0-dev \
             libgdk-pixbuf-2.0-dev libpurple-dev libsecret-1-dev libssl-dev ninja-build \
-            pkg-config protobuf-compiler
+            pkg-config protobuf-compiler python3 xz-utils
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
@@ -48,6 +48,9 @@ jobs:
 
       - name: Test Rust core
         run: cargo test --locked --manifest-path rust/signal-core/Cargo.toml --lib
+
+      - name: Test deterministic source archives
+        run: sh tests/test_make_source_archive.sh
 
       - name: Configure
         run: >-
