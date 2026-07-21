@@ -4,7 +4,7 @@ All notable changes will be documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 semantic versioning after the first stable release.
 
-## [0.2.0](https://github.com/adrighem/signal-purple/compare/v0.1.0...v0.2.0) (2026-07-21)
+## 0.2.0 (2026-07-21)
 
 
 ### Features
@@ -26,11 +26,6 @@ semantic versioning after the first stable release.
 * preserve group routing across reconnects ([822414a](https://github.com/adrighem/signal-purple/commit/822414aa8a3b91ad0d07cc336e318d6f7e8b3a20))
 * render group images inline ([c0c9d91](https://github.com/adrighem/signal-purple/commit/c0c9d91bcc5c96978d59e863f1f5c51a44df9a10))
 * render incoming text as chat messages ([79e554c](https://github.com/adrighem/signal-purple/commit/79e554c8249cffac56e7c0dbd51aa03569a8b8d9))
-
-
-### Reverts
-
-* restore main after misdirected hardening push ([1bd2c90](https://github.com/adrighem/signal-purple/commit/1bd2c907943a97a55b53a4c9ec1e9eb7dd67ff33)), closes [#5](https://github.com/adrighem/signal-purple/issues/5)
 
 ## 0.1.0 (2026-07-19)
 
