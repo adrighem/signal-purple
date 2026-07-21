@@ -4,6 +4,74 @@ Live Signal compatibility is recorded per repository revision and test date.
 A partial pass does not establish complete compatibility with the production
 service.
 
+## 2026-07-21 0.2.0 pre-release validation
+
+The signed 0.2.0 pre-release commit is
+`59d4f257a3b2514261d3fc773da4e9df90d9ffd4`. Its
+[main CI](https://github.com/adrighem/signal-purple/actions/runs/29845632084)
+and [CodeQL](https://github.com/adrighem/signal-purple/actions/runs/29845630422)
+passed, including all 40 Rust tests, all four C/Purple tests, and the
+annotated-tag archive regression. The rebuilt runtime package, debug package,
+and probe are byte-identical to the original candidate, so its four GCC
+AddressSanitizer/UndefinedBehaviorSanitizer tests and all nine tests from the
+pinned Presage store revision transfer unchanged.
+The sanitizer run covered the C adapter with LeakSanitizer disabled; it did
+not independently instrument the Rust library.
+At freeze time, GitHub reported no open Dependabot, code-scanning, or
+secret-scanning alerts.
+
+The vendored source archive was generated twice independently and matched
+byte-for-byte. Two clean Debian 13 amd64 package builds used the pinned image
+and checksum-verified Rust 1.95 toolchain with networking disabled. Their
+runtime and debug packages were byte-identical. Both builds passed packaged
+tests, installation, module probing, private-backend resolution, and removal.
+The only archived changes from the initial candidate were corrected
+release-process documentation plus the reviewed archive helper, CI wiring,
+and regression test.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| `signal-purple_0.2.0.orig.tar.xz` | `9e98442119df4d8991e9eee4553c6b882c08c47bb677a6db4984a5ac1545011b` |
+| `signal-purple_0.2.0-1_amd64.deb` | `19190da4933fa6310def64112ec6325ae499cf75b7d16b23aaf9f92346368f82` |
+| `signal-purple-dbgsym_0.2.0-1_amd64.deb` | `ba98233728fc98c985db195fa758490ed4b3d3987ece24835e15981a51a9c26f` |
+| `signal-purple-0.2.0.spdx.json` | `c2ecc09e59fd9d2ed7deaeeea556d76c5c18bff0faa853d465e9ea84276347b6` |
+| `SHA256SUMS` | `7092498a7a9060d8414bf3a2d83f43f763ec4a80efa29cf573ad8c6ff72e0cce` |
+| `SHA256SUMS.asc` | `ffda6563e6b4387bcbf0d62033844bb7cc92c0e089e66a592cbf91d70492a663` |
+
+The rebuilt runtime package, debug package, and probe were byte-identical to
+the initial candidate, so its Debian-package and CMake source-install lifecycle
+evidence transfers unchanged. It covered fresh installation, 0.1.0 to 0.2.0
+upgrade, rollback, re-upgrade, probing, and removal while preserving
+profile-state sentinels. A negative control showed that installing an older
+CMake build directly over newer files can be skipped by timestamp checks.
+Manifest-first replacement passed and is now required by the release process.
+No real linked account or encrypted database migration is claimed by this
+lifecycle evidence. The runs covered system Debian-package paths and one
+disposable custom CMake prefix, not every documented prefix variant.
+
+Corrupt encrypted state, an unavailable Secret Service, and runtime ENOSPC
+fault injection failed closed. Three full-disk runs rolled back the failed
+write, preserved and reopened the encrypted store, accepted a recovery write,
+and excluded synthetic paths, account values, recipients, message bodies, and
+passphrases from returned diagnostics.
+
+Dedicated non-production Signal accounts were unavailable. The release owner
+therefore waived exact-candidate live interoperability, network recovery,
+idle/diagnostic capture, and soak validation for this explicitly labelled
+pre-alpha. These checks were not run and remain unverified.
+No official Signal client version was tested. Production-service compatibility
+is not established for this release.
+
+The signed annotated tag [`v0.2.0`](https://github.com/adrighem/signal-purple/releases/tag/v0.2.0)
+targets the reviewed commit above, and GitHub verified its signature. The tag
+and `SHA256SUMS` signature use key fingerprint
+`B3C0 B75F A3B3 3AC2 7873 8C5C B179 8BCD A760 54BD`. Generating the source
+archive directly from the tag reproduced the published archive byte-for-byte;
+a clean network-disabled Debian 13 build from that archive passed all four
+tests, installation, module probing, private-backend resolution, and removal.
+All six downloaded pre-release assets matched the locally verified files, and
+the downloaded checksum manifest and detached signature verified successfully.
+
 ## 2026-07-21 reconnect group-routing regression
 
 The headless Purple probe now reproduces Pidgin's reconnect-time title reset:
