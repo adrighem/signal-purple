@@ -29,8 +29,9 @@ is normalized to the commit timestamp before emitting a deterministic
 `.orig.tar.xz`. Cargo is forced offline by the Debian rules, and CMake adds
 `--offline` whenever the source tree contains `vendor/`.
 
-Build the package by extracting the archive, copying `debian/` from the same
-commit if needed, and running:
+Build the package by extracting the archive and using `debian/` from the same
+commit. An audited Debian backport of Rust 1.94 or newer satisfies the declared
+build dependencies and permits the normal command:
 
 ```sh
 ionice -c 3 nice dpkg-buildpackage --build=binary --no-sign
@@ -39,12 +40,31 @@ ionice -c 3 nice dpkg-buildpackage --build=binary --no-sign
 Release evidence must come from a clean Debian 13 amd64 environment. A build on
 a newer Debian host is useful only as a development check. The current protocol
 graph requires Rust 1.94 while Debian 13 supplies Rust 1.85, so the package
-currently requires the checksum-verified upstream Rust 1.95 toolchain or an
-audited Debian backport. The clean-environment validation uses the upstream
+currently requires an audited Debian backport or the checksum-verified upstream
+Rust 1.95 toolchain. The clean-environment validation uses the upstream
 `rust-1.95.0-x86_64-unknown-linux-gnu.tar.gz` distribution with SHA-256
 `a47ac940abd12399d59ad15c877e7113fa35f2b9ec7e6a8a045d4fd8b9741dea`.
-Build dependencies must be checked separately because Debian 13's package
-resolver cannot satisfy the declared Rust 1.94 minimum from stable alone.
+
+An upstream toolchain archive does not register as a Debian package and
+therefore cannot satisfy `dpkg-checkbuilddeps`, even when `rustc --version` and
+`cargo --version` report the required compiler. When the audited release build
+uses that archive, verify its checksum, install every non-Rust build dependency,
+record the toolchain versions, and deliberately bypass only the package-manager
+dependency check:
+
+```sh
+echo 'a47ac940abd12399d59ad15c877e7113fa35f2b9ec7e6a8a045d4fd8b9741dea  rust-1.95.0-x86_64-unknown-linux-gnu.tar.gz' \
+  | sha256sum --check
+rustc --version --verbose
+cargo --version --verbose
+ionice -c 3 nice dpkg-buildpackage --build=binary --no-sign \
+  --no-check-builddeps
+```
+
+`--no-check-builddeps` disables all metadata checks; it must not be used to
+hide a missing native dependency. The normal Debian 13 CI job builds, tests, and
+stages the CMake install on the supported userspace, but does not replace this
+vendored, network-isolated package and reproducibility evidence.
 
 Runtime dependencies include libpurple 2, GLib, GdkPixbuf, libsecret, OpenSSL,
 and the native libraries linked by the bundled SQLCipher backend. Use

@@ -1,5 +1,8 @@
 blank_issues_enabled: false
 contact_links:
+  - name: Troubleshooting guide
+    url: https://github.com/adrighem/signal-purple/blob/main/docs/troubleshooting.md
+    about: Check installation, linking, synchronization, and attachment guidance before filing.
   - name: Security vulnerability
     url: https://github.com/adrighem/signal-purple/security/advisories/new
     about: Report vulnerabilities privately; never open a public security issue.

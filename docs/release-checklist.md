@@ -1,7 +1,9 @@
 # 1.0 release checklist
 
 This checklist is the release contract. A box is complete only when its result
-is linked from the release issue or release pull request.
+is linked from the release issue or release pull request. Candidate-specific
+evidence for the 0.2.0 pre-release belongs in
+[validation tracker #5](https://github.com/adrighem/signal-purple/issues/5).
 
 ## Supported scope
 
@@ -23,11 +25,13 @@ is linked from the release issue or release pull request.
 ## Build and supply chain
 
 - [x] Release inputs are pinned and available without mutable Git references.
-- [x] A clean Debian 13 environment produces the documented package.
-- [x] Two builds produce identical binary package contents.
-- [x] CI passes formatting, warnings, tests, ABI checks, and packaging checks.
+- [x] Primary CI passes formatting, warnings, tests, and ABI/module-load checks.
+- [ ] The candidate passes the clean Debian 13 build, test, and staged-install
+  job.
+- [ ] The candidate's vendored source archive produces installable Debian
+  packages twice with identical contents.
 - [ ] The source archive, package, checksums, SBOM, and signature agree.
-- [x] No known unresolved release-blocking vulnerability remains.
+- [ ] No known unresolved release-blocking vulnerability remains.
 
 ## Interoperability
 
@@ -47,13 +51,17 @@ is linked from the release issue or release pull request.
 - [ ] An idle connected account has no recurring backend poll wakeups or hot
   Pidgin/`signal-purple-core` thread.
 - [ ] Sensitive values never appear in logs, crashes, or generated diagnostics.
-- [x] ABI inputs have sanitizer and malformed-input coverage.
+- [x] ABI inputs have focused malformed-input coverage.
+- [ ] The candidate C adapter passes AddressSanitizer and
+  UndefinedBehaviorSanitizer.
 - [ ] Upgrade and rollback procedures preserve or explicitly migrate state.
 - [ ] The release candidate completes its soak with no unresolved regression.
 
 ## Documentation and release
 
 - [x] Installation, upgrade, rollback, relinking, and removal are documented.
+- [ ] Candidate install, load, upgrade, rollback, and uninstall paths pass for
+  every advertised installation scope.
 - [x] Security boundaries, data retention, limitations, and support are current.
 - [x] The release-please pull request matches the audited changelog and version.
 - [ ] The signed release tag identifies the reviewed commit.
