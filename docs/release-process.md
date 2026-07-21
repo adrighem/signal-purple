@@ -1,20 +1,30 @@
 # Release process
 
-1. Confirm the roadmap scope and complete the applicable release checklist.
-2. Use one candidate-validation issue to record the exact revision, test
-   environment, evidence, and blockers.
-3. Let release-please create or update the version and changelog pull request.
-4. Review every dependency and generated-file change, then merge the release
-   pull request only when its checks pass.
-5. Pass the live compatibility matrix using non-production accounts.
-6. Vendor the locked Rust sources and prove a network-isolated Debian 13 build.
-7. Build the source archive and package from the reviewed release commit.
-8. Create and push a verified signed tag for that exact commit. Release-please
-   intentionally does not create tags or GitHub releases in this repository.
-9. Generate checksums and an SBOM, then verify install, load, upgrade, and
-   uninstall paths.
-10. Publish the GitHub release with explicit known limitations and the exact
-   tested Signal client dates.
+1. Confirm the roadmap scope and identify the applicable release-checklist
+   gates.
+2. Land every intended runtime, storage, dependency, packaging, CI, and release
+   hardening change before freezing the candidate.
+3. Open one candidate-validation issue to record the environment, evidence,
+   and blockers. Leave its candidate revision pending at this stage.
+4. Let release-please create or update the version and changelog pull request.
+5. Review every dependency and generated-file change, then merge the release
+   pull request only when its checks pass. This merge establishes the candidate
+   on `main`; it does not create a tag or GitHub release.
+6. Record the full post-merge `main` commit in the validation issue. Evidence
+   from the pull-request head does not substitute for this commit.
+7. Pass the clean Debian 13 job, sanitizer checks, and live compatibility
+   matrix for that candidate using non-production accounts.
+8. Vendor the locked Rust sources, prove two reproducible network-isolated
+   package builds, and generate the source archive, checksums, and SBOM from
+   that candidate.
+9. Verify install, load, upgrade, rollback, and uninstall paths, then complete
+   the agreed soak period without a release blocker.
+10. Create and push a verified signed tag for the validated commit.
+    Release-please intentionally does not create tags or GitHub releases in
+    this repository.
+11. Reproduce and smoke-test the release artifacts from the signed tag.
+12. Publish the GitHub release with explicit known limitations and the exact
+    tested Signal client dates.
 
 The workflow uses `RELEASE_PLEASE_TOKEN` when configured and otherwise falls
 back to `GITHUB_TOKEN`. Configure a fine-grained token or GitHub App token when
@@ -28,15 +38,19 @@ Do not publish a release from a working tree with only compilation evidence.
 Use one issue as the evidence index for each release candidate. The 0.2.0
 pre-release candidate is tracked in
 [issue #5](https://github.com/adrighem/signal-purple/issues/5).
-Record the full candidate commit, Debian image or environment, official Signal
-client versions and test date, artifact hashes, and links to sanitized evidence.
+Record the full post-merge `main` commit, Debian image or environment, official
+Signal client versions and test date, artifact hashes, and links to sanitized
+evidence. Keep the issue open through packaging, signing, and publication; a
+release pull request must not close it automatically.
 
 Evidence counts only for the recorded candidate. If runtime, storage,
 dependency, or packaging inputs change, update the candidate revision and rerun
-the affected checks. Use dedicated non-production Signal accounts, keep failed
-checks open, and link implementation defects instead of creating separate
-validation trackers. Never attach identifiers, message contents, provisioning
-data, keys, database secrets, or unredacted private paths.
+the affected checks. A pull-request head and its resulting merge commit may have
+the same tree but remain different revisions and can produce different artifact
+metadata. Use dedicated non-production Signal accounts, keep failed checks
+open, and link implementation defects instead of creating separate validation
+trackers. Never attach identifiers, message contents, provisioning data, keys,
+database secrets, or unredacted private paths.
 
 ## Upgrade
 

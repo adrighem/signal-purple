@@ -4,6 +4,9 @@ This checklist is the release contract. A box is complete only when its result
 is linked from the release issue or release pull request. Candidate-specific
 evidence for the 0.2.0 pre-release belongs in
 [validation tracker #5](https://github.com/adrighem/signal-purple/issues/5).
+The candidate is the post-merge `main` commit that will be signed and tagged,
+not the release pull-request head. Merging the release pull request establishes
+that candidate but does not publish it.
 
 ## Supported scope
 
