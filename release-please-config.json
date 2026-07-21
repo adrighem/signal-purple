@@ -10,7 +10,10 @@
       "skip-github-release": true,
       "extra-files": [
         "rust/signal-core/Cargo.toml",
-        "rust/signal-core/Cargo.lock",
+        {
+          "type": "generic",
+          "path": "rust/signal-core/Cargo.lock"
+        },
         "CITATION.cff"
       ]
     }

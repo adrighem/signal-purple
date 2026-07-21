@@ -23,8 +23,13 @@ disabled for the full Purple probe because process-global libpurple and media
 registries retain allocations at shutdown.
 
 The normal encrypted store had no pending message for the reported group when
-inspected, so a controlled production replay still requires a new group message
-to arrive while the account is offline.
+inspected. Commit `822414a` was then installed system-wide and loaded from the
+expected plugin and private backend paths. The normal profile reconnected with
+49 contacts and 10 groups, reported no Signal plugin error, and retained one
+saved copy of the reported chat in `Chats` with a friendly alias. A 30-second
+post-startup sample averaged 0.033% of one CPU core. A controlled production
+replay still requires a new group message to arrive while the account is
+offline.
 
 ## 2026-07-20 legacy-contact migration and idle validation
 
