@@ -9,4 +9,4 @@ authors:
   - family-names: "van Adrighem"
     given-names: "Vincent"
 repository-code: "https://github.com/adrighem/signal-purple"
-version: 0.2.0 # x-release-please-version
+version: 0.3.0 # x-release-please-version
