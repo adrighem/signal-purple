@@ -8,6 +8,11 @@ The candidate is the post-merge `main` commit that will be signed and tagged,
 not the release pull-request head. Merging the release pull request establishes
 that candidate but does not publish it.
 
+For the explicitly labelled 0.2.0 pre-alpha, the release owner waived
+exact-candidate live interoperability, network recovery, idle/diagnostic, and
+soak evidence because dedicated non-production accounts were unavailable.
+Those boxes remain unchecked and are known limitations, not test passes.
+
 ## Supported scope
 
 - Debian 13 with libpurple 2.
@@ -29,12 +34,12 @@ that candidate but does not publish it.
 
 - [x] Release inputs are pinned and available without mutable Git references.
 - [x] Primary CI passes formatting, warnings, tests, and ABI/module-load checks.
-- [ ] The candidate passes the clean Debian 13 build, test, and staged-install
+- [x] The candidate passes the clean Debian 13 build, test, and staged-install
   job.
-- [ ] The candidate's vendored source archive produces installable Debian
+- [x] The candidate's vendored source archive produces installable Debian
   packages twice with identical contents.
-- [ ] The source archive, package, checksums, SBOM, and signature agree.
-- [ ] No known unresolved release-blocking vulnerability remains.
+- [x] The source archive, package, checksums, SBOM, and signature agree.
+- [x] No known unresolved release-blocking vulnerability remains.
 
 ## Interoperability
 
@@ -50,12 +55,12 @@ that candidate but does not publish it.
 ## Resilience and safety
 
 - [ ] Network loss, reconnect, rate limits, and remote protocol errors recover.
-- [ ] Corrupt state, unavailable key storage, and full disk fail safely.
+- [x] Corrupt state, unavailable key storage, and full disk fail safely.
 - [ ] An idle connected account has no recurring backend poll wakeups or hot
   Pidgin/`signal-purple-core` thread.
 - [ ] Sensitive values never appear in logs, crashes, or generated diagnostics.
 - [x] ABI inputs have focused malformed-input coverage.
-- [ ] The candidate C adapter passes AddressSanitizer and
+- [x] The candidate C adapter passes AddressSanitizer and
   UndefinedBehaviorSanitizer.
 - [ ] Upgrade and rollback procedures preserve or explicitly migrate state.
 - [ ] The release candidate completes its soak with no unresolved regression.
@@ -67,6 +72,6 @@ that candidate but does not publish it.
   every advertised installation scope.
 - [x] Security boundaries, data retention, limitations, and support are current.
 - [x] The release-please pull request matches the audited changelog and version.
-- [ ] The signed release tag identifies the reviewed commit.
-- [ ] Release artifacts are reproduced and smoke-tested from that tag.
+- [x] The signed release tag identifies the reviewed commit.
+- [x] Release artifacts are reproduced and smoke-tested from that tag.
 - [x] A rollback decision and recovery path exist before publication.
