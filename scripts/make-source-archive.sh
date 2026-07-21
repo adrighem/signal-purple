@@ -3,16 +3,18 @@ set -eu
 
 revision=${1:-HEAD}
 repository=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
-version=$(git -C "$repository" show "$revision:version.txt")
+commit=$(git -C "$repository" rev-parse --verify --end-of-options \
+    "$revision^{commit}")
+version=$(git -C "$repository" show "$commit:version.txt")
 output=${2:-"$repository/dist/signal-purple_${version}.orig.tar.xz"}
-epoch=$(git -C "$repository" show -s --format=%ct "$revision")
+epoch=$(git -C "$repository" show -s --format=%ct "$commit")
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/signal-purple-source.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 
 prefix="signal-purple-$version"
 source_dir="$temporary/$prefix"
 mkdir -p "$source_dir" "$(dirname -- "$output")"
-git -C "$repository" archive "$revision" | tar -x -C "$source_dir"
+git -C "$repository" archive "$commit" | tar -x -C "$source_dir"
 sed -i "1s/([^)]*)/($version-1)/" "$source_dir/debian/changelog"
 
 mkdir -p "$source_dir/.cargo"
