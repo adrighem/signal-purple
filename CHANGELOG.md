@@ -8,6 +8,13 @@ semantic versioning after the first stable release.
 
 No user-facing changes yet.
 
+## 0.2.1 (2026-07-22)
+
+### Fixed
+
+- Show accepted outgoing group messages in the active Purple chat exactly once
+  without treating them as received messages.
+
 ## 0.2.0 (2026-07-21)
 
 Version 0.2.0 is the first version intended for a tagged public pre-release.
