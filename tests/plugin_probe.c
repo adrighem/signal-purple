@@ -93,6 +93,66 @@ static PurpleConversationUiOps reconnect_conversation_ops = {
     .chat_remove_users = autoset_title_after_chat_remove,
 };
 
+typedef struct {
+    SignalStatus status;
+    guint calls;
+    guint64 request_id;
+    char *group_key;
+    char *message;
+} FakeGroupSender;
+
+static guint group_echo_writes;
+static PurpleConversation *group_echo_conversation;
+static char *group_echo_who;
+static char *group_echo_message;
+static PurpleMessageFlags group_echo_flags;
+static time_t group_echo_timestamp;
+
+static SignalStatus
+fake_send_group_message(SignalCore *core, uint64_t request_id,
+                        const char *group_key, const char *message)
+{
+    FakeGroupSender *sender = (FakeGroupSender *)core;
+
+    sender->calls++;
+    sender->request_id = request_id;
+    g_free(sender->group_key);
+    sender->group_key = g_strdup(group_key);
+    g_free(sender->message);
+    sender->message = g_strdup(message);
+    return sender->status;
+}
+
+static void
+capture_group_echo(PurpleConversation *conversation, const char *who,
+                   const char *message, PurpleMessageFlags flags,
+                   time_t timestamp)
+{
+    group_echo_writes++;
+    group_echo_conversation = conversation;
+    g_free(group_echo_who);
+    group_echo_who = g_strdup(who);
+    g_free(group_echo_message);
+    group_echo_message = g_strdup(message);
+    group_echo_flags = flags;
+    group_echo_timestamp = timestamp;
+}
+
+static PurpleConversationUiOps group_echo_conversation_ops = {
+    .write_chat = capture_group_echo,
+};
+
+static void
+reset_group_echo_capture(void)
+{
+    group_echo_writes = 0;
+    group_echo_conversation = NULL;
+    g_clear_pointer(&group_echo_who, g_free);
+    g_clear_pointer(&group_echo_message, g_free);
+    group_echo_flags = 0;
+    group_echo_timestamp = 0;
+}
+
 static void
 remove_tree(const char *path)
 {
@@ -485,6 +545,9 @@ test_group_conversation_identity(PurplePlugin *plugin,
     PurpleConversation *legacy_conversation;
     PurpleConversation *second_conversation;
     GHashTable *legacy_components;
+    FakeGroupSender group_sender = {
+        .status = SIGNAL_STATUS_OK,
+    };
 
     purple_account_set_connection(account, &gc);
     purple_connection_set_protocol_data(&gc, &connection);
@@ -599,6 +662,59 @@ test_group_conversation_identity(PurplePlugin *plugin,
     g_hash_table_add(connection.active_group_keys,
                      g_strdup("stable-conversation-one"));
     g_assert_true(protocol->chat_can_receive_file(&gc, 1));
+
+    reset_group_echo_capture();
+    connection.core = (SignalCore *)&group_sender;
+    connection.send_group_message = fake_send_group_message;
+    connection.next_request_id = 41;
+    purple_conv_chat_set_nick(PURPLE_CONV_CHAT(first_conversation),
+                              "local-group-member");
+    purple_conversation_set_ui_ops(first_conversation,
+                                   &group_echo_conversation_ops);
+    purple_conv_chat_send_with_flags(PURPLE_CONV_CHAT(first_conversation),
+                                     "Hello <b>group</b>",
+                                     PURPLE_MESSAGE_NO_LOG);
+    g_assert_cmpuint(group_sender.calls, ==, 1);
+    g_assert_cmpuint(group_sender.request_id, ==, 41);
+    g_assert_cmpstr(group_sender.group_key, ==, "stable-conversation-one");
+    g_assert_cmpstr(group_sender.message, ==, "Hello group");
+    g_assert_cmpuint(group_echo_writes, ==, 1);
+    g_assert_true(group_echo_conversation == first_conversation);
+    g_assert_cmpstr(group_echo_who, ==, "local-group-member");
+    g_assert_cmpstr(group_echo_message, ==, "Hello <b>group</b>");
+    g_assert_true((group_echo_flags & PURPLE_MESSAGE_SEND) != 0);
+    g_assert_true((group_echo_flags & PURPLE_MESSAGE_NO_LOG) != 0);
+    g_assert_true((group_echo_flags & PURPLE_MESSAGE_RECV) == 0);
+    g_assert_true((group_echo_flags & PURPLE_MESSAGE_REMOTE_SEND) == 0);
+    g_assert_cmpint(group_echo_timestamp, >, 0);
+    g_assert_cmpuint(connection.next_request_id, ==, 42);
+
+    purple_conv_chat_send_with_flags(PURPLE_CONV_CHAT(first_conversation),
+                                     "hidden group message",
+                                     PURPLE_MESSAGE_INVISIBLE);
+    g_assert_cmpuint(group_sender.calls, ==, 2);
+    g_assert_cmpstr(group_sender.message, ==, "hidden group message");
+    g_assert_cmpuint(group_echo_writes, ==, 1);
+
+    group_sender.status = SIGNAL_STATUS_QUEUE_FULL;
+    g_assert_cmpint(protocol->chat_send(
+                        &gc, 1, "queue failure", PURPLE_MESSAGE_SEND),
+                    ==, -EAGAIN);
+    g_assert_cmpuint(group_sender.calls, ==, 3);
+    g_assert_cmpuint(group_echo_writes, ==, 1);
+
+    group_sender.status = SIGNAL_STATUS_NOT_READY;
+    g_assert_cmpint(protocol->chat_send(
+                        &gc, 1, "not ready", PURPLE_MESSAGE_SEND),
+                    ==, -ENOTCONN);
+    g_assert_cmpuint(group_sender.calls, ==, 4);
+    g_assert_cmpuint(group_echo_writes, ==, 1);
+    purple_conversation_set_ui_ops(first_conversation, NULL);
+    connection.core = NULL;
+    connection.send_group_message = NULL;
+    g_clear_pointer(&group_sender.group_key, g_free);
+    g_clear_pointer(&group_sender.message, g_free);
+    reset_group_echo_capture();
 
     purple_blist_alias_chat(first, "Local display title");
     protocol->join_chat(&gc, purple_chat_get_components(first));

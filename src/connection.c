@@ -1326,6 +1326,7 @@ signal_login(PurpleAccount *account)
 
     connection = g_new0(SignalConnection, 1);
     connection->gc = gc;
+    connection->send_group_message = signal_core_send_group_message;
     connection->store_path = g_strdup(store_path);
     connection->group_ids_by_key = g_hash_table_new_full(
         g_str_hash, g_str_equal, g_free, NULL);
@@ -1849,9 +1850,9 @@ signal_chat_send(PurpleConnection *gc, int id, const char *message,
     PurpleConversation *conversation;
     const char *group_key;
     g_autofree char *plain = NULL;
+    SignalSendGroupMessageFunc send_group_message;
     SignalStatus status;
 
-    (void)flags;
     if (connection == NULL || connection->closing)
         return -ENOTCONN;
 
@@ -1870,8 +1871,19 @@ signal_chat_send(PurpleConnection *gc, int id, const char *message,
     if (conversation != NULL)
         purple_conversation_set_logging(conversation, FALSE);
 
-    status = signal_core_send_group_message(
+    send_group_message = connection->send_group_message;
+    if (send_group_message == NULL)
+        send_group_message = signal_core_send_group_message;
+    status = send_group_message(
         connection->core, connection->next_request_id++, group_key, plain);
+    if (status == SIGNAL_STATUS_OK && conversation != NULL &&
+        (flags & PURPLE_MESSAGE_INVISIBLE) == 0) {
+        PurpleConvChat *chat = PURPLE_CONV_CHAT(conversation);
+        const char *nick = purple_conv_chat_get_nick(chat);
+
+        if (nick != NULL)
+            purple_conv_chat_write(chat, nick, message, flags, time(NULL));
+    }
     return signal_status_to_errno(status);
 }
 
