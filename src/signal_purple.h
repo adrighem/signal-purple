@@ -14,9 +14,14 @@
 #define SIGNAL_MAX_MESSAGE_BYTES (64u * 1024u)
 #define SIGNAL_MAX_ATTACHMENT_BYTES (25u * 1024u * 1024u)
 
+typedef SignalStatus (*SignalSendGroupMessageFunc)(
+    SignalCore *core, uint64_t request_id, const char *group_key,
+    const char *message);
+
 typedef struct {
     PurpleConnection *gc;
     SignalCore *core;
+    SignalSendGroupMessageFunc send_group_message;
     GSource *poll_source;
     GHashTable *group_ids_by_key;
     GHashTable *group_keys_by_id;
