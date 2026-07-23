@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use std::ffi::{CString, c_char};
 
-pub const ABI_VERSION: u32 = 6;
+pub const ABI_VERSION: u32 = 7;
 
 pub const EVENT_LINK_QR: u32 = 1;
 pub const EVENT_READY: u32 = 2;
@@ -23,9 +23,11 @@ pub const EVENT_IDENTITY_ACCEPTED: u32 = 18;
 pub const EVENT_ATTACHMENT: u32 = 19;
 pub const EVENT_ATTACHMENT_SENT: u32 = 20;
 pub const EVENT_GROUP_LEFT: u32 = 21;
+pub const EVENT_RECOVERING: u32 = 22;
 
 pub const FLAG_OUTGOING: u32 = 1 << 0;
 pub const FLAG_FATAL: u32 = 1 << 1;
+pub const FLAG_TRANSIENT: u32 = 1 << 2;
 
 #[derive(Debug, Default)]
 pub struct Event {
@@ -59,6 +61,13 @@ impl Event {
     pub fn request_error(request_id: u64, message: impl Into<String>) -> Self {
         Self {
             request_id,
+            ..Self::error(message, false)
+        }
+    }
+
+    pub fn transient_error(message: impl Into<String>) -> Self {
+        Self {
+            flags: FLAG_TRANSIENT,
             ..Self::error(message, false)
         }
     }
@@ -208,5 +217,15 @@ mod tests {
         assert_eq!(event.request_id, 17);
         assert_eq!(event.chat_id.as_deref(), Some("opaque-group-id"));
         assert_eq!(event.text.as_deref(), Some("leave failed"));
+    }
+
+    #[test]
+    fn transient_errors_are_nonfatal_and_explicitly_classified() {
+        let event = Event::transient_error("network is recovering");
+
+        assert_eq!(event.kind, EVENT_ERROR);
+        assert_eq!(event.flags, FLAG_TRANSIENT);
+        assert_eq!(event.title.as_deref(), Some("Signal operation failed"));
+        assert_eq!(event.text.as_deref(), Some("network is recovering"));
     }
 }

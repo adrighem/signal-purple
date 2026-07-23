@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define SIGNAL_CORE_ABI_VERSION 6u
+#define SIGNAL_CORE_ABI_VERSION 7u
 
 typedef struct SignalCore SignalCore;
 
@@ -43,13 +43,15 @@ typedef enum {
     SIGNAL_EVENT_IDENTITY_ACCEPTED = 18,
     SIGNAL_EVENT_ATTACHMENT = 19,
     SIGNAL_EVENT_ATTACHMENT_SENT = 20,
-    SIGNAL_EVENT_GROUP_LEFT = 21
+    SIGNAL_EVENT_GROUP_LEFT = 21,
+    SIGNAL_EVENT_RECOVERING = 22
 } SignalEventKind;
 
 typedef enum {
     SIGNAL_EVENT_FLAG_NONE = 0,
     SIGNAL_EVENT_FLAG_OUTGOING = 1u << 0,
-    SIGNAL_EVENT_FLAG_FATAL = 1u << 1
+    SIGNAL_EVENT_FLAG_FATAL = 1u << 1,
+    SIGNAL_EVENT_FLAG_TRANSIENT = 1u << 2
 } SignalEventFlags;
 
 typedef struct {

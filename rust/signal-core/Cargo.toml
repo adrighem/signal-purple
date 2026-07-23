@@ -19,6 +19,7 @@ png = "0.18.0"
 presage = { git = "https://github.com/adrighem/presage.git", rev = "5e584595b3723e6904a09246deaa830b93bbae7b", default-features = false }
 presage-store-sqlite = { git = "https://github.com/adrighem/presage.git", rev = "5e584595b3723e6904a09246deaa830b93bbae7b" }
 qrcode = { version = "0.14.1", default-features = false }
+reqwest-websocket = { version = "0.4.4", default-features = false }
 sha2 = "0.10.9"
 tokio = { version = "1.48.0", features = ["rt", "sync", "time"] }
 tracing = { version = "0.1.44", default-features = false, features = ["max_level_warn"] }

@@ -12,6 +12,8 @@
 
 PurpleChat *signal_group_sync_lookup_chat(PurpleAccount *account,
                                           const char *group_id);
+PurpleConversation *signal_group_sync_lookup_conversation(
+    PurpleAccount *account, const char *group_id);
 PurpleChat *signal_group_sync_find_chat(PurpleAccount *account,
                                         const char *group_id,
                                         guint *removed);
@@ -20,5 +22,10 @@ guint signal_group_sync_remove_managed_chats(PurpleAccount *account,
                                              const char *group_id);
 void signal_group_sync_update_title(PurpleChat *chat, const char *group_id,
                                     const char *title);
+gboolean signal_group_sync_defer_join(GHashTable *pending,
+                                      gboolean snapshot_complete,
+                                      const char *group_id);
+GPtrArray *signal_group_sync_take_active_joins(GHashTable *pending,
+                                               GHashTable *active);
 
 #endif

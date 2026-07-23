@@ -60,6 +60,17 @@ signal_group_sync_lookup_chat(PurpleAccount *account, const char *group_id)
     return selected;
 }
 
+PurpleConversation *
+signal_group_sync_lookup_conversation(PurpleAccount *account,
+                                      const char *group_id)
+{
+    g_return_val_if_fail(account != NULL, NULL);
+    g_return_val_if_fail(group_id != NULL && group_id[0] != '\0', NULL);
+
+    return purple_find_conversation_with_account(PURPLE_CONV_TYPE_CHAT,
+                                                 group_id, account);
+}
+
 PurpleChat *
 signal_group_sync_find_chat(PurpleAccount *account, const char *group_id,
                             guint *removed)
@@ -156,4 +167,38 @@ signal_group_sync_update_title(PurpleChat *chat, const char *group_id,
     if (follows_signal_title)
         purple_blist_alias_chat(chat, title);
     purple_blist_node_set_string(node, SIGNAL_SYNCED_GROUP_TITLE_KEY, title);
+}
+
+gboolean
+signal_group_sync_defer_join(GHashTable *pending,
+                             gboolean snapshot_complete,
+                             const char *group_id)
+{
+    g_return_val_if_fail(pending != NULL, FALSE);
+    g_return_val_if_fail(group_id != NULL && group_id[0] != '\0', FALSE);
+
+    if (snapshot_complete)
+        return FALSE;
+    g_hash_table_add(pending, g_strdup(group_id));
+    return TRUE;
+}
+
+GPtrArray *
+signal_group_sync_take_active_joins(GHashTable *pending, GHashTable *active)
+{
+    GHashTableIter iter;
+    gpointer group_id;
+    GPtrArray *joins;
+
+    g_return_val_if_fail(pending != NULL, NULL);
+    g_return_val_if_fail(active != NULL, NULL);
+
+    joins = g_ptr_array_new_with_free_func(g_free);
+    g_hash_table_iter_init(&iter, pending);
+    while (g_hash_table_iter_next(&iter, &group_id, NULL)) {
+        if (g_hash_table_contains(active, group_id))
+            g_ptr_array_add(joins, g_strdup(group_id));
+    }
+    g_hash_table_remove_all(pending);
+    return joins;
 }

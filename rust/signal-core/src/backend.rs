@@ -1,23 +1,26 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Write;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, mpsc};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::{StreamExt, channel::oneshot, pin_mut};
 use presage::libsignal_service::configuration::SignalServers;
-use presage::libsignal_service::content::{Content, ContentBody, DataMessage, GroupContextV2};
+use presage::libsignal_service::content::{
+    Content, ContentBody, DataMessage, GroupContextV2, ServiceError,
+};
 use presage::libsignal_service::groups_v2::Role;
 use presage::libsignal_service::protocol::{Aci, ServiceId};
-use presage::libsignal_service::sender::AttachmentSpec;
+use presage::libsignal_service::sender::{AttachmentSpec, MessageSenderError};
 use presage::model::groups::Group;
 use presage::model::identity::OnNewIdentity;
 use presage::model::messages::Received;
 use presage::proto::{
-    EditMessage, ReceiptMessage, SyncMessage, TypingMessage, receipt_message, typing_message,
+    AttachmentPointer, EditMessage, ReceiptMessage, SyncMessage, TypingMessage, receipt_message,
+    typing_message,
 };
 use presage::store::{ContentsStore, StateStore, Thread};
 use presage::{Manager, manager::Registered};
@@ -33,8 +36,8 @@ use crate::event::{
     EVENT_ATTACHMENT, EVENT_ATTACHMENT_SENT, EVENT_CONTACT, EVENT_CONTACT_SYNC_BEGIN,
     EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED, EVENT_GROUP, EVENT_GROUP_LEFT, EVENT_GROUP_MEMBER,
     EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN, EVENT_GROUP_SYNC_END, EVENT_IDENTITY_ACCEPTED,
-    EVENT_IDENTITY_CHANGE, EVENT_LINK_QR, EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT, EVENT_TYPING,
-    Event, FLAG_OUTGOING,
+    EVENT_IDENTITY_CHANGE, EVENT_LINK_QR, EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT,
+    EVENT_RECOVERING, EVENT_TYPING, Event, FLAG_OUTGOING,
 };
 
 const MESSAGE_PROJECTION_CLIENT: &str = "signal-purple-v1";
@@ -42,6 +45,8 @@ const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_MESSAGE_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 const MAX_QUEUED_EVENT_BYTES: usize = 64 * 1024 * 1024;
 const GROUP_SYNC_RETRY_SECS: u64 = 30;
+const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
+const RECENT_PROJECTION_IDENTITY_LIMIT: usize = 4096;
 
 pub struct Config {
     pub store_path: String,
@@ -115,6 +120,26 @@ pub enum Command {
 struct MessageProjection {
     next_delivery_id: u64,
     pending: HashMap<u64, Content>,
+    identities: ProjectionIdentities,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct ProjectionIdentity {
+    sender: String,
+    destination: String,
+    timestamp_ms: i64,
+}
+
+#[derive(Default)]
+struct ProjectionIdentities {
+    pending: HashSet<ProjectionIdentity>,
+    completed: HashSet<ProjectionIdentity>,
+    completed_order: VecDeque<ProjectionIdentity>,
+}
+
+#[derive(Default)]
+struct RecoveryBackoff {
+    next_delay: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -362,11 +387,137 @@ impl std::fmt::Display for OutboxAttemptError {
 }
 
 impl MessageProjection {
-    fn track(&mut self, content: Content) -> u64 {
+    fn track(&mut self, content: Content) -> Option<u64> {
+        if !self.identities.reserve(projection_identity(&content)) {
+            return None;
+        }
         self.next_delivery_id = self.next_delivery_id.wrapping_add(1).max(1);
         let delivery_id = self.next_delivery_id;
         self.pending.insert(delivery_id, content);
-        delivery_id
+        Some(delivery_id)
+    }
+
+    fn release(&mut self, delivery_id: u64) -> Option<Content> {
+        let content = self.pending.remove(&delivery_id)?;
+        self.identities
+            .release_pending(&projection_identity(&content));
+        Some(content)
+    }
+
+    fn complete(&mut self, delivery_id: u64) -> Option<Content> {
+        let content = self.pending.remove(&delivery_id)?;
+        self.identities.complete(projection_identity(&content));
+        Some(content)
+    }
+}
+
+impl ProjectionIdentities {
+    fn reserve(&mut self, identity: ProjectionIdentity) -> bool {
+        if self.completed.contains(&identity) {
+            return false;
+        }
+        self.pending.insert(identity)
+    }
+
+    fn release_pending(&mut self, identity: &ProjectionIdentity) {
+        self.pending.remove(identity);
+    }
+
+    fn complete(&mut self, identity: ProjectionIdentity) {
+        self.pending.remove(&identity);
+        if !self.completed.insert(identity.clone()) {
+            return;
+        }
+        self.completed_order.push_back(identity);
+        while self.completed_order.len() > RECENT_PROJECTION_IDENTITY_LIMIT {
+            if let Some(expired) = self.completed_order.pop_front() {
+                self.completed.remove(&expired);
+            }
+        }
+    }
+}
+
+impl RecoveryBackoff {
+    fn next_delay(&mut self) -> Option<Duration> {
+        let seconds = *RECOVERY_RETRY_DELAYS_SECS.get(self.next_delay)?;
+        self.next_delay += 1;
+        Some(Duration::from_secs(seconds))
+    }
+
+    fn reset(&mut self) {
+        self.next_delay = 0;
+    }
+
+    fn has_remaining(&self) -> bool {
+        self.next_delay < RECOVERY_RETRY_DELAYS_SECS.len()
+    }
+}
+
+fn projection_identity(content: &Content) -> ProjectionIdentity {
+    ProjectionIdentity {
+        sender: content.metadata.sender.service_id_string(),
+        destination: content.metadata.destination.service_id_string(),
+        timestamp_ms: content.metadata.timestamp.timestamp_millis(),
+    }
+}
+
+fn retryable_http_status(status: u16) -> bool {
+    matches!(status, 408 | 425 | 429) || (500..=599).contains(&status)
+}
+
+fn websocket_error_is_transient(error: &reqwest_websocket::Error) -> bool {
+    match error {
+        reqwest_websocket::Error::Handshake(
+            reqwest_websocket::HandshakeError::UnexpectedStatusCode(status),
+        ) => retryable_http_status(status.as_u16()),
+        reqwest_websocket::Error::Handshake(_) => false,
+        reqwest_websocket::Error::Reqwest(error) => {
+            error.is_connect()
+                || error.is_timeout()
+                || error
+                    .status()
+                    .is_some_and(|status| retryable_http_status(status.as_u16()))
+        }
+        reqwest_websocket::Error::Tungstenite(_) => true,
+        _ => false,
+    }
+}
+
+fn service_error_is_transient(error: &ServiceError) -> bool {
+    match error {
+        ServiceError::Timeout { .. }
+        | ServiceError::SendError { .. }
+        | ServiceError::IO(_)
+        | ServiceError::RateLimitExceeded { .. }
+        | ServiceError::WsClosing { .. } => true,
+        ServiceError::WsError(error) => websocket_error_is_transient(error),
+        ServiceError::UnhandledResponseCode { status, .. } => {
+            retryable_http_status(status.as_u16())
+        }
+        ServiceError::Http(error) => {
+            error.is_connect()
+                || error.is_timeout()
+                || error
+                    .status()
+                    .is_some_and(|status| retryable_http_status(status.as_u16()))
+        }
+        _ => false,
+    }
+}
+
+fn receive_error_is_transient(
+    error: &presage::Error<presage_store_sqlite::SqliteStoreError>,
+) -> bool {
+    match error {
+        presage::Error::IoError(_)
+        | presage::Error::Timeout(_)
+        | presage::Error::MessagePipeInterruptedError => true,
+        presage::Error::ServiceError(error) => service_error_is_transient(error),
+        presage::Error::MessageSenderError(error) => {
+            matches!(error.as_ref(), MessageSenderError::ServiceError(error)
+                if service_error_is_transient(error))
+        }
+        _ => false,
     }
 }
 
@@ -657,216 +808,613 @@ async fn receive_and_command_loop(
         .initialize_client_outbox()
         .await
         .map_err(|error| format!("Could not initialize the encrypted outbox: {error}"))?;
-    let messages = {
-        let mut receive = Box::pin(manager.receive_messages());
-        tokio::select! {
-            result = &mut receive => {
-                result.map_err(|error| {
-                    format!("Could not start Signal message reception: {error}")
-                })?
-            }
-            _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
-        }
-    };
-    pin_mut!(messages);
-
-    if let Err(error) = manager.request_contacts().await {
-        sink.emit(Event::error(
-            format!("Could not request Signal contact synchronization: {error}"),
-            false,
-        ));
-    }
-
-    let mut synchronized = false;
-    let mut groups_dirty = false;
     let mut projection = MessageProjection::default();
+    let mut deferred_commands = VecDeque::new();
     let mut attachment_tasks = tokio::task::JoinSet::new();
     let mut attachment_aborts = HashMap::new();
     let departed_groups = DepartedGroups::default();
-    let mut groups_authoritative = false;
     let mut retry_tick = tokio::time::interval(std::time::Duration::from_secs(5));
     retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut group_sync_retry_tick =
         tokio::time::interval(std::time::Duration::from_secs(GROUP_SYNC_RETRY_SECS));
     group_sync_retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     group_sync_retry_tick.reset();
+    let mut recovery_backoff = RecoveryBackoff::default();
+    let mut recovering = false;
+    let mut last_recovery_error = None;
 
     loop {
-        tokio::select! {
-            received = messages.next() => {
-                match received {
-                    Some(Received::QueueEmpty) => {
-                        if !synchronized {
-                            let groups_synchronized = match Box::pin(
-                                manager.synchronize_storage_groups(),
-                            )
-                            .await
-                            {
-                                Ok(_) => true,
-                                Err(error) => {
-                                    sink.emit(Event::error(
-                                        format!("Could not synchronize Signal groups: {error}"),
-                                        false,
-                                    ));
-                                    false
-                                }
+        if recovering {
+            if drain_recovery_commands(
+                &mut manager,
+                &mut commands,
+                &mut shutdown,
+                &sink,
+                &mut projection,
+                &departed_groups,
+                &mut attachment_aborts,
+                &mut deferred_commands,
+            )
+            .await
+            {
+                return Ok(());
+            }
+            let Some(delay) = recovery_backoff.next_delay() else {
+                let error = last_recovery_error
+                    .unwrap_or_else(|| "Signal message reception did not recover".into());
+                fail_deferred_commands(
+                    &sink,
+                    &mut deferred_commands,
+                    "Signal connection recovery was exhausted before the request could be sent",
+                );
+                sink.emit(Event {
+                    kind: EVENT_DISCONNECTED,
+                    text: Some(error),
+                    ..Event::default()
+                });
+                return Ok(());
+            };
+            if !delay.is_zero() {
+                let sleep = tokio::time::sleep(delay);
+                pin_mut!(sleep);
+                loop {
+                    tokio::select! {
+                        _ = &mut sleep => break,
+                        command = commands.recv() => {
+                            let Some(command) = command else {
+                                return Ok(());
                             };
-                            emit_contact_snapshot(&manager, &sink).await;
-                            if groups_synchronized {
-                                emit_group_snapshot(&manager, &sink, &departed_groups).await;
-                            }
-                            groups_authoritative = groups_synchronized;
-                            if !groups_authoritative {
-                                group_sync_retry_tick.reset();
-                            }
-                            replay_unprojected_messages(
+                            if handle_recovery_command(
                                 &mut manager,
+                                command,
+                                &mut shutdown,
                                 &sink,
                                 &mut projection,
                                 &departed_groups,
-                                groups_authoritative,
-                            ).await;
-                            emit_identity_changes(&manager, &sink).await;
-                            retry_outbox(
-                                &mut manager,
-                                &sink,
-                                &departed_groups,
-                                groups_authoritative,
-                            ).await;
-                            groups_dirty = false;
-                            synchronized = true;
-                            ready.store(true, Ordering::Release);
-                            sink.emit(Event { kind: EVENT_READY, ..Event::default() });
-                        } else if groups_dirty && groups_authoritative {
-                            emit_group_snapshot(&manager, &sink, &departed_groups).await;
-                            groups_dirty = false;
+                                &mut attachment_aborts,
+                                &mut deferred_commands,
+                            ).await {
+                                return Ok(());
+                            }
                         }
-                    }
-                    Some(Received::Contacts) => emit_contact_snapshot(&manager, &sink).await,
-                    Some(Received::Content(content)) => {
-                        groups_dirty |= content_has_group_context(&content.body);
-                        if synchronized {
-                            project_content(
-                                &mut manager,
-                                *content,
-                                &sink,
-                                &mut projection,
-                                &departed_groups,
-                                groups_authoritative,
-                            ).await;
-                            emit_identity_changes(&manager, &sink).await;
+                        completed = attachment_tasks.join_next(),
+                            if !attachment_tasks.is_empty() =>
+                        {
+                            if let Some(completed) = completed {
+                                handle_attachment_completion(
+                                    &manager,
+                                    &sink,
+                                    &mut attachment_aborts,
+                                    completed,
+                                ).await;
+                            }
                         }
-                    }
-                    None => {
-                        sink.emit(Event {
-                            kind: EVENT_DISCONNECTED,
-                            text: Some("Signal's message stream ended".into()),
-                            ..Event::default()
-                        });
-                        return Ok(());
+                        _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
                     }
                 }
             }
-            command = commands.recv() => {
-                match command {
-                    None => return Ok(()),
-                    Some(Command::SendAttachment {
-                        request_id,
-                        recipient,
-                        filename,
-                        content_type,
-                        data,
-                        group,
-                    }) => {
-                        if group && !groups_authoritative {
-                            sink.emit(Event::request_error(
-                                request_id,
-                                "Signal groups are temporarily unavailable until authoritative synchronization succeeds",
-                            ));
-                            continue;
-                        }
-                        let mut attachment_manager = manager.clone();
-                        let attachment_departed_groups = departed_groups.clone();
-                        let abort = attachment_tasks.spawn_local(async move {
-                            let result = upload_and_send_attachment(
-                                &mut attachment_manager,
-                                &recipient,
-                                filename,
-                                content_type,
-                                data,
-                                group,
-                                &attachment_departed_groups,
-                            ).await;
-                            (request_id, result)
-                        });
-                        attachment_aborts.insert(request_id, abort);
-                    }
-                    Some(Command::CancelAttachment { request_id }) => {
-                        if let Some(abort) = attachment_aborts.remove(&request_id) {
-                            abort.abort();
-                        }
-                    }
-                    Some(command) => {
-                        if groups_authoritative
-                            && let Command::LeaveGroup { group_key, .. } = &command
-                        {
-                            departed_groups.begin_leave(group_key.clone());
-                        }
-                        if handle_command_interruptibly(
+        }
+
+        let messages = {
+            let mut receive_manager = manager.clone();
+            let mut receive = Box::pin(receive_manager.receive_messages());
+            loop {
+                tokio::select! {
+                    result = &mut receive => break result,
+                    command = commands.recv(), if recovering => {
+                        let Some(command) = command else {
+                            return Ok(());
+                        };
+                        if handle_recovery_command(
                             &mut manager,
                             command,
                             &mut shutdown,
                             &sink,
                             &mut projection,
                             &departed_groups,
-                            groups_authoritative,
+                            &mut attachment_aborts,
+                            &mut deferred_commands,
                         ).await {
                             return Ok(());
                         }
-                        emit_identity_changes(&manager, &sink).await;
                     }
-                }
-            }
-            completed = attachment_tasks.join_next(), if !attachment_tasks.is_empty() => {
-                if let Some(Ok((request_id, result))) = completed {
-                    attachment_aborts.remove(&request_id);
-                    match result {
-                        Ok(sent) => {
-                            mark_sent_message_projected_or_report(&manager, &sent, &sink).await;
-                            sink.emit(Event {
-                                kind: EVENT_ATTACHMENT_SENT,
-                                request_id,
-                                ..Event::default()
-                            });
+                    completed = attachment_tasks.join_next(),
+                        if recovering && !attachment_tasks.is_empty() =>
+                    {
+                        if let Some(completed) = completed {
+                            handle_attachment_completion(
+                                &manager,
+                                &sink,
+                                &mut attachment_aborts,
+                                completed,
+                            ).await;
                         }
-                        Err(error) => sink.emit(Event::request_error(request_id, error)),
                     }
+                    _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
                 }
             }
-            _ = retry_tick.tick(), if synchronized => {
-                retry_outbox(
-                    &mut manager,
-                    &sink,
-                    &departed_groups,
-                    groups_authoritative,
-                ).await;
+        };
+        let messages = match messages {
+            Ok(messages) => messages,
+            Err(error) => {
+                let transient = receive_error_is_transient(&error);
+                let error = format!("Could not start Signal message reception: {error}");
+                ready.store(false, Ordering::Release);
+                if !transient {
+                    fail_deferred_commands(
+                        &sink,
+                        &mut deferred_commands,
+                        "Signal connection recovery stopped before the request could be sent",
+                    );
+                    return Err(error);
+                }
+                if !recovering {
+                    sink.emit(Event {
+                        kind: EVENT_RECOVERING,
+                        ..Event::default()
+                    });
+                }
+                let status = if recovery_backoff.has_remaining() {
+                    "retrying automatically"
+                } else {
+                    "automatic retries exhausted"
+                };
+                sink.emit(Event::transient_error(format!("{error}; {status}")));
+                last_recovery_error = Some(error);
+                recovering = true;
+                continue;
             }
-            _ = group_sync_retry_tick.tick(), if synchronized && !groups_authoritative => {
-                if Box::pin(manager.synchronize_storage_groups()).await.is_ok() {
-                    groups_authoritative = true;
-                    emit_group_snapshot(&manager, &sink, &departed_groups).await;
-                    groups_dirty = false;
-                    replay_unprojected_messages(
+        };
+        pin_mut!(messages);
+
+        let contact_sync = tokio::task::spawn_local(request_contacts_with_retries(
+            manager.clone(),
+            shutdown.clone(),
+            sink.clone(),
+        ));
+        let mut synchronized = false;
+        let mut groups_dirty = false;
+        let mut groups_authoritative = false;
+
+        loop {
+            tokio::select! {
+                received = messages.next() => {
+                    match received {
+                        Some(Received::QueueEmpty) => {
+                            if !synchronized {
+                                emit_contact_snapshot(&manager, &sink).await;
+                                groups_authoritative =
+                                    match synchronize_and_emit_group_snapshot(
+                                        &mut manager,
+                                        &sink,
+                                        &departed_groups,
+                                    ).await {
+                                        Ok(()) => true,
+                                        Err(error) => {
+                                            sink.emit(Event::transient_error(error));
+                                            group_sync_retry_tick.reset();
+                                            false
+                                        }
+                                    };
+                                replay_unprojected_messages(
+                                    &mut manager,
+                                    &sink,
+                                    &mut projection,
+                                    &departed_groups,
+                                    groups_authoritative,
+                                ).await;
+                                emit_identity_changes(&manager, &sink).await;
+                                retry_outbox(
+                                    &mut manager,
+                                    &sink,
+                                    &departed_groups,
+                                    groups_authoritative,
+                                ).await;
+                                groups_dirty = false;
+                                synchronized = true;
+                                recovering = false;
+                                recovery_backoff.reset();
+                                ready.store(true, Ordering::Release);
+                                sink.emit(Event { kind: EVENT_READY, ..Event::default() });
+                            } else if groups_dirty && groups_authoritative {
+                                match emit_group_snapshot(
+                                    &manager,
+                                    &sink,
+                                    &departed_groups,
+                                ).await {
+                                    Ok(()) => groups_dirty = false,
+                                    Err(error) => {
+                                        groups_authoritative = false;
+                                        group_sync_retry_tick.reset();
+                                        sink.emit(Event::transient_error(error));
+                                    }
+                                }
+                            }
+                        }
+                        Some(Received::Contacts) => {
+                            emit_contact_snapshot(&manager, &sink).await;
+                        }
+                        Some(Received::Content(content)) => {
+                            groups_dirty |= content_has_group_context(&content.body);
+                            if synchronized {
+                                project_content(
+                                    &mut manager,
+                                    *content,
+                                    &sink,
+                                    &mut projection,
+                                    &departed_groups,
+                                    groups_authoritative,
+                                ).await;
+                                emit_identity_changes(&manager, &sink).await;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                command = async {
+                    if synchronized
+                        && let Some(command) = deferred_commands.pop_front()
+                    {
+                        Some(command)
+                    } else {
+                        commands.recv().await
+                    }
+                } => {
+                    let Some(command) = command else {
+                        contact_sync.abort();
+                        return Ok(());
+                    };
+                    if !synchronized {
+                        if handle_recovery_command(
+                            &mut manager,
+                            command,
+                            &mut shutdown,
+                            &sink,
+                            &mut projection,
+                            &departed_groups,
+                            &mut attachment_aborts,
+                            &mut deferred_commands,
+                        ).await {
+                            contact_sync.abort();
+                            return Ok(());
+                        }
+                        continue;
+                    }
+                    match command {
+                        Command::SendAttachment {
+                            request_id,
+                            recipient,
+                            filename,
+                            content_type,
+                            data,
+                            group,
+                        } => {
+                            if group && !groups_authoritative {
+                                sink.emit(Event::request_error(
+                                    request_id,
+                                    "Signal groups are temporarily unavailable until authoritative synchronization succeeds",
+                                ));
+                                continue;
+                            }
+                            let mut attachment_manager = manager.clone();
+                            let attachment_departed_groups = departed_groups.clone();
+                            let abort = attachment_tasks.spawn_local(async move {
+                                let result = upload_and_send_attachment(
+                                    &mut attachment_manager,
+                                    &recipient,
+                                    filename,
+                                    content_type,
+                                    data,
+                                    group,
+                                    &attachment_departed_groups,
+                                ).await;
+                                (request_id, result)
+                            });
+                            attachment_aborts.insert(request_id, abort);
+                        }
+                        Command::CancelAttachment { request_id } => {
+                            if let Some(abort) = attachment_aborts.remove(&request_id) {
+                                abort.abort();
+                            }
+                        }
+                        command => {
+                            if groups_authoritative
+                                && let Command::LeaveGroup { group_key, .. } = &command
+                            {
+                                departed_groups.begin_leave(group_key.clone());
+                            }
+                            if handle_command_interruptibly(
+                                &mut manager,
+                                command,
+                                &mut shutdown,
+                                &sink,
+                                &mut projection,
+                                &departed_groups,
+                                groups_authoritative,
+                            ).await {
+                                contact_sync.abort();
+                                return Ok(());
+                            }
+                            emit_identity_changes(&manager, &sink).await;
+                        }
+                    }
+                }
+                completed = attachment_tasks.join_next(), if !attachment_tasks.is_empty() => {
+                    if let Some(completed) = completed {
+                        handle_attachment_completion(
+                            &manager,
+                            &sink,
+                            &mut attachment_aborts,
+                            completed,
+                        ).await;
+                    }
+                }
+                _ = retry_tick.tick(), if synchronized => {
+                    retry_outbox(
                         &mut manager,
                         &sink,
-                        &mut projection,
                         &departed_groups,
-                        true,
+                        groups_authoritative,
                     ).await;
-                    retry_outbox(&mut manager, &sink, &departed_groups, true).await;
+                }
+                _ = group_sync_retry_tick.tick(), if synchronized && !groups_authoritative => {
+                    match synchronize_and_emit_group_snapshot(
+                        &mut manager,
+                        &sink,
+                        &departed_groups,
+                    ).await {
+                        Ok(()) => {
+                            groups_authoritative = true;
+                            groups_dirty = false;
+                            replay_unprojected_messages(
+                                &mut manager,
+                                &sink,
+                                &mut projection,
+                                &departed_groups,
+                                true,
+                            ).await;
+                            retry_outbox(&mut manager, &sink, &departed_groups, true).await;
+                        }
+                        Err(error) => sink.emit(Event::transient_error(error)),
+                    }
+                }
+                _ = wait_for_shutdown(&mut shutdown) => {
+                    contact_sync.abort();
+                    return Ok(());
+                },
+            }
+        }
+
+        ready.store(false, Ordering::Release);
+        if !recovering {
+            sink.emit(Event {
+                kind: EVENT_RECOVERING,
+                ..Event::default()
+            });
+        }
+        recovering = true;
+        contact_sync.abort();
+        let _ = contact_sync.await;
+        abort_in_flight_attachments(
+            &manager,
+            &sink,
+            &mut attachment_tasks,
+            &mut attachment_aborts,
+        )
+        .await;
+        let error = "Signal's message stream ended unexpectedly".to_owned();
+        last_recovery_error = Some(error.clone());
+        sink.emit(Event::transient_error(format!(
+            "{error}; reconnecting automatically"
+        )));
+    }
+}
+
+async fn request_contacts_with_retries(
+    mut manager: Manager<SqliteStore, Registered>,
+    mut shutdown: watch::Receiver<bool>,
+    sink: EventSink,
+) {
+    let mut backoff = RecoveryBackoff::default();
+
+    loop {
+        let result = {
+            let mut request = Box::pin(manager.request_contacts());
+            tokio::select! {
+                result = &mut request => result,
+                _ = wait_for_shutdown(&mut shutdown) => return,
+            }
+        };
+        match result {
+            Ok(()) => return,
+            Err(error) => {
+                let error = format!("Could not request Signal contact synchronization: {error}");
+                let Some(delay) = backoff.next_delay() else {
+                    sink.emit(Event::transient_error(format!(
+                        "{error}; automatic retries exhausted"
+                    )));
+                    return;
+                };
+                sink.emit(Event::transient_error(format!(
+                    "{error}; retrying automatically"
+                )));
+                if !delay.is_zero() {
+                    tokio::select! {
+                        _ = tokio::time::sleep(delay) => {}
+                        _ = wait_for_shutdown(&mut shutdown) => return,
+                    }
                 }
             }
-            _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+        }
+    }
+}
+
+async fn handle_attachment_completion(
+    manager: &Manager<SqliteStore, Registered>,
+    sink: &EventSink,
+    attachment_aborts: &mut HashMap<u64, tokio::task::AbortHandle>,
+    completed: Result<(u64, Result<SentMessage, String>), tokio::task::JoinError>,
+) {
+    let Ok((request_id, result)) = completed else {
+        return;
+    };
+    attachment_aborts.remove(&request_id);
+    match result {
+        Ok(sent) => {
+            mark_sent_message_projected_or_report(manager, &sent, sink).await;
+            sink.emit(Event {
+                kind: EVENT_ATTACHMENT_SENT,
+                request_id,
+                ..Event::default()
+            });
+        }
+        Err(error) => sink.emit(Event::request_error(request_id, error)),
+    }
+}
+
+async fn abort_in_flight_attachments(
+    manager: &Manager<SqliteStore, Registered>,
+    sink: &EventSink,
+    attachment_tasks: &mut tokio::task::JoinSet<(u64, Result<SentMessage, String>)>,
+    attachment_aborts: &mut HashMap<u64, tokio::task::AbortHandle>,
+) {
+    let completions = abort_and_drain_tasks(attachment_tasks, attachment_aborts.values()).await;
+    for completed in completions {
+        handle_attachment_completion(manager, sink, attachment_aborts, completed).await;
+    }
+    for (request_id, _) in attachment_aborts.drain() {
+        sink.emit(Event::request_error(
+            request_id,
+            "Signal connection was interrupted before the attachment completed",
+        ));
+    }
+}
+
+async fn abort_and_drain_tasks<T: Send + 'static>(
+    tasks: &mut tokio::task::JoinSet<T>,
+    aborts: impl Iterator<Item = &tokio::task::AbortHandle>,
+) -> Vec<Result<T, tokio::task::JoinError>> {
+    for abort in aborts {
+        abort.abort();
+    }
+    tasks.abort_all();
+    let mut completions = Vec::with_capacity(tasks.len());
+    while let Some(completed) = tasks.join_next().await {
+        completions.push(completed);
+    }
+    completions
+}
+
+fn cancel_deferred_attachment(commands: &mut VecDeque<Command>, request_id: u64) -> bool {
+    let Some(index) = commands.iter().position(|command| {
+        matches!(
+            command,
+            Command::SendAttachment {
+                request_id: queued_request_id,
+                ..
+            } if *queued_request_id == request_id
+        )
+    }) else {
+        return false;
+    };
+    commands.remove(index);
+    true
+}
+
+fn deferred_command_failure(command: Command, message: &str) -> Option<Event> {
+    match command {
+        Command::LeaveGroup {
+            request_id,
+            group_key,
+        } => Some(Event::group_request_error(request_id, group_key, message)),
+        Command::SendMessage { request_id, .. }
+        | Command::SendGroupMessage { request_id, .. }
+        | Command::SendAttachment { request_id, .. }
+        | Command::AcceptIdentity { request_id, .. }
+        | Command::DismissIdentity { request_id, .. }
+        | Command::MarkRead { request_id, .. } => Some(Event::request_error(request_id, message)),
+        Command::CancelAttachment { .. }
+        | Command::SetTyping { .. }
+        | Command::AcknowledgeMessage { .. } => None,
+    }
+}
+
+fn fail_deferred_commands(sink: &EventSink, commands: &mut VecDeque<Command>, message: &str) {
+    while let Some(command) = commands.pop_front() {
+        if let Some(event) = deferred_command_failure(command, message) {
+            sink.emit(event);
+        }
+    }
+}
+
+async fn handle_recovery_command(
+    manager: &mut Manager<SqliteStore, Registered>,
+    command: Command,
+    shutdown: &mut watch::Receiver<bool>,
+    sink: &EventSink,
+    projection: &mut MessageProjection,
+    departed_groups: &DepartedGroups,
+    attachment_aborts: &mut HashMap<u64, tokio::task::AbortHandle>,
+    deferred_commands: &mut VecDeque<Command>,
+) -> bool {
+    match command {
+        Command::AcknowledgeMessage { .. } => {
+            handle_command_interruptibly(
+                manager,
+                command,
+                shutdown,
+                sink,
+                projection,
+                departed_groups,
+                false,
+            )
+            .await
+        }
+        Command::CancelAttachment { request_id } => {
+            cancel_deferred_attachment(deferred_commands, request_id);
+            if let Some(abort) = attachment_aborts.remove(&request_id) {
+                abort.abort();
+            }
+            false
+        }
+        Command::SetTyping { .. } => false,
+        command => {
+            deferred_commands.push_back(command);
+            false
+        }
+    }
+}
+
+async fn drain_recovery_commands(
+    manager: &mut Manager<SqliteStore, Registered>,
+    commands: &mut tokio_mpsc::Receiver<Command>,
+    shutdown: &mut watch::Receiver<bool>,
+    sink: &EventSink,
+    projection: &mut MessageProjection,
+    departed_groups: &DepartedGroups,
+    attachment_aborts: &mut HashMap<u64, tokio::task::AbortHandle>,
+    deferred_commands: &mut VecDeque<Command>,
+) -> bool {
+    loop {
+        match commands.try_recv() {
+            Ok(command) => {
+                if handle_recovery_command(
+                    manager,
+                    command,
+                    shutdown,
+                    sink,
+                    projection,
+                    departed_groups,
+                    attachment_aborts,
+                    deferred_commands,
+                )
+                .await
+                {
+                    return true;
+                }
+            }
+            Err(tokio_mpsc::error::TryRecvError::Empty) => return false,
+            Err(tokio_mpsc::error::TryRecvError::Disconnected) => return true,
         }
     }
 }
@@ -935,53 +1483,58 @@ async fn emit_group_snapshot(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
     departed_groups: &DepartedGroups,
-) {
-    match manager.store().groups().await {
-        Ok(groups) => match groups.collect::<Result<Vec<_>, _>>() {
-            Ok(groups) => {
-                sink.emit(Event {
-                    kind: EVENT_GROUP_SYNC_BEGIN,
-                    ..Event::default()
-                });
-                let local_aci = manager.registration_data().service_ids.aci();
-                for (key, group) in groups {
-                    let chat_id = group_identifier(&key);
-                    if departed_groups.contains(&chat_id)
-                        || !group_contains_local_aci(&group, &local_aci)
-                    {
-                        continue;
-                    }
-                    sink.emit(Event {
-                        kind: EVENT_GROUP,
-                        chat_id: Some(chat_id.clone()),
-                        title: Some(group.title),
-                        ..Event::default()
-                    });
-                    for member in group.members {
-                        sink.emit(Event {
-                            kind: EVENT_GROUP_MEMBER,
-                            chat_id: Some(chat_id.clone()),
-                            peer_id: Some(ServiceId::Aci(member.aci).service_id_string()),
-                            value: i32::from(member.role == Role::Administrator),
-                            ..Event::default()
-                        });
-                    }
-                }
-                sink.emit(Event {
-                    kind: EVENT_GROUP_SYNC_END,
-                    ..Event::default()
-                });
-            }
-            Err(error) => sink.emit(Event::error(
-                format!("Could not decode synchronized Signal groups: {error}"),
-                false,
-            )),
-        },
-        Err(error) => sink.emit(Event::error(
-            format!("Could not read synchronized Signal groups: {error}"),
-            false,
-        )),
+) -> Result<(), String> {
+    let groups = manager
+        .store()
+        .groups()
+        .await
+        .map_err(|error| format!("Could not read synchronized Signal groups: {error}"))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| format!("Could not decode synchronized Signal groups: {error}"))?;
+
+    sink.emit(Event {
+        kind: EVENT_GROUP_SYNC_BEGIN,
+        ..Event::default()
+    });
+    let local_aci = manager.registration_data().service_ids.aci();
+    for (key, group) in groups {
+        let chat_id = group_identifier(&key);
+        if departed_groups.contains(&chat_id) || !group_contains_local_aci(&group, &local_aci) {
+            continue;
+        }
+        sink.emit(Event {
+            kind: EVENT_GROUP,
+            chat_id: Some(chat_id.clone()),
+            title: Some(group.title),
+            ..Event::default()
+        });
+        for member in group.members {
+            sink.emit(Event {
+                kind: EVENT_GROUP_MEMBER,
+                chat_id: Some(chat_id.clone()),
+                peer_id: Some(ServiceId::Aci(member.aci).service_id_string()),
+                value: i32::from(member.role == Role::Administrator),
+                ..Event::default()
+            });
+        }
     }
+    sink.emit(Event {
+        kind: EVENT_GROUP_SYNC_END,
+        ..Event::default()
+    });
+    Ok(())
+}
+
+async fn synchronize_and_emit_group_snapshot(
+    manager: &mut Manager<SqliteStore, Registered>,
+    sink: &EventSink,
+    departed_groups: &DepartedGroups,
+) -> Result<(), String> {
+    manager
+        .synchronize_storage_groups()
+        .await
+        .map_err(|error| format!("Could not synchronize Signal groups: {error}"))?;
+    emit_group_snapshot(manager, sink, departed_groups).await
 }
 
 async fn emit_identity_changes(manager: &Manager<SqliteStore, Registered>, sink: &EventSink) {
@@ -1352,7 +1905,9 @@ async fn project_content(
     if !content_is_projectable(&content.body, groups_authoritative) {
         return;
     }
-    let delivery_id = projection.track(content.clone());
+    let Some(delivery_id) = projection.track(content.clone()) else {
+        return;
+    };
     let effect = projection_effect(
         handle_content(manager, content.clone(), delivery_id, sink, departed_groups).await,
     );
@@ -1360,19 +1915,25 @@ async fn project_content(
         return;
     }
 
-    projection.pending.remove(&delivery_id);
     if !effect.mark_projected {
+        projection.release(delivery_id);
         return;
     }
-    if let Err(error) = manager
+    match manager
         .store()
         .mark_message_projected(MESSAGE_PROJECTION_CLIENT, &content)
         .await
     {
-        sink.emit(Event::error(
-            format!("Could not record a handled Signal message: {error}"),
-            false,
-        ));
+        Ok(()) => {
+            projection.complete(delivery_id);
+        }
+        Err(error) => {
+            projection.release(delivery_id);
+            sink.emit(Event::error(
+                format!("Could not record a handled Signal message: {error}"),
+                false,
+            ));
+        }
     }
 }
 
@@ -1420,12 +1981,15 @@ async fn handle_command(
             .await
         {
             Ok(()) => {
-                projection.pending.remove(&delivery_id);
+                projection.complete(delivery_id);
             }
-            Err(error) => sink.emit(Event::error(
-                format!("Could not acknowledge a displayed Signal message: {error}"),
-                false,
-            )),
+            Err(error) => {
+                projection.release(delivery_id);
+                sink.emit(Event::error(
+                    format!("Could not acknowledge a displayed Signal message: {error}"),
+                    false,
+                ));
+            }
         }
         return;
     }
@@ -1827,6 +2391,39 @@ fn should_inline_group_image(
     !outgoing && group && data.is_some_and(|data| inline_group_image_matches(content_type, data))
 }
 
+fn data_message_text(message: &DataMessage) -> String {
+    if let Some(reaction) = &message.reaction
+        && let Some(emoji) = &reaction.emoji
+    {
+        return format!("Reacted with {emoji}");
+    }
+    if let Some(body) = message.body.as_deref().filter(|body| !body.is_empty()) {
+        return body.to_owned();
+    }
+    message
+        .preview
+        .iter()
+        .find_map(|preview| {
+            preview
+                .url
+                .as_deref()
+                .filter(|text| !text.is_empty())
+                .or_else(|| preview.title.as_deref().filter(|text| !text.is_empty()))
+                .or_else(|| {
+                    preview
+                        .description
+                        .as_deref()
+                        .filter(|text| !text.is_empty())
+                })
+        })
+        .unwrap_or_default()
+        .to_owned()
+}
+
+fn regular_message_attachments(message: &DataMessage) -> &[AttachmentPointer] {
+    &message.attachments
+}
+
 fn projected_data_message_text<'a>(
     mut text: String,
     attachments: impl IntoIterator<Item = (Option<&'a str>, bool)>,
@@ -1865,13 +2462,9 @@ async fn emit_data_message(
         return ProjectionDisposition::Complete;
     }
 
-    let mut text = message.body.clone().unwrap_or_default();
-    if let Some(reaction) = &message.reaction
-        && let Some(emoji) = &reaction.emoji
-    {
-        text = format!("Reacted with {emoji}");
-    }
-    if text.is_empty() && message.attachments.is_empty() {
+    let text = data_message_text(message);
+    let attachments = regular_message_attachments(message);
+    if text.is_empty() && attachments.is_empty() {
         return ProjectionDisposition::Complete;
     }
 
@@ -1897,7 +2490,7 @@ async fn emit_data_message(
     let mut downloaded = Vec::new();
     let mut downloaded_bytes = 0usize;
     if !outgoing {
-        for (attachment_index, attachment) in message.attachments.iter().enumerate() {
+        for (attachment_index, attachment) in attachments.iter().enumerate() {
             let declared_size = attachment.size.unwrap_or_default() as usize;
             if declared_size > MAX_ATTACHMENT_BYTES
                 || downloaded_bytes.saturating_add(declared_size) > MAX_MESSAGE_ATTACHMENT_BYTES
@@ -1950,8 +2543,7 @@ async fn emit_data_message(
         .collect();
     let text = projected_data_message_text(
         text,
-        message
-            .attachments
+        attachments
             .iter()
             .enumerate()
             .map(|(attachment_index, attachment)| {
@@ -2647,6 +3239,245 @@ mod tests {
         assert_eq!(retry_delay_ms(1), 10_000);
         assert_eq!(retry_delay_ms(4), 80_000);
         assert_eq!(retry_delay_ms(32), 2_560_000);
+    }
+
+    #[test]
+    fn bounds_and_resets_connection_recovery_backoff() {
+        let mut backoff = RecoveryBackoff::default();
+
+        assert_eq!(
+            std::iter::from_fn(|| backoff.next_delay())
+                .map(|delay| delay.as_secs())
+                .collect::<Vec<_>>(),
+            RECOVERY_RETRY_DELAYS_SECS
+        );
+        assert!(!backoff.has_remaining());
+        assert_eq!(backoff.next_delay(), None);
+
+        backoff.reset();
+        assert!(backoff.has_remaining());
+        assert_eq!(backoff.next_delay(), Some(Duration::ZERO));
+        assert_eq!(backoff.next_delay(), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn preserves_completed_attachment_results_when_aborting_a_generation() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let mut tasks = tokio::task::JoinSet::new();
+            let mut aborts = HashMap::new();
+            let (completed_tx, completed_rx) = oneshot::channel();
+
+            let completed = tasks.spawn(async move {
+                let _ = completed_tx.send(());
+                (41, "sent")
+            });
+            aborts.insert(41, completed);
+            let pending = tasks.spawn(async {
+                futures::future::pending::<()>().await;
+                (42, "sent")
+            });
+            aborts.insert(42, pending);
+
+            completed_rx.await.unwrap();
+            let results = abort_and_drain_tasks(&mut tasks, aborts.values()).await;
+            let mut completed_ids = Vec::new();
+            let mut cancelled = 0;
+            for result in results {
+                match result {
+                    Ok((request_id, _)) => completed_ids.push(request_id),
+                    Err(error) if error.is_cancelled() => cancelled += 1,
+                    Err(error) => panic!("unexpected task failure: {error}"),
+                }
+            }
+
+            assert_eq!(completed_ids, [41]);
+            assert_eq!(cancelled, 1);
+        });
+    }
+
+    #[test]
+    fn cancels_an_attachment_before_deferred_replay() {
+        let mut commands = VecDeque::from([
+            Command::SendMessage {
+                request_id: 40,
+                recipient: "recipient".into(),
+                message: "message".into(),
+            },
+            Command::SendAttachment {
+                request_id: 41,
+                recipient: "recipient".into(),
+                filename: "attachment.txt".into(),
+                content_type: "text/plain".into(),
+                data: b"attachment".to_vec(),
+                group: false,
+            },
+        ]);
+
+        assert!(cancel_deferred_attachment(&mut commands, 41));
+        assert!(!cancel_deferred_attachment(&mut commands, 41));
+        assert!(matches!(
+            commands.pop_front(),
+            Some(Command::SendMessage { request_id: 40, .. })
+        ));
+        assert!(commands.is_empty());
+    }
+
+    #[test]
+    fn fails_deferred_requests_but_drops_ephemeral_typing() {
+        let send = deferred_command_failure(
+            Command::SendGroupMessage {
+                request_id: 41,
+                group_key: "group".into(),
+                message: "message".into(),
+            },
+            "recovery stopped",
+        )
+        .unwrap();
+        let leave = deferred_command_failure(
+            Command::LeaveGroup {
+                request_id: 42,
+                group_key: "group".into(),
+            },
+            "recovery stopped",
+        )
+        .unwrap();
+        let typing = deferred_command_failure(
+            Command::SetTyping {
+                request_id: 43,
+                recipient: "recipient".into(),
+                typing: true,
+            },
+            "recovery stopped",
+        );
+
+        assert_eq!(send.request_id, 41);
+        assert_eq!(send.text.as_deref(), Some("recovery stopped"));
+        assert_eq!(leave.request_id, 42);
+        assert_eq!(leave.chat_id.as_deref(), Some("group"));
+        assert!(typing.is_none());
+    }
+
+    #[test]
+    fn retries_only_transient_receive_start_failures() {
+        let websocket_closing =
+            presage::Error::<presage_store_sqlite::SqliteStoreError>::ServiceError(
+                ServiceError::WsClosing {
+                    reason: "test close",
+                },
+            );
+        let rate_limited = presage::Error::<presage_store_sqlite::SqliteStoreError>::ServiceError(
+            ServiceError::RateLimitExceeded { retry_after: None },
+        );
+        let unauthorized = presage::Error::<presage_store_sqlite::SqliteStoreError>::ServiceError(
+            ServiceError::Unauthorized,
+        );
+        let websocket_unauthorized =
+            presage::Error::<presage_store_sqlite::SqliteStoreError>::ServiceError(
+                ServiceError::WsError(Box::new(reqwest_websocket::Error::Handshake(
+                    reqwest_websocket::HandshakeError::UnexpectedStatusCode("401".parse().unwrap()),
+                ))),
+            );
+        let websocket_unavailable =
+            presage::Error::<presage_store_sqlite::SqliteStoreError>::ServiceError(
+                ServiceError::WsError(Box::new(reqwest_websocket::Error::Handshake(
+                    reqwest_websocket::HandshakeError::UnexpectedStatusCode("503".parse().unwrap()),
+                ))),
+            );
+        let relink = presage::Error::<presage_store_sqlite::SqliteStoreError>::RelinkNecessary;
+
+        assert!(receive_error_is_transient(&websocket_closing));
+        assert!(receive_error_is_transient(&rate_limited));
+        assert!(receive_error_is_transient(&websocket_unavailable));
+        assert!(!receive_error_is_transient(&unauthorized));
+        assert!(!receive_error_is_transient(&websocket_unauthorized));
+        assert!(!receive_error_is_transient(&relink));
+    }
+
+    #[test]
+    fn suppresses_pending_and_recently_completed_projection_identities() {
+        let identity = ProjectionIdentity {
+            sender: "aci:sender".into(),
+            destination: "aci:destination".into(),
+            timestamp_ms: 42,
+        };
+        let mut identities = ProjectionIdentities::default();
+
+        assert!(identities.reserve(identity.clone()));
+        assert!(!identities.reserve(identity.clone()));
+        identities.release_pending(&identity);
+        assert!(identities.reserve(identity.clone()));
+        identities.complete(identity.clone());
+        assert!(!identities.reserve(identity));
+    }
+
+    #[test]
+    fn bounds_completed_projection_identity_memory() {
+        let mut identities = ProjectionIdentities::default();
+
+        for timestamp_ms in 0..=RECENT_PROJECTION_IDENTITY_LIMIT as i64 {
+            let identity = ProjectionIdentity {
+                sender: "aci:sender".into(),
+                destination: "aci:destination".into(),
+                timestamp_ms,
+            };
+            assert!(identities.reserve(identity.clone()));
+            identities.complete(identity);
+        }
+
+        assert_eq!(identities.completed.len(), RECENT_PROJECTION_IDENTITY_LIMIT);
+        assert!(identities.reserve(ProjectionIdentity {
+            sender: "aci:sender".into(),
+            destination: "aci:destination".into(),
+            timestamp_ms: 0,
+        }));
+        assert!(!identities.reserve(ProjectionIdentity {
+            sender: "aci:sender".into(),
+            destination: "aci:destination".into(),
+            timestamp_ms: RECENT_PROJECTION_IDENTITY_LIMIT as i64,
+        }));
+    }
+
+    #[test]
+    fn keeps_link_preview_images_out_of_regular_attachments() {
+        let preview_image = AttachmentPointer {
+            file_name: Some("preview.jpg".into()),
+            content_type: Some("image/jpeg".into()),
+            ..AttachmentPointer::default()
+        };
+        let message = DataMessage {
+            preview: vec![presage::proto::Preview {
+                url: Some("https://example.invalid/article".into()),
+                image: Some(preview_image),
+                ..Default::default()
+            }],
+            ..DataMessage::default()
+        };
+
+        assert!(regular_message_attachments(&message).is_empty());
+        assert_eq!(
+            data_message_text(&message),
+            "https://example.invalid/article"
+        );
+
+        let message = DataMessage {
+            attachments: vec![AttachmentPointer {
+                file_name: Some("actual.pdf".into()),
+                ..AttachmentPointer::default()
+            }],
+            preview: message.preview,
+            ..DataMessage::default()
+        };
+        assert_eq!(regular_message_attachments(&message).len(), 1);
+        assert_eq!(
+            regular_message_attachments(&message)[0]
+                .file_name
+                .as_deref(),
+            Some("actual.pdf")
+        );
     }
 
     #[test]

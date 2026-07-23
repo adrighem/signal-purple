@@ -14,7 +14,8 @@ include(GNUInstallDirs)
 find_package(PkgConfig REQUIRED)
 
 pkg_check_modules(PURPLE REQUIRED IMPORTED_TARGET purple>=2.14)
-pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET glib-2.0>=2.70 gio-2.0 gthread-2.0)
+pkg_check_modules(GLIB REQUIRED IMPORTED_TARGET
+    glib-2.0>=2.70 gio-2.0 gmodule-2.0 gthread-2.0)
 pkg_check_modules(GDK_PIXBUF REQUIRED IMPORTED_TARGET gdk-pixbuf-2.0>=2.42)
 pkg_check_modules(LIBSECRET REQUIRED IMPORTED_TARGET libsecret-1>=0.20)
 
@@ -175,6 +176,7 @@ if(BUILD_TESTING)
     add_executable(plugin-probe
         tests/plugin_probe.c
         src/blist_sync.c
+        src/contact_sync.c
         src/group_sync.c)
     target_compile_features(plugin-probe PRIVATE c_std_11)
     target_compile_definitions(plugin-probe PRIVATE
