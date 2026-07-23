@@ -1,18 +1,22 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
 #include <glib.h>
 #include <glib/gstdio.h>
+#include <gmodule.h>
 #include <purple.h>
 #include <errno.h>
 #include <sys/stat.h>
 
 #include "signal_purple.h"
 
-G_STATIC_ASSERT(SIGNAL_CORE_ABI_VERSION == 6u);
+G_STATIC_ASSERT(SIGNAL_CORE_ABI_VERSION == 7u);
 
 typedef struct {
     PurpleInputFunction function;
     gpointer user_data;
 } InputClosure;
+
+typedef gboolean (*SignalHandleEventFunc)(SignalConnection *connection,
+                                          const SignalEvent *event);
 
 static gboolean
 input_dispatch(GIOChannel *channel, GIOCondition condition, gpointer data)
@@ -92,6 +96,51 @@ autoset_title_after_chat_remove(PurpleConversation *conversation,
 static PurpleConversationUiOps reconnect_conversation_ops = {
     .chat_remove_users = autoset_title_after_chat_remove,
 };
+
+static void
+count_chat_joined(PurpleConversation *conversation, gpointer data)
+{
+    guint *count = data;
+
+    (void)conversation;
+    (*count)++;
+}
+
+static void
+dispatch_group_snapshot(SignalHandleEventFunc handle_event,
+                        SignalConnection *connection)
+{
+    SignalEvent events[] = {
+        {.kind = SIGNAL_EVENT_GROUP_SYNC_BEGIN},
+        {
+            .kind = SIGNAL_EVENT_GROUP,
+            .chat_id = "stable-conversation-one",
+            .title = "Remote title one",
+        },
+        {
+            .kind = SIGNAL_EVENT_GROUP_MEMBER,
+            .chat_id = "stable-conversation-one",
+            .peer_id = "aci:11111111-1111-4111-8111-111111111111",
+        },
+        {
+            .kind = SIGNAL_EVENT_GROUP,
+            .chat_id = "stable-conversation-two",
+            .title = "Remote title two",
+        },
+        {
+            .kind = SIGNAL_EVENT_GROUP,
+            .chat_id = "stable-conversation-legacy",
+            .title = "Remote legacy title",
+        },
+        {.kind = SIGNAL_EVENT_GROUP_SYNC_END},
+    };
+
+    for (guint index = 0; index < G_N_ELEMENTS(events); index++) {
+        events[index].abi_version = SIGNAL_CORE_ABI_VERSION;
+        events[index].struct_size = sizeof(SignalEvent);
+        g_assert_true(handle_event(connection, &events[index]));
+    }
+}
 
 typedef struct {
     SignalStatus status;
@@ -520,6 +569,11 @@ test_group_conversation_identity(PurplePlugin *plugin,
         .state = PURPLE_CONNECTED,
         .account = account,
     };
+    PurpleConnection reconnected_gc = {
+        .prpl = plugin,
+        .state = PURPLE_CONNECTED,
+        .account = account,
+    };
     SignalConnection connection = {
         .gc = &gc,
         .group_ids_by_key = g_hash_table_new_full(
@@ -533,10 +587,13 @@ test_group_conversation_identity(PurplePlugin *plugin,
             (GDestroyNotify)g_ptr_array_unref),
         .active_group_keys = g_hash_table_new_full(
             g_str_hash, g_str_equal, g_free, NULL),
+        .pending_group_joins = g_hash_table_new_full(
+            g_str_hash, g_str_equal, g_free, NULL),
         .pending_group_leaves = g_hash_table_new_full(
             g_str_hash, g_str_equal, g_free, NULL),
         .group_leave_requests = g_ptr_array_new(),
         .next_group_id = 1,
+        .group_snapshot_complete = TRUE,
     };
     PurpleChat *first;
     PurpleChat *legacy;
@@ -548,9 +605,18 @@ test_group_conversation_identity(PurplePlugin *plugin,
     FakeGroupSender group_sender = {
         .status = SIGNAL_STATUS_OK,
     };
+    union {
+        gpointer pointer;
+        SignalHandleEventFunc function;
+    } handle_event = {0};
+    guint reconnect_joined = 0;
 
     purple_account_set_connection(account, &gc);
     purple_connection_set_protocol_data(&gc, &connection);
+    signal_contact_sync_init(&connection.group_sync);
+    g_assert_true(g_module_symbol((GModule *)plugin->handle,
+                                  "signal_handle_event",
+                                  &handle_event.pointer));
 
     first = add_group_chat(account, group, "stable-conversation-one", TRUE);
     second = add_group_chat(account, group, "stable-conversation-two", FALSE);
@@ -709,6 +775,23 @@ test_group_conversation_identity(PurplePlugin *plugin,
                     ==, -ENOTCONN);
     g_assert_cmpuint(group_sender.calls, ==, 4);
     g_assert_cmpuint(group_echo_writes, ==, 1);
+
+    SignalEvent recovering = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_RECOVERING,
+    };
+    g_assert_true(handle_event.function(&connection, &recovering));
+    g_assert_false(connection.group_snapshot_complete);
+    g_assert_null(protocol->blist_node_menu(PURPLE_BLIST_NODE(first)));
+    g_assert_cmpint(protocol->chat_send(
+                        &gc, 1, "blocked during recovery",
+                        PURPLE_MESSAGE_SEND),
+                    ==, -ENOENT);
+    g_assert_false(protocol->chat_can_receive_file(&gc, 1));
+    g_assert_cmpuint(group_sender.calls, ==, 4);
+    connection.group_snapshot_complete = TRUE;
+
     purple_conversation_set_ui_ops(first_conversation, NULL);
     connection.core = NULL;
     connection.send_group_message = NULL;
@@ -724,17 +807,111 @@ test_group_conversation_identity(PurplePlugin *plugin,
     g_assert_cmpstr(purple_conversation_get_title(second_conversation), ==,
                     "Shared Signal title");
 
+    serv_got_chat_left(&gc, 1);
+    serv_got_chat_left(&gc, 2);
+    serv_got_chat_left(&gc, 3);
+    g_assert_null(gc.buddy_chats);
+    g_assert_true(purple_conv_chat_has_left(
+        PURPLE_CONV_CHAT(first_conversation)));
+    g_assert_true(purple_conv_chat_has_left(
+        PURPLE_CONV_CHAT(second_conversation)));
+    g_assert_true(purple_conv_chat_has_left(
+        PURPLE_CONV_CHAT(legacy_conversation)));
+
+    connection.gc = &reconnected_gc;
+    connection.group_snapshot_complete = FALSE;
+    /* Reuse the old second conversation's numeric ID. Stable group identity,
+     * rather than a connection-local ID, must select the first conversation. */
+    connection.next_group_id = 2;
+    g_hash_table_remove_all(connection.group_ids_by_key);
+    g_hash_table_remove_all(connection.group_keys_by_id);
+    purple_account_set_connection(account, &reconnected_gc);
+    purple_connection_set_protocol_data(&gc, NULL);
+    purple_connection_set_protocol_data(&reconnected_gc, &connection);
+    purple_signal_connect(purple_conversations_get_handle(), "chat-joined",
+                          &reconnect_joined,
+                          PURPLE_CALLBACK(count_chat_joined),
+                          &reconnect_joined);
+
+    protocol->join_chat(&reconnected_gc, purple_chat_get_components(first));
+    protocol->join_chat(&reconnected_gc, purple_chat_get_components(first));
+    g_assert_cmpuint(g_hash_table_size(connection.pending_group_joins), ==, 1);
+    g_assert_true(purple_conv_chat_has_left(
+        PURPLE_CONV_CHAT(first_conversation)));
+    g_assert_true(signal_group_sync_defer_join(
+        connection.pending_group_joins, FALSE, "inactive-after-sync"));
+
+    member_update_title_autosets = 0;
+    purple_conversation_set_ui_ops(first_conversation,
+                                   &reconnect_conversation_ops);
+    dispatch_group_snapshot(handle_event.function, &connection);
+
+    g_assert_cmpuint(g_hash_table_size(connection.pending_group_joins), ==, 0);
+    g_assert_true(connection.group_snapshot_complete);
+    g_assert_false(purple_conv_chat_has_left(
+        PURPLE_CONV_CHAT(first_conversation)));
+    g_assert_true(signal_group_sync_lookup_conversation(
+                      account, "stable-conversation-one") ==
+                  first_conversation);
+    g_assert_cmpint(purple_conv_chat_get_id(
+                        PURPLE_CONV_CHAT(first_conversation)),
+                    ==, 2);
+    g_assert_true(purple_conv_chat_has_left(
+        PURPLE_CONV_CHAT(second_conversation)));
+    g_assert_true(purple_conv_chat_find_user(
+        PURPLE_CONV_CHAT(first_conversation),
+        "aci:11111111-1111-4111-8111-111111111111"));
+    /* Rejoining clears the old roster once, then the authoritative refresh
+     * replaces it. A pre-rejoin refresh of the left conversation adds a third
+     * callback and regresses the guard this test covers. */
+    g_assert_cmpuint(member_update_title_autosets, ==, 2);
+    g_assert_cmpuint(g_slist_length(reconnected_gc.buddy_chats), ==, 1);
+    g_assert_cmpuint(reconnect_joined, ==, 1);
+
+    reset_group_echo_capture();
+    group_sender.status = SIGNAL_STATUS_OK;
+    group_sender.calls = 0;
+    connection.core = (SignalCore *)&group_sender;
+    connection.send_group_message = fake_send_group_message;
+    connection.next_request_id = 51;
+    purple_conversation_set_ui_ops(first_conversation,
+                                   &group_echo_conversation_ops);
+    purple_conv_chat_send_with_flags(PURPLE_CONV_CHAT(first_conversation),
+                                     "Recovered group message",
+                                     PURPLE_MESSAGE_NO_LOG);
+    g_assert_cmpuint(group_sender.calls, ==, 1);
+    g_assert_cmpstr(group_sender.group_key, ==, "stable-conversation-one");
+    g_assert_cmpuint(group_echo_writes, ==, 1);
+    g_assert_true(group_echo_conversation == first_conversation);
+
+    purple_conversation_set_ui_ops(first_conversation, NULL);
+    connection.core = NULL;
+    connection.send_group_message = NULL;
+    g_clear_pointer(&group_sender.group_key, g_free);
+    g_clear_pointer(&group_sender.message, g_free);
+    reset_group_echo_capture();
+
+    dispatch_group_snapshot(handle_event.function, &connection);
+    g_assert_cmpuint(g_slist_length(reconnected_gc.buddy_chats), ==, 1);
+    g_assert_cmpint(purple_conv_chat_get_id(
+                        PURPLE_CONV_CHAT(first_conversation)),
+                    ==, 2);
+    g_assert_cmpuint(reconnect_joined, ==, 1);
+    purple_signals_disconnect_by_handle(&reconnect_joined);
+
     purple_conversation_destroy(legacy_conversation);
     purple_conversation_destroy(second_conversation);
     purple_conversation_destroy(first_conversation);
-    g_assert_null(gc.buddy_chats);
+    g_assert_null(reconnected_gc.buddy_chats);
     purple_blist_remove_chat(legacy);
     purple_blist_remove_chat(second);
     purple_blist_remove_chat(first);
     purple_account_set_connection(account, NULL);
-    purple_connection_set_protocol_data(&gc, NULL);
+    purple_connection_set_protocol_data(&reconnected_gc, NULL);
+    signal_contact_sync_clear(&connection.group_sync);
     g_ptr_array_unref(connection.group_leave_requests);
     g_hash_table_unref(connection.pending_group_leaves);
+    g_hash_table_unref(connection.pending_group_joins);
     g_hash_table_unref(connection.active_group_keys);
     g_hash_table_unref(connection.group_members_by_key);
     g_hash_table_unref(connection.group_titles_by_key);

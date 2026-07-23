@@ -456,7 +456,8 @@ signal_group_title(SignalConnection *connection, const char *group_key)
 static gboolean
 signal_group_is_active(SignalConnection *connection, const char *group_key)
 {
-    return connection != NULL && group_key != NULL &&
+    return connection != NULL && connection->group_snapshot_complete &&
+           group_key != NULL &&
            g_hash_table_contains(connection->active_group_keys, group_key);
 }
 
@@ -485,14 +486,12 @@ static void
 signal_update_open_group_title(SignalConnection *connection,
                                const char *group_key)
 {
-    gpointer raw_id;
+    PurpleAccount *account;
     PurpleConversation *conversation;
 
-    if (!g_hash_table_lookup_extended(connection->group_ids_by_key, group_key,
-                                      NULL, &raw_id))
-        return;
-    conversation = purple_find_chat(connection->gc,
-                                    (int)GPOINTER_TO_UINT(raw_id));
+    account = purple_connection_get_account(connection->gc);
+    conversation =
+        signal_group_sync_lookup_conversation(account, group_key);
     if (conversation != NULL)
         purple_conversation_set_title(
             conversation, signal_group_display_title(connection, group_key));
@@ -524,10 +523,14 @@ signal_deactivate_group(SignalConnection *connection, const char *group_key,
     account = purple_connection_get_account(connection->gc);
     if (g_hash_table_lookup_extended(connection->group_ids_by_key, group_key,
                                      NULL, &raw_id)) {
-        guint id = GPOINTER_TO_UINT(raw_id);
+        PurpleConversation *conversation =
+            signal_group_sync_lookup_conversation(account, group_key);
 
-        if (purple_find_chat(connection->gc, (int)id) != NULL)
-            serv_got_chat_left(connection->gc, (int)id);
+        if (conversation != NULL &&
+            !purple_conv_chat_has_left(PURPLE_CONV_CHAT(conversation)))
+            serv_got_chat_left(
+                connection->gc,
+                purple_conv_chat_get_id(PURPLE_CONV_CHAT(conversation)));
         g_hash_table_remove(connection->group_keys_by_id, raw_id);
         g_hash_table_remove(connection->group_ids_by_key, group_key);
     }
@@ -535,6 +538,7 @@ signal_deactivate_group(SignalConnection *connection, const char *group_key,
     if (remove_saved_chat)
         signal_group_sync_remove_managed_chats(account, group_key);
     g_hash_table_remove(connection->active_group_keys, group_key);
+    g_hash_table_remove(connection->pending_group_joins, group_key);
     g_hash_table_remove(connection->pending_group_leaves, group_key);
     g_hash_table_remove(connection->group_titles_by_key, group_key);
     g_hash_table_remove(connection->group_members_by_key, group_key);
@@ -729,6 +733,7 @@ signal_end_contact_sync(SignalConnection *connection)
 static void
 signal_begin_group_sync(SignalConnection *connection)
 {
+    connection->group_snapshot_complete = FALSE;
     signal_contact_sync_begin(&connection->group_sync);
     g_hash_table_remove_all(connection->group_members_by_key);
     connection->group_sync_groups = 0;
@@ -803,18 +808,17 @@ static void
 signal_refresh_group_members(SignalConnection *connection,
                              const char *group_key)
 {
-    gpointer raw_id;
+    PurpleAccount *account;
     PurpleConversation *conversation;
     GPtrArray *members;
     GList *users = NULL;
     GList *flags = NULL;
 
-    if (!g_hash_table_lookup_extended(connection->group_ids_by_key, group_key,
-                                      NULL, &raw_id))
-        return;
-    conversation = purple_find_chat(connection->gc,
-                                    (int)GPOINTER_TO_UINT(raw_id));
-    if (conversation == NULL)
+    account = purple_connection_get_account(connection->gc);
+    conversation =
+        signal_group_sync_lookup_conversation(account, group_key);
+    if (conversation == NULL ||
+        purple_conv_chat_has_left(PURPLE_CONV_CHAT(conversation)))
         return;
 
     purple_conv_chat_clear_users(PURPLE_CONV_CHAT(conversation));
@@ -854,6 +858,7 @@ signal_end_group_sync(SignalConnection *connection)
     gpointer member_group_key;
     g_autoptr(GPtrArray) stale_groups =
         g_ptr_array_new_with_free_func(g_free);
+    g_autoptr(GPtrArray) pending_joins = NULL;
 
     if (!connection->group_sync.active)
         return;
@@ -909,6 +914,12 @@ signal_end_group_sync(SignalConnection *connection)
     g_hash_table_iter_init(&member_iter, connection->group_members_by_key);
     while (g_hash_table_iter_next(&member_iter, &member_group_key, NULL))
         signal_refresh_group_members(connection, member_group_key);
+    connection->group_snapshot_complete = TRUE;
+    pending_joins = signal_group_sync_take_active_joins(
+        connection->pending_group_joins, connection->active_group_keys);
+    for (guint index = 0; index < pending_joins->len; index++)
+        signal_open_group(connection, g_ptr_array_index(pending_joins, index),
+                          NULL);
     purple_debug_info(
         "signal-purple",
         "Applied group snapshot: %u groups, %u created, %u removed\n",
@@ -920,13 +931,18 @@ static PurpleConversation *
 signal_open_group(SignalConnection *connection, const char *group_key,
                   const char *title)
 {
+    PurpleAccount *account;
     PurpleConversation *conversation;
     guint id = signal_group_id(connection, group_key, title);
 
-    conversation = purple_find_chat(connection->gc, (int)id);
+    account = purple_connection_get_account(connection->gc);
+    g_hash_table_remove(connection->pending_group_joins, group_key);
+    conversation =
+        signal_group_sync_lookup_conversation(account, group_key);
     /* Purple uses the conversation name to match saved chats. Keep that
      * identity stable and put the mutable, human-readable name in the title. */
-    if (conversation == NULL)
+    if (conversation == NULL ||
+        purple_conv_chat_has_left(PURPLE_CONV_CHAT(conversation)))
         conversation = serv_got_joined_chat(connection->gc, (int)id,
                                              group_key);
     purple_conversation_set_title(
@@ -1018,10 +1034,14 @@ signal_conversation_updated(PurpleConversation *conversation,
         direct_peer = purple_conversation_get_name(conversation);
     } else if (purple_conversation_get_type(conversation) ==
                PURPLE_CONV_TYPE_CHAT) {
-        group_key = g_hash_table_lookup(
-            connection->group_keys_by_id,
-            GINT_TO_POINTER(purple_conv_chat_get_id(
-                PURPLE_CONV_CHAT(conversation))));
+        const char *conversation_name =
+            purple_conversation_get_name(conversation);
+
+        if (conversation_name != NULL &&
+            !purple_conv_chat_has_left(PURPLE_CONV_CHAT(conversation)) &&
+            g_hash_table_contains(connection->group_ids_by_key,
+                                  conversation_name))
+            group_key = conversation_name;
     }
 
     for (guint index = connection->pending_reads->len; index > 0; index--) {
@@ -1110,7 +1130,7 @@ signal_group_left(SignalConnection *connection, const SignalEvent *event)
                        "The group was left on Signal and removed from the chat list.");
 }
 
-static gboolean
+gboolean
 signal_handle_event(SignalConnection *connection, const SignalEvent *event)
 {
     switch ((SignalEventKind)event->kind) {
@@ -1125,6 +1145,11 @@ signal_handle_event(SignalConnection *connection, const SignalEvent *event)
         purple_connection_update_progress(connection->gc,
                                           "Signal messages synchronized", 2, 3);
         purple_connection_set_state(connection->gc, PURPLE_CONNECTED);
+        break;
+    case SIGNAL_EVENT_RECOVERING:
+        connection->group_snapshot_complete = FALSE;
+        purple_debug_info("signal-purple",
+                          "Signal connection interrupted; recovering automatically\n");
         break;
     case SIGNAL_EVENT_CONTACT_SYNC_BEGIN:
         signal_begin_contact_sync(connection);
@@ -1187,9 +1212,15 @@ signal_handle_event(SignalConnection *connection, const SignalEvent *event)
     case SIGNAL_EVENT_ERROR:
         if ((event->flags & SIGNAL_EVENT_FLAG_FATAL) != 0) {
             purple_connection_error_reason(
-                connection->gc, PURPLE_CONNECTION_ERROR_NETWORK_ERROR,
+                connection->gc, PURPLE_CONNECTION_ERROR_OTHER_ERROR,
                 event->text != NULL ? event->text : "Signal backend failed");
             return FALSE;
+        }
+        if ((event->flags & SIGNAL_EVENT_FLAG_TRANSIENT) != 0) {
+            purple_debug_warning(
+                "signal-purple", "Transient Signal operation failed: %s\n",
+                event->text != NULL ? event->text : "unknown error");
+            break;
         }
         if (signal_group_leave_failed(connection, event)) {
             purple_debug_warning("signal-purple",
@@ -1338,6 +1369,8 @@ signal_login(PurpleAccount *account)
         g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_ptr_array_unref);
     connection->active_group_keys = g_hash_table_new_full(
         g_str_hash, g_str_equal, g_free, NULL);
+    connection->pending_group_joins = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, NULL);
     connection->pending_group_leaves = g_hash_table_new_full(
         g_str_hash, g_str_equal, g_free, NULL);
     connection->identity_changes_seen = g_hash_table_new_full(
@@ -1377,6 +1410,7 @@ signal_login(PurpleAccount *account)
         g_hash_table_unref(connection->group_titles_by_key);
         g_hash_table_unref(connection->group_members_by_key);
         g_hash_table_unref(connection->active_group_keys);
+        g_hash_table_unref(connection->pending_group_joins);
         g_hash_table_unref(connection->pending_group_leaves);
         g_hash_table_unref(connection->identity_changes_seen);
         g_hash_table_unref(connection->pending_identity_changes);
@@ -1460,6 +1494,7 @@ signal_close(PurpleConnection *gc)
     g_hash_table_unref(connection->group_titles_by_key);
     g_hash_table_unref(connection->group_members_by_key);
     g_hash_table_unref(connection->active_group_keys);
+    g_hash_table_unref(connection->pending_group_joins);
     g_hash_table_unref(connection->pending_group_leaves);
     g_hash_table_unref(connection->identity_changes_seen);
     g_hash_table_unref(connection->pending_identity_changes);
@@ -1827,6 +1862,15 @@ signal_join_chat(PurpleConnection *gc, GHashTable *components)
     if (group_key == NULL)
         group_key = g_hash_table_lookup(components,
                                         SIGNAL_LEGACY_GROUP_COMPONENT_KEY);
+    if (group_key == NULL || group_key[0] == '\0')
+        return;
+    if (signal_group_sync_defer_join(connection->pending_group_joins,
+                                     connection->group_snapshot_complete,
+                                     group_key)) {
+        purple_debug_info("signal-purple",
+                          "Deferred Signal group join until synchronization completes\n");
+        return;
+    }
     if (!signal_group_can_send(connection, group_key)) {
         purple_notify_error(connection, "Signal group unavailable",
                             "This Signal group is inactive or being left",
@@ -1846,6 +1890,7 @@ int
 signal_chat_send(PurpleConnection *gc, int id, const char *message,
                  PurpleMessageFlags flags)
 {
+    PurpleAccount *account;
     SignalConnection *connection = signal_connection_data(gc);
     PurpleConversation *conversation;
     const char *group_key;
@@ -1860,6 +1905,12 @@ signal_chat_send(PurpleConnection *gc, int id, const char *message,
                                     GINT_TO_POINTER(id));
     if (!signal_group_can_send(connection, group_key))
         return -ENOENT;
+    account = purple_connection_get_account(gc);
+    conversation =
+        signal_group_sync_lookup_conversation(account, group_key);
+    if (conversation == NULL ||
+        purple_conv_chat_has_left(PURPLE_CONV_CHAT(conversation)))
+        return -ENOENT;
 
     plain = signal_plaintext_from_markup(message);
     if (plain == NULL)
@@ -1867,9 +1918,7 @@ signal_chat_send(PurpleConnection *gc, int id, const char *message,
     if (strlen(plain) > SIGNAL_MAX_MESSAGE_BYTES)
         return -E2BIG;
 
-    conversation = purple_find_chat(gc, id);
-    if (conversation != NULL)
-        purple_conversation_set_logging(conversation, FALSE);
+    purple_conversation_set_logging(conversation, FALSE);
 
     send_group_message = connection->send_group_message;
     if (send_group_message == NULL)

@@ -28,6 +28,7 @@ typedef struct {
     GHashTable *group_titles_by_key;
     GHashTable *group_members_by_key;
     GHashTable *active_group_keys;
+    GHashTable *pending_group_joins;
     GHashTable *pending_group_leaves;
     GHashTable *identity_changes_seen;
     GHashTable *pending_identity_changes;
@@ -46,6 +47,7 @@ typedef struct {
     guint group_sync_created;
     guint group_sync_removed;
     guint64 next_request_id;
+    gboolean group_snapshot_complete;
     gboolean closing;
 } SignalConnection;
 
@@ -65,6 +67,8 @@ GHashTable *signal_chat_info_defaults(PurpleConnection *gc,
                                       const char *chat_name);
 void signal_join_chat(PurpleConnection *gc, GHashTable *components);
 char *signal_get_chat_name(GHashTable *components);
+gboolean signal_handle_event(SignalConnection *connection,
+                             const SignalEvent *event);
 
 void signal_chat_leave(PurpleConnection *gc, int id);
 int signal_chat_send(PurpleConnection *gc, int id, const char *message,
