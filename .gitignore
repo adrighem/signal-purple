@@ -8,6 +8,8 @@
 /debian/cargo-target/
 /debian/signal-purple/
 /.cache/
+__pycache__/
+*.py[cod]
 compile_commands.json
 *.swp
 *~

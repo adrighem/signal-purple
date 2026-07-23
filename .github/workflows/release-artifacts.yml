@@ -1,0 +1,476 @@
+name: Release artifacts
+
+on:
+  release:
+    types: [published]
+  repository_dispatch:
+    types: [prepare-release]
+
+permissions: {}
+
+concurrency:
+  group: >-
+    release-artifacts-${{
+      github.event_name == 'repository_dispatch'
+      && github.event.client_payload.tag
+      || github.event.release.tag_name
+    }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_TAG: >-
+    ${{
+      github.event_name == 'repository_dispatch'
+      && github.event.client_payload.tag
+      || github.event.release.tag_name
+    }}
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+    permissions:
+      contents: read
+    outputs:
+      artifact-name: ${{ steps.release.outputs.artifact-name }}
+      commit: ${{ steps.release.outputs.commit }}
+      tag-object: ${{ steps.release.outputs.tag-object }}
+      version: ${{ steps.release.outputs.version }}
+    env:
+      DEBIAN_SNAPSHOT: 20260722T000000Z
+      RELEASE_KEY_FINGERPRINT: B3C0B75FA3B33AC278738C5CB1798BCDA76054BD
+      SYFT_ARCHIVE: syft_1.49.0_linux_amd64.tar.gz
+      SYFT_ARCHIVE_SHA256: 7aa2f03ee92739cf643279ba3990548b9925d4e22cae13f46831ee62821147fe
+    steps:
+      - name: Validate trusted workflow invocation
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          if ! printf '%s\n' "$RELEASE_TAG" \
+              | grep -Eq '^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
+            printf 'invalid release tag: %s\n' "$RELEASE_TAG" >&2
+            exit 1
+          fi
+          if [ "$EVENT_NAME" = repository_dispatch ]; then
+            test "$GITHUB_REF" = refs/heads/main
+          else
+            test "$EVENT_NAME" = release
+          fi
+
+      - name: Check out signed tag
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: refs/tags/${{ env.RELEASE_TAG }}
+
+      - name: Verify signed release input
+        id: release
+        shell: bash
+        run: |
+          set -euo pipefail
+          key_listing="$(
+            gpg --batch --with-colons --show-keys \
+              keys/release-signing-key.asc
+          )"
+          test "$(
+            awk -F: '$1 == "pub" { count++ } END { print count + 0 }' \
+              <<<"$key_listing"
+          )" -eq 1
+          actual_fingerprint="$(
+            awk -F: '$1 == "fpr" { print $10; exit }' <<<"$key_listing"
+          )"
+          test "$actual_fingerprint" = "$RELEASE_KEY_FINGERPRINT"
+
+          gpg_home="$RUNNER_TEMP/release-gnupg"
+          mkdir -m 0700 "$gpg_home"
+          gpg --batch --homedir "$gpg_home" \
+            --import keys/release-signing-key.asc
+          verification="$(
+            GNUPGHOME="$gpg_home" \
+              git verify-tag --raw "$RELEASE_TAG" 2>&1
+          )"
+          printf '%s\n' "$verification"
+          test "$(
+            awk '$2 == "VALIDSIG" { count++ } END { print count + 0 }' \
+              <<<"$verification"
+          )" -eq 1
+          test "$(
+            awk '$2 == "VALIDSIG" { print $3 }' <<<"$verification"
+          )" = "$RELEASE_KEY_FINGERPRINT"
+          test "$(
+            awk '$2 == "VALIDSIG" { print $NF }' <<<"$verification"
+          )" = "$RELEASE_KEY_FINGERPRINT"
+
+          tag_object="$(git rev-parse --verify --end-of-options \
+            "$RELEASE_TAG^{tag}")"
+          commit="$(git rev-parse --verify --end-of-options \
+            "$RELEASE_TAG^{commit}")"
+          test "$(git rev-parse HEAD)" = "$commit"
+          if [ "$GITHUB_EVENT_NAME" = release ]; then
+            test "$GITHUB_SHA" = "$commit"
+          else
+            test "$GITHUB_EVENT_NAME" = repository_dispatch
+          fi
+          git fetch --no-tags origin \
+            '+refs/heads/main:refs/remotes/origin/main'
+          git merge-base --is-ancestor "$commit" origin/main
+
+          version="$(cat version.txt)"
+          test "$RELEASE_TAG" = "v$version"
+          test "$(jq -er '.["."]' .release-please-manifest.json)" = "$version"
+          test "$(
+            python3 -c \
+              'import tomllib; print(tomllib.load(open("rust/signal-core/Cargo.toml", "rb"))["package"]["version"])'
+          )" = "$version"
+          test "$(
+            python3 -c \
+              'import tomllib; data=tomllib.load(open("rust/signal-core/Cargo.lock", "rb")); print(next(p["version"] for p in data["package"] if p["name"] == "signal-core"))'
+          )" = "$version"
+          test "$(
+            awk '$1 == "version:" { print $2; exit }' CITATION.cff
+          )" = "$version"
+
+          artifact_name="signal-purple-release-$version-$commit"
+          {
+            printf 'artifact-name=%s\n' "$artifact_name"
+            printf 'commit=%s\n' "$commit"
+            printf 'tag-object=%s\n' "$tag_object"
+            printf 'version=%s\n' "$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build pinned Debian release environment
+        run: |
+          docker build --pull \
+            --build-arg "DEBIAN_SNAPSHOT=$DEBIAN_SNAPSHOT" \
+            --file .github/release/Dockerfile \
+            --tag "signal-purple-release:${{ steps.release.outputs.commit }}" \
+            .github/release
+
+      - name: Create source archives independently
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="${{ steps.release.outputs.commit }}"
+          version="${{ steps.release.outputs.version }}"
+          image="signal-purple-release:$commit"
+          source_root="$RUNNER_TEMP/release-source"
+          archive_name="signal-purple_${version}.orig.tar.xz"
+          mkdir -p "$source_root/a" "$source_root/b"
+
+          for run in a b; do
+            docker run --rm \
+              --env CARGO_NET_OFFLINE=false \
+              --env GIT_CONFIG_COUNT=1 \
+              --env GIT_CONFIG_KEY_0=safe.directory \
+              --env GIT_CONFIG_VALUE_0=/workspace \
+              --env HOME=/tmp/release-home \
+              --env "RELEASE_COMMIT=$commit" \
+              --env "SOURCE_ARCHIVE=$archive_name" \
+              --mount \
+                "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+              --mount \
+                "type=bind,src=$source_root/$run,dst=/output" \
+              "$image" \
+              sh -c \
+                'mkdir -p "$HOME"; /workspace/scripts/make-source-archive.sh "$RELEASE_COMMIT" "/output/$SOURCE_ARCHIVE"'
+          done
+
+          xz --test \
+            "$source_root/a/$archive_name" \
+            "$source_root/b/$archive_name"
+          cmp \
+            "$source_root/a/$archive_name" \
+            "$source_root/b/$archive_name"
+
+      - name: Build packages twice without network access
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="${{ steps.release.outputs.commit }}"
+          version="${{ steps.release.outputs.version }}"
+          image="signal-purple-release:$commit"
+          source_root="$RUNNER_TEMP/release-source"
+          archive_name="signal-purple_${version}.orig.tar.xz"
+          artifact_directory="$GITHUB_WORKSPACE/dist/release"
+          mkdir -p "$artifact_directory"
+
+          docker run --rm --network none \
+            --env GIT_CONFIG_COUNT=1 \
+            --env GIT_CONFIG_KEY_0=safe.directory \
+            --env GIT_CONFIG_VALUE_0=/workspace \
+            --mount \
+              "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --mount \
+              "type=bind,src=$source_root,dst=/source,readonly" \
+            --mount \
+              "type=bind,src=$artifact_directory,dst=/output" \
+            "$image" \
+            /workspace/scripts/build-release-artifacts.sh \
+              "$commit" /output "$version-1" \
+              "/source/a/$archive_name" "/source/b/$archive_name"
+
+      - name: Install and probe package without network access
+        shell: bash
+        run: |
+          set -euo pipefail
+          commit="${{ steps.release.outputs.commit }}"
+          version="${{ steps.release.outputs.version }}"
+          image="signal-purple-release:$commit"
+          artifact_directory="$GITHUB_WORKSPACE/dist/release"
+          docker run --rm --network none \
+            --mount \
+              "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+            --mount \
+              "type=bind,src=$artifact_directory,dst=/artifacts,readonly" \
+            "$image" \
+            /workspace/scripts/smoke-test-release-package.sh \
+              "$version" /artifacts
+
+      - name: Extract vendored source for SBOM
+        id: sbom-source
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.release.outputs.version }}"
+          source_root="$RUNNER_TEMP/release-sbom-source"
+          mkdir "$source_root"
+          tar -xJf \
+            "dist/release/signal-purple_${version}.orig.tar.xz" \
+            -C "$source_root"
+          printf 'path=%s/signal-purple-%s\n' \
+            "$source_root" "$version" >> "$GITHUB_OUTPUT"
+
+      - name: Generate SPDX SBOM with checksum-pinned Syft
+        shell: bash
+        env:
+          SBOM_SOURCE: ${{ steps.sbom-source.outputs.path }}
+        run: |
+          set -euo pipefail
+          archive="$RUNNER_TEMP/$SYFT_ARCHIVE"
+          tool_directory="$RUNNER_TEMP/syft"
+          curl --fail --location --proto '=https' --tlsv1.2 \
+            --retry 5 --retry-all-errors \
+            --output "$archive" \
+            "https://github.com/anchore/syft/releases/download/v1.49.0/$SYFT_ARCHIVE"
+          printf '%s  %s\n' "$SYFT_ARCHIVE_SHA256" "$archive" \
+            | sha256sum --check
+          mkdir "$tool_directory"
+          tar -xzf "$archive" -C "$tool_directory" syft
+          test "$(
+            "$tool_directory/syft" version \
+              | awk '$1 == "Version:" { print $2 }'
+          )" = 1.49.0
+          "$tool_directory/syft" scan "dir:$SBOM_SOURCE" \
+            --config .github/release/syft.yaml \
+            --output "spdx-json=$RUNNER_TEMP/signal-purple-raw.spdx.json"
+
+      - name: Normalize and verify release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.release.outputs.version }}"
+          commit="${{ steps.release.outputs.commit }}"
+          epoch="$(git show -s --format=%ct "$commit")"
+          sbom="dist/release/signal-purple-${version}.spdx.json"
+          scripts/normalize-spdx.py \
+            "$RUNNER_TEMP/signal-purple-raw.spdx.json" \
+            "$sbom" "$version" "$commit" "$epoch" "$GITHUB_REPOSITORY"
+          if grep -F "$RUNNER_TEMP" "$sbom" \
+              || grep -F "$GITHUB_WORKSPACE" "$sbom"; then
+            printf '%s\n' 'SBOM contains a runner-specific path' >&2
+            exit 1
+          fi
+          scripts/write-release-checksums.sh "$version" dist/release
+
+      - name: Upload validated artifacts for trusted jobs
+        uses: actions/upload-artifact@b7c566a772e6b6bfb58ed0dc250532a479d7789f # v6.0.0
+        with:
+          compression-level: 0
+          if-no-files-found: error
+          name: ${{ steps.release.outputs.artifact-name }}
+          path: |
+            dist/release/SHA256SUMS
+            dist/release/signal-purple_${{ steps.release.outputs.version }}.orig.tar.xz
+            dist/release/signal-purple_${{ steps.release.outputs.version }}-1_amd64.deb
+            dist/release/signal-purple-dbgsym_${{ steps.release.outputs.version }}-1_amd64.deb
+            dist/release/signal-purple-${{ steps.release.outputs.version }}.spdx.json
+          retention-days: 7
+
+  attest:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      artifact-metadata: write
+      attestations: write
+      contents: read
+      id-token: write
+    steps:
+      - name: Download validated release artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+          path: dist/release
+
+      - name: Verify artifact checksums
+        working-directory: dist/release
+        run: sha256sum --check SHA256SUMS
+
+      - name: Attest release artifact provenance
+        uses: actions/attest-build-provenance@0f67c3f4856b2e3261c31976d6725780e5e4c373 # v4.1.1
+        with:
+          subject-checksums: dist/release/SHA256SUMS
+
+  publish:
+    needs: [build, attest]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      actions: read
+      contents: write
+    steps:
+      - name: Download attested release artifacts
+        uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: ${{ needs.build.outputs.artifact-name }}
+          path: dist/release
+
+      - name: Verify artifact checksums
+        working-directory: dist/release
+        run: sha256sum --check SHA256SUMS
+
+      - name: Create draft or populate published release
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          EXPECTED_COMMIT: ${{ needs.build.outputs.commit }}
+          EXPECTED_RELEASE_ID: ${{ github.event.release.id }}
+          EXPECTED_TAG_OBJECT: ${{ needs.build.outputs.tag-object }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          ref_json="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG"
+          )"
+          test "$(jq -r '.object.type' <<<"$ref_json")" = tag
+          remote_tag_object="$(jq -r '.object.sha' <<<"$ref_json")"
+          test "$remote_tag_object" = "$EXPECTED_TAG_OBJECT"
+
+          tag_json="$(
+            gh api \
+              "repos/$GITHUB_REPOSITORY/git/tags/$remote_tag_object"
+          )"
+          test "$(jq -r '.object.sha' <<<"$tag_json")" = "$EXPECTED_COMMIT"
+          test "$(jq -r '.verification.verified' <<<"$tag_json")" = true
+
+          if release_json="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
+                2> /dev/null
+            )"; then
+            test "$(jq -r '.tag_name' <<<"$release_json")" = "$RELEASE_TAG"
+            if [ "$EVENT_NAME" = release ]; then
+              test "$(jq -r '.draft' <<<"$release_json")" = false
+              test "$(jq -r '.id' <<<"$release_json")" \
+                = "$EXPECTED_RELEASE_ID"
+            else
+              test "$EVENT_NAME" = repository_dispatch
+              test "$(jq -r '.draft' <<<"$release_json")" = true
+            fi
+          else
+            test "$EVENT_NAME" = repository_dispatch
+            gh release create "$RELEASE_TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --draft \
+              --generate-notes \
+              --title "signal-purple $RELEASE_VERSION" \
+              --verify-tag
+            release_json="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+            )"
+          fi
+
+          source_name="signal-purple_${RELEASE_VERSION}.orig.tar.xz"
+          runtime_name="signal-purple_${RELEASE_VERSION}-1_amd64.deb"
+          debug_name="signal-purple-dbgsym_${RELEASE_VERSION}-1_amd64.deb"
+          sbom_name="signal-purple-${RELEASE_VERSION}.spdx.json"
+          allowed="$(
+            jq -cn \
+              --arg source "$source_name" \
+              --arg runtime "$runtime_name" \
+              --arg debug "$debug_name" \
+              --arg sbom "$sbom_name" \
+              '[$source, $runtime, $debug, $sbom, "SHA256SUMS", "SHA256SUMS.asc"]'
+          )"
+          unexpected="$(
+            jq -r --argjson allowed "$allowed" \
+              '.assets[].name as $name
+                | select(($allowed | index($name)) == null)
+                | $name' \
+              <<<"$release_json"
+          )"
+          if [ -n "$unexpected" ]; then
+            printf 'unexpected existing release assets:\n%s\n' \
+              "$unexpected" >&2
+            exit 1
+          fi
+
+          upload_asset()
+          {
+            asset=$1
+            name=$(basename -- "$asset")
+            local_digest="sha256:$(sha256sum "$asset" | cut -d' ' -f1)"
+            release_json="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+            )"
+            matches="$(
+              jq -c --arg name "$name" \
+                '[.assets[] | select(.name == $name)]' \
+                <<<"$release_json"
+            )"
+            count="$(jq -r 'length' <<<"$matches")"
+            if [ "$count" -eq 1 ]; then
+              remote_digest="$(jq -r '.[0].digest // empty' <<<"$matches")"
+              if [ -z "$remote_digest" ]; then
+                printf 'release asset %s has no reported digest\n' \
+                  "$name" >&2
+                exit 1
+              fi
+              if [ "$remote_digest" != "$local_digest" ]; then
+                printf 'release asset %s already exists with %s\n' \
+                  "$name" "$remote_digest" >&2
+                exit 1
+              fi
+              printf 'release asset already matches: %s\n' "$name"
+              return
+            fi
+            test "$count" -eq 0
+
+            gh release upload "$RELEASE_TAG" "$asset" \
+              --repo "$GITHUB_REPOSITORY"
+            release_json="$(
+              gh api \
+                "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
+            )"
+            remote_digest="$(
+              jq -r --arg name "$name" \
+                '.assets[] | select(.name == $name) | .digest // empty' \
+                <<<"$release_json"
+            )"
+            test "$remote_digest" = "$local_digest"
+          }
+
+          artifact_directory=dist/release
+          upload_asset "$artifact_directory/$source_name"
+          upload_asset "$artifact_directory/$runtime_name"
+          upload_asset "$artifact_directory/$debug_name"
+          upload_asset "$artifact_directory/$sbom_name"
+          upload_asset "$artifact_directory/SHA256SUMS"

@@ -14,22 +14,64 @@
    from the pull-request head does not substitute for this commit.
 7. Pass the clean Debian 13 job, sanitizer checks, and live compatibility
    matrix for that candidate using non-production accounts.
-8. Vendor the locked Rust sources, prove two reproducible network-isolated
-   package builds, and generate the source archive, checksums, and SBOM from
-   that candidate.
+8. Vendor the locked Rust sources and prove two reproducible offline package
+   builds from that candidate.
 9. Verify install, load, upgrade, rollback, and uninstall paths, then complete
    the agreed soak period without a release blocker.
 10. Create and push a verified signed tag for the validated commit.
     Release-please intentionally does not create tags or GitHub releases in
     this repository.
-11. Reproduce and smoke-test the release artifacts from the signed tag.
-12. Publish the GitHub release with explicit known limitations and the exact
-    tested Signal client dates.
+11. Send the default-branch-bound `prepare-release` repository dispatch for
+    the signed tag:
+
+    ```sh
+    gh api --method POST repos/adrighem/signal-purple/dispatches \
+      -f event_type=prepare-release \
+      -F 'client_payload[tag]=v0.2.2'
+    ```
+
+    The workflow verifies the tag and all version files, reproduces the source
+    archive and Debian packages twice, installs and probes the package,
+    generates the SBOM and checksums, attests the artifacts, and attaches them
+    to a draft GitHub release.
+12. Download and verify the draft assets, complete any required manual
+    checksum signature, and publish the release with explicit known
+    limitations and the exact tested Signal client dates.
 
 The workflow uses `RELEASE_PLEASE_TOKEN` when configured and otherwise falls
 back to `GITHUB_TOKEN`. Configure a fine-grained token or GitHub App token when
 release pull requests must trigger other workflows automatically; events made
 with the repository `GITHUB_TOKEN` do not start new workflow runs.
+
+The release-artifacts workflow runs from the trusted default-branch definition
+when a release is published or when the `prepare-release` repository dispatch
+is sent to prepare a draft first. It deliberately does not use
+`workflow_dispatch`, which can execute a modified workflow from another ref.
+It accepts only a canonical `vMAJOR.MINOR.PATCH` annotated tag after verifying
+it with the sole public key in
+`keys/release-signing-key.asc`, the signature status, and the pinned fingerprint
+`B3C0B75FA3B33AC278738C5CB1798BCDA76054BD`. The tag must identify a commit on
+`main`, and the tag, release manifest, Cargo files, citation metadata, and
+`version.txt` must agree.
+
+Build, attestation, and publication use separate jobs. Only the final job can
+write repository contents, and it does not check out or execute repository
+code. Existing assets are skipped only when their GitHub-reported SHA-256
+digest agrees; a conflicting asset fails the run and is never overwritten.
+Payloads are uploaded before `SHA256SUMS`, making an interrupted run safely
+resumable by rerunning the same workflow. Another `prepare-release` dispatch
+resumes a draft; a published-release run must be rerun from its original
+event.
+
+An explicit run creates or resumes a draft, which is the preferred path because
+it keeps a failed or incomplete artifact build from becoming public. The
+`release: published` trigger is a recovery guard: it populates a release when
+the draft step was skipped, although its assets will appear only after the
+workflow completes. The maintainer's private OpenPGP key is never stored in
+Actions. The signed tag authenticates the source, and GitHub's OIDC-backed
+artifact attestation authenticates the automated build. If a detached
+`SHA256SUMS.asc` is required, create and upload it locally before publishing
+the draft.
 
 Do not publish a release from a working tree with only compilation evidence.
 

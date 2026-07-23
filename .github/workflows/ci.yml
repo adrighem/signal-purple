@@ -52,6 +52,9 @@ jobs:
       - name: Test deterministic source archives
         run: sh tests/test_make_source_archive.sh
 
+      - name: Test release artifact helpers
+        run: sh tests/test_release_artifacts.sh
+
       - name: Configure
         run: >-
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug

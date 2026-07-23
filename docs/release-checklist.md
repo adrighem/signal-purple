@@ -38,7 +38,8 @@ Those boxes remain unchecked and are known limitations, not test passes.
   job.
 - [x] The candidate's vendored source archive produces installable Debian
   packages twice with identical contents.
-- [x] The source archive, package, checksums, SBOM, and signature agree.
+- [x] The source archive, packages, checksums, SBOM, and provenance
+  attestation agree.
 - [x] No known unresolved release-blocking vulnerability remains.
 
 ## Interoperability
@@ -73,5 +74,8 @@ Those boxes remain unchecked and are known limitations, not test passes.
 - [x] Security boundaries, data retention, limitations, and support are current.
 - [x] The release-please pull request matches the audited changelog and version.
 - [x] The signed release tag identifies the reviewed commit.
-- [x] Release artifacts are reproduced and smoke-tested from that tag.
+- [x] The automated draft-release artifacts are reproduced, attested, and
+  smoke-tested from that tag.
+- [ ] Downloaded draft assets match `SHA256SUMS`; any required manual
+  `SHA256SUMS.asc` is attached before publication.
 - [x] A rollback decision and recovery path exist before publication.
