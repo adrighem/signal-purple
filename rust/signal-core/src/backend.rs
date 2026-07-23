@@ -832,8 +832,10 @@ async fn receive_and_command_loop(
                 &sink,
                 &mut projection,
                 &departed_groups,
-                &mut attachment_aborts,
-                &mut deferred_commands,
+                RecoveryQueues {
+                    attachment_aborts: &mut attachment_aborts,
+                    deferred_commands: &mut deferred_commands,
+                },
             )
             .await
             {
@@ -871,8 +873,10 @@ async fn receive_and_command_loop(
                                 &sink,
                                 &mut projection,
                                 &departed_groups,
-                                &mut attachment_aborts,
-                                &mut deferred_commands,
+                                &mut RecoveryQueues {
+                                    attachment_aborts: &mut attachment_aborts,
+                                    deferred_commands: &mut deferred_commands,
+                                },
                             ).await {
                                 return Ok(());
                             }
@@ -912,8 +916,10 @@ async fn receive_and_command_loop(
                             &sink,
                             &mut projection,
                             &departed_groups,
-                            &mut attachment_aborts,
-                            &mut deferred_commands,
+                            &mut RecoveryQueues {
+                                attachment_aborts: &mut attachment_aborts,
+                                deferred_commands: &mut deferred_commands,
+                            },
                         ).await {
                             return Ok(());
                         }
@@ -1072,8 +1078,10 @@ async fn receive_and_command_loop(
                             &sink,
                             &mut projection,
                             &departed_groups,
-                            &mut attachment_aborts,
-                            &mut deferred_commands,
+                            &mut RecoveryQueues {
+                                attachment_aborts: &mut attachment_aborts,
+                                deferred_commands: &mut deferred_commands,
+                            },
                         ).await {
                             contact_sync.abort();
                             return Ok(());
@@ -1347,6 +1355,11 @@ fn fail_deferred_commands(sink: &EventSink, commands: &mut VecDeque<Command>, me
     }
 }
 
+struct RecoveryQueues<'a> {
+    attachment_aborts: &'a mut HashMap<u64, tokio::task::AbortHandle>,
+    deferred_commands: &'a mut VecDeque<Command>,
+}
+
 async fn handle_recovery_command(
     manager: &mut Manager<SqliteStore, Registered>,
     command: Command,
@@ -1354,8 +1367,7 @@ async fn handle_recovery_command(
     sink: &EventSink,
     projection: &mut MessageProjection,
     departed_groups: &DepartedGroups,
-    attachment_aborts: &mut HashMap<u64, tokio::task::AbortHandle>,
-    deferred_commands: &mut VecDeque<Command>,
+    queues: &mut RecoveryQueues<'_>,
 ) -> bool {
     match command {
         Command::AcknowledgeMessage { .. } => {
@@ -1371,15 +1383,15 @@ async fn handle_recovery_command(
             .await
         }
         Command::CancelAttachment { request_id } => {
-            cancel_deferred_attachment(deferred_commands, request_id);
-            if let Some(abort) = attachment_aborts.remove(&request_id) {
+            cancel_deferred_attachment(queues.deferred_commands, request_id);
+            if let Some(abort) = queues.attachment_aborts.remove(&request_id) {
                 abort.abort();
             }
             false
         }
         Command::SetTyping { .. } => false,
         command => {
-            deferred_commands.push_back(command);
+            queues.deferred_commands.push_back(command);
             false
         }
     }
@@ -1392,8 +1404,7 @@ async fn drain_recovery_commands(
     sink: &EventSink,
     projection: &mut MessageProjection,
     departed_groups: &DepartedGroups,
-    attachment_aborts: &mut HashMap<u64, tokio::task::AbortHandle>,
-    deferred_commands: &mut VecDeque<Command>,
+    mut queues: RecoveryQueues<'_>,
 ) -> bool {
     loop {
         match commands.try_recv() {
@@ -1405,8 +1416,7 @@ async fn drain_recovery_commands(
                     sink,
                     projection,
                     departed_groups,
-                    attachment_aborts,
-                    deferred_commands,
+                    &mut queues,
                 )
                 .await
                 {
