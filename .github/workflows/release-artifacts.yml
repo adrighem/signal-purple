@@ -369,10 +369,24 @@ jobs:
           test "$(jq -r '.object.sha' <<<"$tag_json")" = "$EXPECTED_COMMIT"
           test "$(jq -r '.verification.verified' <<<"$tag_json")" = true
 
+          get_release_json()
+          {
+            gh api \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              | jq -ce --arg tag "$RELEASE_TAG" '
+                  [.[] | select(.tag_name == $tag)]
+                  | if length == 1 then
+                      .[0]
+                    elif length == 0 then
+                      empty
+                    else
+                      error("multiple releases use the requested tag")
+                    end
+                '
+          }
+
           if release_json="$(
-              gh api \
-                "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG" \
-                2> /dev/null
+              get_release_json 2> /dev/null
             )"; then
             test "$(jq -r '.tag_name' <<<"$release_json")" = "$RELEASE_TAG"
             if [ "$EVENT_NAME" = release ]; then
@@ -391,10 +405,7 @@ jobs:
               --generate-notes \
               --title "signal-purple $RELEASE_VERSION" \
               --verify-tag
-            release_json="$(
-              gh api \
-                "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
-            )"
+            release_json="$(get_release_json)"
           fi
 
           source_name="signal-purple_${RELEASE_VERSION}.orig.tar.xz"
@@ -427,10 +438,7 @@ jobs:
             asset=$1
             name=$(basename -- "$asset")
             local_digest="sha256:$(sha256sum "$asset" | cut -d' ' -f1)"
-            release_json="$(
-              gh api \
-                "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
-            )"
+            release_json="$(get_release_json)"
             matches="$(
               jq -c --arg name "$name" \
                 '[.assets[] | select(.name == $name)]' \
@@ -456,10 +464,7 @@ jobs:
 
             gh release upload "$RELEASE_TAG" "$asset" \
               --repo "$GITHUB_REPOSITORY"
-            release_json="$(
-              gh api \
-                "repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG"
-            )"
+            release_json="$(get_release_json)"
             remote_digest="$(
               jq -r --arg name "$name" \
                 '.assets[] | select(.name == $name) | .digest // empty' \
