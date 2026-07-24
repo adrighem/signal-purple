@@ -50,6 +50,59 @@ if len(signal_core_packages) != 1:
 if signal_core_packages[0].get("versionInfo") != version:
     fail("SBOM signal-core version does not match the release")
 
+document_describes = document.get("documentDescribes", [])
+if not isinstance(document_describes, list) or not all(
+    isinstance(identifier, str) for identifier in document_describes
+):
+    fail("SBOM has invalid described-package identifiers")
+described_ids = set(document_describes)
+relationships = document.get("relationships", [])
+if not isinstance(relationships, list):
+    fail("SBOM has invalid relationships")
+for relationship in relationships:
+    if not isinstance(relationship, dict):
+        fail("SBOM has invalid relationship")
+    if (
+        relationship.get("spdxElementId") == "SPDXRef-DOCUMENT"
+        and relationship.get("relationshipType") == "DESCRIBES"
+    ):
+        related = relationship.get("relatedSpdxElement")
+        if not isinstance(related, str):
+            fail("SBOM has invalid described-package relationship")
+        described_ids.add(related)
+
+described_roots = [
+    package
+    for package in packages
+    if package.get("SPDXID") in described_ids
+    and isinstance(package.get("name"), str)
+    and pathlib.PurePosixPath(package["name"]).is_absolute()
+]
+if len(described_roots) != 1:
+    fail("SBOM must have exactly one absolute described root package")
+
+root = described_roots[0]
+old_root_id = root.get("SPDXID")
+if not isinstance(old_root_id, str):
+    fail("SBOM root package has no valid SPDX identifier")
+new_root_id = "SPDXRef-DocumentRoot-Directory-signal-purple"
+if any(
+    package is not root and package.get("SPDXID") == new_root_id
+    for package in packages
+):
+    fail("SBOM already contains the normalized root SPDX identifier")
+
+root["name"] = f"{repository}@v{version}"
+root["SPDXID"] = new_root_id
+document["documentDescribes"] = [
+    new_root_id if identifier == old_root_id else identifier
+    for identifier in document_describes
+]
+for relationship in relationships:
+    for field in ("spdxElementId", "relatedSpdxElement"):
+        if relationship.get(field) == old_root_id:
+            relationship[field] = new_root_id
+
 created = datetime.datetime.fromtimestamp(
     int(epoch_text), tz=datetime.timezone.utc
 ).strftime("%Y-%m-%dT%H:%M:%SZ")

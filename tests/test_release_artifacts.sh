@@ -73,9 +73,25 @@ cat > "$raw_sbom" <<'EOF'
   },
   "packages": [
     {
+      "SPDXID": "SPDXRef-DocumentRoot-Directory--home-runner-work-temp",
+      "name": "/home/runner/work/_temp/release-sbom-source/signal-purple-1.2.3"
+    },
+    {
       "SPDXID": "SPDXRef-Package-signal-core",
       "name": "signal-core",
       "versionInfo": "1.2.3"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relatedSpdxElement": "SPDXRef-DocumentRoot-Directory--home-runner-work-temp",
+      "relationshipType": "DESCRIBES"
+    },
+    {
+      "spdxElementId": "SPDXRef-DocumentRoot-Directory--home-runner-work-temp",
+      "relatedSpdxElement": "SPDXRef-Package-signal-core",
+      "relationshipType": "CONTAINS"
     }
   ]
 }
@@ -100,6 +116,14 @@ assert document["creationInfo"]["created"] == "2026-01-01T00:00:00Z"
 assert document["documentNamespace"].endswith(
     "/spdx/0123456789abcdef0123456789abcdef01234567"
 )
+root = next(
+    package for package in document["packages"]
+    if package["SPDXID"] == "SPDXRef-DocumentRoot-Directory-signal-purple"
+)
+assert root["name"] == "adrighem/signal-purple@v1.2.3"
+assert document["relationships"][0]["relatedSpdxElement"] == root["SPDXID"]
+assert document["relationships"][1]["spdxElementId"] == root["SPDXID"]
+assert "/home/runner/" not in json.dumps(document)
 PY
 
 if "$project_root/scripts/normalize-spdx.py" \
