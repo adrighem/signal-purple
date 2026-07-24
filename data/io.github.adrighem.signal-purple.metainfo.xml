@@ -4,7 +4,7 @@
   <id>io.github.adrighem.signal-purple</id>
   <extends>im.pidgin.Pidgin</extends>
   <name>signal-purple</name>
-  <summary>Experimental Signal protocol plugin for libpurple 2</summary>
+  <summary>Alpha-quality Signal protocol plugin for libpurple 2</summary>
   <metadata_license>CC0-1.0</metadata_license>
   <project_license>GPL-3.0-or-later AND AGPL-3.0-only</project_license>
   <description>

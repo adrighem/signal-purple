@@ -6,8 +6,19 @@ semantic versioning after the first stable release.
 
 ## [Unreleased]
 
+No user-facing changes yet.
+
+## 0.2.2 (2026-07-24)
+
+### Changed
+
+- Declare signal-purple alpha quality while retaining its unofficial status,
+  narrow supported environment, and explicit compatibility limitations.
+
 ### Fixed
 
+- Recover linked Signal connections after transient network failures while
+  preserving queued group operations.
 - Resolve the local account in group participant lists by its canonical Signal
   identifier, preferring the local Purple account alias and falling back to the
   account's remote Signal profile name.

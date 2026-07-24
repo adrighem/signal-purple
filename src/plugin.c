@@ -41,7 +41,7 @@ signal_get_info(PurpleConnection *gc, const char *who)
             info, "Synced name", purple_buddy_get_server_alias(buddy));
     purple_notify_user_info_add_pair_plaintext(
         info, "Safety number",
-        "Not exposed by this pre-alpha build; verify sensitive chats in an official Signal client.");
+        "Not exposed by this alpha build; verify sensitive chats in an official Signal client.");
     purple_notify_userinfo(gc, who, info, NULL, NULL);
     purple_notify_user_info_destroy(info);
 }
@@ -110,7 +110,7 @@ static PurplePluginInfo plugin_info = {
     .id = SIGNAL_PLUGIN_ID,
     .name = "Signal",
     .version = SIGNAL_PURPLE_VERSION,
-    .summary = "Experimental Signal protocol for libpurple 2",
+    .summary = "Alpha-quality Signal protocol for libpurple 2",
     .description =
         "An unofficial, linked-device Signal protocol plugin backed by Presage.",
     .author = "Vincent van Adrighem and contributors",
