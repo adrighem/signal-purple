@@ -269,3 +269,20 @@ absent. `state.json` was left unchanged rather than inferring its schema.
 - ISSUE:5 was updated with final release evidence and closed with all four
   supported exit gates checked. Stale Release Please PR:10 was subsequently
   closed unmerged after separate explicit approval.
+
+## 2026-07-24 — 0.2.2 alpha publication
+
+- Declared the project alpha quality in user-facing documentation and metadata,
+  while retaining the explicit unofficial and unsupported-by-Signal warning.
+- Released the local group-participant identity fix: the canonical ACI remains
+  the participant identity, while Purple's local account alias takes precedence
+  over the remotely fetched Signal profile name for display.
+- Published signed prerelease tag `v0.2.2` at `34e9b672` with source, runtime,
+  debug-symbol, SPDX, checksum, and detached-signature assets.
+- Release-artifacts runs `30079094193` and `30080197066` passed reproducible
+  source generation, two network-disabled Debian package builds, installation
+  probing, normalized SBOM validation, provenance attestation, and safe
+  draft/published asset matching.
+- Downloaded release assets passed `SHA256SUMS`; the detached checksum signature
+  verifies with the release signing key. Exact-candidate live Signal
+  interoperability and soak testing remain explicitly waived for this alpha.
