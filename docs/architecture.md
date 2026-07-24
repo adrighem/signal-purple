@@ -186,10 +186,13 @@ every connection. It then reconciles complete snapshots into plugin-managed
 Purple buddies. Because Purple normally hides offline buddies and Signal has no
 presence API, synchronized contacts are marked reachable while the account is
 connected. Contact names and synchronized phone numbers are used as aliases;
-profile enrichment is not implemented yet. For groups, signal-purple's pinned
-Presage fork adds authoritative Storage Service refresh and pruning plus the
-remote group-leave operation, so the chat list is complete without waiting for
-each group to receive a new message and contains only active memberships.
+profile enrichment for contacts and group-only members is not implemented yet.
+The registered account's own Signal profile name is retrieved as a fallback
+for group participant display when no local Purple account alias is set. For
+groups, signal-purple's pinned Presage fork adds authoritative Storage Service
+refresh and pruning plus the remote group-leave operation, so the chat list is
+complete without waiting for each group to receive a new message and contains
+only active memberships.
 
 ## Deliberate boundaries
 

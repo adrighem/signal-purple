@@ -592,6 +592,9 @@ test_group_conversation_identity(PurplePlugin *plugin,
         .pending_group_leaves = g_hash_table_new_full(
             g_str_hash, g_str_equal, g_free, NULL),
         .group_leave_requests = g_ptr_array_new(),
+        .local_aci =
+            g_strdup("11111111-1111-4111-8111-111111111111"),
+        .remote_profile_name = g_strdup("Remote Signal profile"),
         .next_group_id = 1,
         .group_snapshot_complete = TRUE,
     };
@@ -681,6 +684,32 @@ test_group_conversation_identity(PurplePlugin *plugin,
                     "Shared Signal title");
     g_assert_cmpstr(purple_conversation_get_title(legacy_conversation), ==,
                     "Legacy local title");
+
+    purple_account_set_alias(account, "Local Purple alias");
+    g_assert_cmpstr(
+        purple_conv_chat_get_nick(PURPLE_CONV_CHAT(first_conversation)), ==,
+        connection.local_aci);
+    purple_conv_chat_add_user(PURPLE_CONV_CHAT(first_conversation),
+                              connection.local_aci, NULL,
+                              PURPLE_CBFLAGS_NONE, FALSE);
+    PurpleConvChatBuddy *local_member = purple_conv_chat_cb_find(
+        PURPLE_CONV_CHAT(first_conversation), connection.local_aci);
+    g_assert_nonnull(local_member);
+    g_assert_cmpstr(local_member->name, ==, connection.local_aci);
+    g_assert_cmpstr(local_member->alias, ==, "Local Purple alias");
+
+    purple_account_set_alias(account, NULL);
+    protocol->join_chat(&gc, purple_chat_get_components(first));
+    purple_conv_chat_add_user(PURPLE_CONV_CHAT(first_conversation),
+                              connection.local_aci, NULL,
+                              PURPLE_CBFLAGS_NONE, FALSE);
+    local_member = purple_conv_chat_cb_find(
+        PURPLE_CONV_CHAT(first_conversation), connection.local_aci);
+    g_assert_nonnull(local_member);
+    g_assert_cmpstr(local_member->name, ==, connection.local_aci);
+    g_assert_cmpstr(local_member->alias, ==, "Remote Signal profile");
+    g_clear_pointer(&connection.remote_profile_name, g_free);
+    g_assert_null(protocol->get_cb_alias(&gc, 1, connection.local_aci));
 
     /* Pidgin autosets the title after member updates. While the account is
      * reconnecting, Purple cannot look up the saved chat and uses its opaque
@@ -917,6 +946,8 @@ test_group_conversation_identity(PurplePlugin *plugin,
     g_hash_table_unref(connection.group_titles_by_key);
     g_hash_table_unref(connection.group_keys_by_id);
     g_hash_table_unref(connection.group_ids_by_key);
+    g_free(connection.remote_profile_name);
+    g_free(connection.local_aci);
 }
 
 static void
@@ -1047,6 +1078,7 @@ main(int argc, char **argv)
     g_assert_nonnull(protocol->chat_can_receive_file);
     g_assert_nonnull(protocol->chat_send_file);
     g_assert_nonnull(protocol->find_blist_chat);
+    g_assert_nonnull(protocol->get_cb_alias);
 
     chat_info = protocol->chat_info(NULL);
     g_assert_cmpuint(g_list_length(chat_info), ==, 1);

@@ -652,6 +652,22 @@ signal_begin_contact_sync(SignalConnection *connection)
 }
 
 static void
+signal_set_account_identity(SignalConnection *connection,
+                            const SignalEvent *event)
+{
+    if (event->peer_id == NULL || event->peer_id[0] == '\0')
+        return;
+
+    g_free(connection->local_aci);
+    connection->local_aci = g_strdup(event->peer_id);
+    g_free(connection->remote_profile_name);
+    connection->remote_profile_name =
+        event->title != NULL && event->title[0] != '\0'
+            ? g_strdup(event->title)
+            : NULL;
+}
+
+static void
 signal_add_contact(SignalConnection *connection, const SignalEvent *event)
 {
     PurpleAccount *account;
@@ -821,6 +837,9 @@ signal_refresh_group_members(SignalConnection *connection,
         purple_conv_chat_has_left(PURPLE_CONV_CHAT(conversation)))
         return;
 
+    if (connection->local_aci != NULL)
+        purple_conv_chat_set_nick(PURPLE_CONV_CHAT(conversation),
+                                  connection->local_aci);
     purple_conv_chat_clear_users(PURPLE_CONV_CHAT(conversation));
     members = signal_group_members(connection, group_key, FALSE);
     if (members != NULL) {
@@ -1151,6 +1170,9 @@ signal_handle_event(SignalConnection *connection, const SignalEvent *event)
         purple_debug_info("signal-purple",
                           "Signal connection interrupted; recovering automatically\n");
         break;
+    case SIGNAL_EVENT_ACCOUNT:
+        signal_set_account_identity(connection, event);
+        break;
     case SIGNAL_EVENT_CONTACT_SYNC_BEGIN:
         signal_begin_contact_sync(connection);
         break;
@@ -1420,6 +1442,8 @@ signal_login(PurpleAccount *account)
         signal_contact_sync_clear(&connection->contact_sync);
         signal_contact_sync_clear(&connection->group_sync);
         g_free(connection->store_path);
+        g_free(connection->local_aci);
+        g_free(connection->remote_profile_name);
         g_free(connection);
         purple_connection_error_reason(gc, PURPLE_CONNECTION_ERROR_OTHER_ERROR,
                                        "Could not start the Signal backend");
@@ -1504,7 +1528,28 @@ signal_close(PurpleConnection *gc)
     signal_contact_sync_clear(&connection->contact_sync);
     signal_contact_sync_clear(&connection->group_sync);
     g_free(connection->store_path);
+    g_free(connection->local_aci);
+    g_free(connection->remote_profile_name);
     g_free(connection);
+}
+
+char *
+signal_chat_buddy_alias(PurpleConnection *gc, int id, const char *who)
+{
+    SignalConnection *connection = signal_connection_data(gc);
+    PurpleAccount *account;
+    const char *alias;
+
+    (void)id;
+    if (connection == NULL || who == NULL || connection->local_aci == NULL ||
+        g_strcmp0(who, connection->local_aci) != 0)
+        return NULL;
+
+    account = purple_connection_get_account(gc);
+    alias = purple_account_get_alias(account);
+    if (alias == NULL || alias[0] == '\0')
+        alias = connection->remote_profile_name;
+    return alias != NULL && alias[0] != '\0' ? g_strdup(alias) : NULL;
 }
 
 static void

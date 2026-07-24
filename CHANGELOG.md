@@ -6,7 +6,11 @@ semantic versioning after the first stable release.
 
 ## [Unreleased]
 
-No user-facing changes yet.
+### Fixed
+
+- Resolve the local account in group participant lists by its canonical Signal
+  identifier, preferring the local Purple account alias and falling back to the
+  account's remote Signal profile name.
 
 ## 0.2.1 (2026-07-22)
 

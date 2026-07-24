@@ -39,6 +39,8 @@ typedef struct {
     SignalContactSync group_sync;
     GBytes *link_qr;
     char *store_path;
+    char *local_aci;
+    char *remote_profile_name;
     guint next_group_id;
     guint contact_sync_contacts;
     guint contact_sync_created;
@@ -77,6 +79,8 @@ gboolean signal_chat_can_receive_file(PurpleConnection *gc, int id);
 void signal_chat_send_file(PurpleConnection *gc, int id,
                            const char *filename);
 GList *signal_blist_node_menu(PurpleBlistNode *node);
+char *signal_chat_buddy_alias(PurpleConnection *gc, int id,
+                              const char *who);
 
 char *signal_plaintext_from_markup(const char *markup);
 PurpleMessageFlags signal_message_flags(gboolean outgoing);

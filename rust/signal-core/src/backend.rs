@@ -33,11 +33,12 @@ use tokio::sync::{Mutex as AsyncMutex, mpsc as tokio_mpsc, watch};
 use zeroize::Zeroizing;
 
 use crate::event::{
-    EVENT_ATTACHMENT, EVENT_ATTACHMENT_SENT, EVENT_CONTACT, EVENT_CONTACT_SYNC_BEGIN,
-    EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED, EVENT_GROUP, EVENT_GROUP_LEFT, EVENT_GROUP_MEMBER,
-    EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN, EVENT_GROUP_SYNC_END, EVENT_IDENTITY_ACCEPTED,
-    EVENT_IDENTITY_CHANGE, EVENT_LINK_QR, EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT,
-    EVENT_RECOVERING, EVENT_TYPING, Event, FLAG_OUTGOING,
+    EVENT_ACCOUNT, EVENT_ATTACHMENT, EVENT_ATTACHMENT_SENT, EVENT_CONTACT,
+    EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED, EVENT_GROUP,
+    EVENT_GROUP_LEFT, EVENT_GROUP_MEMBER, EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN,
+    EVENT_GROUP_SYNC_END, EVENT_IDENTITY_ACCEPTED, EVENT_IDENTITY_CHANGE, EVENT_LINK_QR,
+    EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT, EVENT_RECOVERING, EVENT_TYPING, Event,
+    FLAG_OUTGOING,
 };
 
 const MESSAGE_PROJECTION_CLIENT: &str = "signal-purple-v1";
@@ -988,6 +989,7 @@ async fn receive_and_command_loop(
                     match received {
                         Some(Received::QueueEmpty) => {
                             if !synchronized {
+                                emit_account_identity(&mut manager, &sink).await;
                                 emit_contact_snapshot(&manager, &sink).await;
                                 groups_authoritative =
                                     match synchronize_and_emit_group_snapshot(
@@ -1487,6 +1489,27 @@ async fn emit_contact_snapshot(manager: &Manager<SqliteStore, Registered>, sink:
             false,
         )),
     }
+}
+
+fn account_identity_event(aci: Aci, profile_name: Option<String>) -> Event {
+    Event {
+        kind: EVENT_ACCOUNT,
+        peer_id: Some(ServiceId::Aci(aci).service_id_string()),
+        title: profile_name.filter(|name| !name.is_empty()),
+        ..Event::default()
+    }
+}
+
+async fn emit_account_identity(manager: &mut Manager<SqliteStore, Registered>, sink: &EventSink) {
+    let local_aci = manager.registration_data().service_ids.aci();
+    let profile_name = manager
+        .retrieve_profile()
+        .await
+        .ok()
+        .and_then(|profile| profile.name)
+        .map(|name| name.to_string());
+
+    sink.emit(account_identity_event(local_aci, profile_name));
 }
 
 async fn emit_group_snapshot(
@@ -2885,6 +2908,31 @@ mod tests {
         assert_eq!(first, group_identifier(&[0; 32]));
         assert_ne!(first, hex::encode([0; 32]));
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn projects_the_local_account_identity_and_optional_profile_name() {
+        let Some(ServiceId::Aci(local)) =
+            ServiceId::parse_from_service_id_string("11111111-1111-4111-8111-111111111111")
+        else {
+            panic!("test ACI must parse");
+        };
+
+        let named = account_identity_event(local, Some("Signal Profile".into()));
+        assert_eq!(named.kind, EVENT_ACCOUNT);
+        assert_eq!(
+            named.peer_id.as_deref(),
+            Some("11111111-1111-4111-8111-111111111111")
+        );
+        assert_eq!(named.title.as_deref(), Some("Signal Profile"));
+
+        let unnamed = account_identity_event(local, Some(String::new()));
+        assert_eq!(unnamed.peer_id, named.peer_id);
+        assert_eq!(unnamed.title, None);
+
+        let unavailable = account_identity_event(local, None);
+        assert_eq!(unavailable.peer_id, unnamed.peer_id);
+        assert_eq!(unavailable.title, None);
     }
 
     #[test]

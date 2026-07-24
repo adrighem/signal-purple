@@ -24,6 +24,7 @@ pub const EVENT_ATTACHMENT: u32 = 19;
 pub const EVENT_ATTACHMENT_SENT: u32 = 20;
 pub const EVENT_GROUP_LEFT: u32 = 21;
 pub const EVENT_RECOVERING: u32 = 22;
+pub const EVENT_ACCOUNT: u32 = 23;
 
 pub const FLAG_OUTGOING: u32 = 1 << 0;
 pub const FLAG_FATAL: u32 = 1 << 1;
