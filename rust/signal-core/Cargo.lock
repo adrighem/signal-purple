@@ -132,7 +132,23 @@ dependencies = [
  "futures-util",
  "log",
  "pin-project-lite",
- "tungstenite",
+ "tungstenite 0.24.0",
+]
+
+[[package]]
+name = "async-tungstenite"
+version = "0.32.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8acc405d38be14342132609f06f02acaf825ddccfe76c4824a69281e0458ebd4"
+dependencies = [
+ "atomic-waker",
+ "futures-core",
+ "futures-io",
+ "futures-task",
+ "futures-util",
+ "log",
+ "pin-project-lite",
+ "tungstenite 0.28.0",
 ]
 
 [[package]]
@@ -1597,8 +1613,8 @@ dependencies = [
  "prost-build",
  "rand 0.9.5",
  "rand_core 0.6.4",
- "reqwest",
- "reqwest-websocket",
+ "reqwest 0.12.28",
+ "reqwest-websocket 0.4.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2034,7 +2050,7 @@ dependencies = [
  "hex",
  "libsignal-service",
  "rand 0.9.5",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -2509,21 +2525,68 @@ dependencies = [
 ]
 
 [[package]]
+name = "reqwest"
+version = "0.13.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
+dependencies = [
+ "base64",
+ "bytes",
+ "futures-core",
+ "http",
+ "http-body",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "js-sys",
+ "log",
+ "percent-encoding",
+ "pin-project-lite",
+ "sync_wrapper",
+ "tokio",
+ "tower",
+ "tower-http",
+ "tower-service",
+ "url",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "reqwest-websocket"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f477f800f86d8f5c320e19d8b2b1ef0b1e773ea7c75eec6c7f442e7ec3f06d7e"
 dependencies = [
- "async-tungstenite",
+ "async-tungstenite 0.28.2",
  "futures-util",
- "reqwest",
+ "reqwest 0.12.28",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
  "tokio",
  "tokio-util",
  "tracing",
- "tungstenite",
+ "tungstenite 0.24.0",
+ "web-sys",
+]
+
+[[package]]
+name = "reqwest-websocket"
+version = "0.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7705b649c3b66b85c4e9c304a6898b1ae3eecb880c474720ebf925e4a932ae02"
+dependencies = [
+ "async-tungstenite 0.32.1",
+ "bytes",
+ "futures-util",
+ "reqwest 0.13.4",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tungstenite 0.28.0",
  "web-sys",
 ]
 
@@ -2758,7 +2821,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal-core"
-version = "0.2.2" # x-release-please-version
+version = "0.2.2"
 dependencies = [
  "futures",
  "hex",
@@ -2766,7 +2829,7 @@ dependencies = [
  "presage",
  "presage-store-sqlite",
  "qrcode",
- "reqwest-websocket",
+ "reqwest-websocket 0.6.0",
  "sha2 0.10.9",
  "tokio",
  "tracing",
@@ -3401,6 +3464,23 @@ dependencies = [
  "rand 0.8.7",
  "sha1 0.10.7",
  "thiserror 1.0.69",
+ "utf-8",
+]
+
+[[package]]
+name = "tungstenite"
+version = "0.28.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8628dcc84e5a09eb3d8423d6cb682965dea9133204e8fb3efee74c2a0c259442"
+dependencies = [
+ "bytes",
+ "data-encoding",
+ "http",
+ "httparse",
+ "log",
+ "rand 0.9.5",
+ "sha1 0.10.7",
+ "thiserror 2.0.18",
  "utf-8",
 ]
 
