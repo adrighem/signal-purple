@@ -2905,7 +2905,10 @@ mod tests {
         let second = group_identifier(&[1; 32]);
 
         assert_eq!(first.len(), 64);
-        assert_eq!(first, group_identifier(&[0; 32]));
+        assert_eq!(
+            first,
+            "3560c18a595af2d16e2297a210a7b429779e0da6d83411193cf692b4a1e137d7"
+        );
         assert_ne!(first, hex::encode([0; 32]));
         assert_ne!(first, second);
     }
