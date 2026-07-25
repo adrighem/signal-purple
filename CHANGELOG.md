@@ -4,6 +4,13 @@ All notable changes will be documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 semantic versioning after the first stable release.
 
+## [0.2.4](https://github.com/adrighem/signal-purple/compare/v0.2.3...v0.2.4) (2026-07-25)
+
+
+### Bug Fixes
+
+* bound outgoing attachment admission ([a0825d4](https://github.com/adrighem/signal-purple/commit/a0825d419f5bd006009789c6757248efdcdba226))
+
 ## [0.2.3](https://github.com/adrighem/signal-purple/compare/v0.2.2...v0.2.3) (2026-07-25)
 
 
