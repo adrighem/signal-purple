@@ -8,50 +8,28 @@
    and blockers. Leave its candidate revision pending at this stage.
 4. Let release-please create or update the version and changelog pull request.
 5. Review every dependency and generated-file change, then merge the release
-   pull request only when its checks pass. This merge establishes the candidate
-   on `main`; it does not create a tag or GitHub release.
-6. Record the full post-merge `main` commit in the validation issue. Evidence
-   from the pull-request head does not substitute for this commit.
-7. Pass the clean Debian 13 job, sanitizer checks, and live compatibility
-   matrix for that candidate using non-production accounts.
-8. Vendor the locked Rust sources and prove two reproducible offline package
-   builds from that candidate.
-9. Verify install, load, upgrade, rollback, and uninstall paths, then complete
-   the agreed soak period without a release blocker.
-10. Create and push a verified signed tag for the validated commit.
-    Release-please intentionally does not create tags or GitHub releases in
-    this repository.
-11. Send the default-branch-bound `prepare-release` repository dispatch for
-    the signed tag:
-
-    ```sh
-    gh api --method POST repos/adrighem/signal-purple/dispatches \
-      -f event_type=prepare-release \
-      -F 'client_payload[tag]=v0.2.2'
-    ```
-
-    The workflow verifies the tag and all version files, reproduces the source
-    archive and Debian packages twice, installs and probes the package,
-    generates the SBOM and checksums, attests the artifacts, and attaches them
-    to a draft GitHub release.
-12. Download and verify the draft assets, complete any required manual
-    checksum signature, and publish the release with explicit known
-    limitations and the exact tested Signal client dates.
+   pull request only after every applicable release gate and its checks pass.
+   Merging this pull request is the release approval.
+6. Release Please creates the canonical `vMAJOR.MINOR.PATCH` tag and a draft
+   GitHub release for the merged `main` commit.
+7. In the same workflow graph, the artifact pipeline verifies the Release
+   Please tag, commit, version, and manifest. It then reproduces the source
+   archive and Debian packages twice, installs and probes the package, creates
+   the SBOM and checksums, and attests their provenance.
+8. The final job uploads the verified assets and publishes the draft as a
+   GitHub prerelease without marking it as `Latest`. A failed build leaves the
+   release private and does not move or recreate its tag.
 
 The workflow uses `RELEASE_PLEASE_TOKEN` when configured and otherwise falls
 back to `GITHUB_TOKEN`. Configure a fine-grained token or GitHub App token when
 release pull requests must trigger other workflows automatically; events made
 with the repository `GITHUB_TOKEN` do not start new workflow runs.
 
-The release-artifacts workflow runs from the trusted default-branch definition
-when a release is published or when the `prepare-release` repository dispatch
-is sent to prepare a draft first. It deliberately does not use
-`workflow_dispatch`, which can execute a modified workflow from another ref.
-It accepts only a canonical `vMAJOR.MINOR.PATCH` annotated tag after verifying
-it with the sole public key in
-`keys/release-signing-key.asc`, the signature status, and the pinned fingerprint
-`B3C0B75FA3B33AC278738C5CB1798BCDA76054BD`. The tag must identify a commit on
-`main`, and the tag, release manifest, Cargo files, citation metadata, and
+The artifact workflow is reusable only from the trusted Release Please
+workflow; it has no public event or manual dispatch trigger. Release Please
+passes the exact tag, version, and 40-character commit. The caller must be a
+`main` push at that commit, the tag must resolve to it, the commit must remain
+on `main`, and the release manifest, Cargo files, citation metadata, and
 `version.txt` must agree.
 
 Build, attestation, and publication use separate jobs. Only the final job can
@@ -59,19 +37,14 @@ write repository contents, and it does not check out or execute repository
 code. Existing assets are skipped only when their GitHub-reported SHA-256
 digest agrees; a conflicting asset fails the run and is never overwritten.
 Payloads are uploaded before `SHA256SUMS`, making an interrupted run safely
-resumable by rerunning the same workflow. Another `prepare-release` dispatch
-resumes a draft; a published-release run must be rerun from its original
-event.
+resumable by rerunning failed jobs in the original Release Please run.
 
-An explicit run creates or resumes a draft, which is the preferred path because
-it keeps a failed or incomplete artifact build from becoming public. The
-`release: published` trigger is a recovery guard: it populates a release when
-the draft step was skipped, although its assets will appear only after the
-workflow completes. The maintainer's private OpenPGP key is never stored in
-Actions. The signed tag authenticates the source, and GitHub's OIDC-backed
-artifact attestation authenticates the automated build. If a detached
-`SHA256SUMS.asc` is required, create and upload it locally before publishing
-the draft.
+Release tags are created by Release Please rather than signed by a maintainer.
+Source trust comes from the protected `main` history, the checksum-pinned
+Release Please action, exact tag/commit/version checks, least-privilege job
+permissions, and GitHub's OIDC-backed artifact attestations. The public key in
+`keys/release-signing-key.asc` remains only for verification of historical
+releases.
 
 Do not publish a release from a working tree with only compilation evidence.
 
@@ -80,19 +53,19 @@ Do not publish a release from a working tree with only compilation evidence.
 Use one issue as the evidence index for each release candidate. The 0.2.0
 pre-release candidate is tracked in
 [issue #5](https://github.com/adrighem/signal-purple/issues/5).
-Record the full post-merge `main` commit, Debian image or environment, official
+Record the release pull-request revision, Debian image or environment, official
 Signal client versions and test date, artifact hashes, and links to sanitized
-evidence. Keep the issue open through packaging, signing, and publication; a
-release pull request must not close it automatically.
+evidence. Keep the issue open through packaging and publication; a release
+pull request must not close it automatically.
 
-Evidence counts only for the recorded candidate. If runtime, storage,
-dependency, or packaging inputs change, update the candidate revision and rerun
-the affected checks. A pull-request head and its resulting merge commit may have
-the same tree but remain different revisions and can produce different artifact
-metadata. Use dedicated non-production Signal accounts, keep failed checks
-open, and link implementation defects instead of creating separate validation
-trackers. Never attach identifiers, message contents, provisioning data, keys,
-database secrets, or unredacted private paths.
+Evidence counts only for the recorded release pull-request tree. If runtime,
+storage, dependency, or packaging inputs change, update the candidate revision
+and rerun the affected checks. Release Please builds and identifies artifacts
+from the resulting `main` commit after merge. Use dedicated non-production
+Signal accounts, keep failed checks open, and link implementation defects
+instead of creating separate validation trackers. Never attach identifiers,
+message contents, provisioning data, keys, database secrets, or unredacted
+private paths.
 
 ## Upgrade
 

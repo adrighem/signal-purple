@@ -1,29 +1,31 @@
 name: Release artifacts
 
 on:
-  release:
-    types: [published]
-  repository_dispatch:
-    types: [prepare-release]
+  workflow_call:
+    inputs:
+      release_sha:
+        description: Commit selected by Release Please
+        required: true
+        type: string
+      release_tag:
+        description: Tag created by Release Please
+        required: true
+        type: string
+      release_version:
+        description: Version selected by Release Please
+        required: true
+        type: string
 
 permissions: {}
 
 concurrency:
-  group: >-
-    release-artifacts-${{
-      github.event_name == 'repository_dispatch'
-      && github.event.client_payload.tag
-      || github.event.release.tag_name
-    }}
+  group: release-artifacts-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 env:
-  RELEASE_TAG: >-
-    ${{
-      github.event_name == 'repository_dispatch'
-      && github.event.client_payload.tag
-      || github.event.release.tag_name
-    }}
+  RELEASE_SHA: ${{ inputs.release_sha }}
+  RELEASE_TAG: ${{ inputs.release_tag }}
+  RELEASE_VERSION: ${{ inputs.release_version }}
 
 jobs:
   build:
@@ -34,18 +36,14 @@ jobs:
     outputs:
       artifact-name: ${{ steps.release.outputs.artifact-name }}
       commit: ${{ steps.release.outputs.commit }}
-      tag-object: ${{ steps.release.outputs.tag-object }}
       version: ${{ steps.release.outputs.version }}
     env:
       DEBIAN_SNAPSHOT: 20260722T000000Z
-      RELEASE_KEY_FINGERPRINT: B3C0B75FA3B33AC278738C5CB1798BCDA76054BD
       SYFT_ARCHIVE: syft_1.49.0_linux_amd64.tar.gz
       SYFT_ARCHIVE_SHA256: 7aa2f03ee92739cf643279ba3990548b9925d4e22cae13f46831ee62821147fe
     steps:
-      - name: Validate trusted workflow invocation
+      - name: Validate Release Please outputs
         shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           if ! printf '%s\n' "$RELEASE_TAG" \
@@ -53,72 +51,39 @@ jobs:
             printf 'invalid release tag: %s\n' "$RELEASE_TAG" >&2
             exit 1
           fi
-          if [ "$EVENT_NAME" = repository_dispatch ]; then
-            test "$GITHUB_REF" = refs/heads/main
-          else
-            test "$EVENT_NAME" = release
+          if ! printf '%s\n' "$RELEASE_SHA" \
+              | grep -Eq '^[0-9a-f]{40}$'; then
+            printf '%s\n' 'invalid release commit' >&2
+            exit 1
           fi
+          test "$RELEASE_TAG" = "v$RELEASE_VERSION"
+          test "$GITHUB_REF" = refs/heads/main
+          test "$GITHUB_SHA" = "$RELEASE_SHA"
 
-      - name: Check out signed tag
+      - name: Check out Release Please commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: refs/tags/${{ env.RELEASE_TAG }}
+          ref: ${{ env.RELEASE_SHA }}
 
-      - name: Verify signed release input
+      - name: Verify Release Please release input
         id: release
         shell: bash
         run: |
           set -euo pipefail
-          key_listing="$(
-            gpg --batch --with-colons --show-keys \
-              keys/release-signing-key.asc
-          )"
-          test "$(
-            awk -F: '$1 == "pub" { count++ } END { print count + 0 }' \
-              <<<"$key_listing"
-          )" -eq 1
-          actual_fingerprint="$(
-            awk -F: '$1 == "fpr" { print $10; exit }' <<<"$key_listing"
-          )"
-          test "$actual_fingerprint" = "$RELEASE_KEY_FINGERPRINT"
-
-          gpg_home="$RUNNER_TEMP/release-gnupg"
-          mkdir -m 0700 "$gpg_home"
-          gpg --batch --homedir "$gpg_home" \
-            --import keys/release-signing-key.asc
-          verification="$(
-            GNUPGHOME="$gpg_home" \
-              git verify-tag --raw "$RELEASE_TAG" 2>&1
-          )"
-          printf '%s\n' "$verification"
-          test "$(
-            awk '$2 == "VALIDSIG" { count++ } END { print count + 0 }' \
-              <<<"$verification"
-          )" -eq 1
-          test "$(
-            awk '$2 == "VALIDSIG" { print $3 }' <<<"$verification"
-          )" = "$RELEASE_KEY_FINGERPRINT"
-          test "$(
-            awk '$2 == "VALIDSIG" { print $NF }' <<<"$verification"
-          )" = "$RELEASE_KEY_FINGERPRINT"
-
-          tag_object="$(git rev-parse --verify --end-of-options \
-            "$RELEASE_TAG^{tag}")"
+          git fetch --no-tags origin \
+            "+refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
           commit="$(git rev-parse --verify --end-of-options \
             "$RELEASE_TAG^{commit}")"
-          test "$(git rev-parse HEAD)" = "$commit"
-          if [ "$GITHUB_EVENT_NAME" = release ]; then
-            test "$GITHUB_SHA" = "$commit"
-          else
-            test "$GITHUB_EVENT_NAME" = repository_dispatch
-          fi
+          test "$commit" = "$RELEASE_SHA"
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           git fetch --no-tags origin \
             '+refs/heads/main:refs/remotes/origin/main'
           git merge-base --is-ancestor "$commit" origin/main
 
           version="$(cat version.txt)"
+          test "$version" = "$RELEASE_VERSION"
           test "$RELEASE_TAG" = "v$version"
           test "$(jq -er '.["."]' .release-please-manifest.json)" = "$version"
           test "$(
@@ -137,7 +102,6 @@ jobs:
           {
             printf 'artifact-name=%s\n' "$artifact_name"
             printf 'commit=%s\n' "$commit"
-            printf 'tag-object=%s\n' "$tag_object"
             printf 'version=%s\n' "$version"
           } >> "$GITHUB_OUTPUT"
 
@@ -343,13 +307,10 @@ jobs:
         working-directory: dist/release
         run: sha256sum --check SHA256SUMS
 
-      - name: Create draft or populate published release
+      - name: Populate and publish Release Please draft
         shell: bash
         env:
-          EVENT_NAME: ${{ github.event_name }}
           EXPECTED_COMMIT: ${{ needs.build.outputs.commit }}
-          EXPECTED_RELEASE_ID: ${{ github.event.release.id }}
-          EXPECTED_TAG_OBJECT: ${{ needs.build.outputs.tag-object }}
           RELEASE_VERSION: ${{ needs.build.outputs.version }}
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -358,23 +319,15 @@ jobs:
           ref_json="$(
             gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG"
           )"
-          test "$(jq -r '.object.type' <<<"$ref_json")" = tag
-          remote_tag_object="$(jq -r '.object.sha' <<<"$ref_json")"
-          test "$remote_tag_object" = "$EXPECTED_TAG_OBJECT"
-
-          tag_json="$(
-            gh api \
-              "repos/$GITHUB_REPOSITORY/git/tags/$remote_tag_object"
-          )"
-          test "$(jq -r '.object.sha' <<<"$tag_json")" = "$EXPECTED_COMMIT"
-          test "$(jq -r '.verification.verified' <<<"$tag_json")" = true
+          test "$(jq -r '.object.type' <<<"$ref_json")" = commit
+          test "$(jq -r '.object.sha' <<<"$ref_json")" = "$EXPECTED_COMMIT"
 
           get_release_json()
           {
-            gh api \
+            gh api --paginate \
               "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
-              | jq -ce --arg tag "$RELEASE_TAG" '
-                  [.[] | select(.tag_name == $tag)]
+              | jq -sce --arg tag "$RELEASE_TAG" '
+                  [add[] | select(.tag_name == $tag)]
                   | if length == 1 then
                       .[0]
                     elif length == 0 then
@@ -385,27 +338,13 @@ jobs:
                 '
           }
 
-          if release_json="$(
-              get_release_json 2> /dev/null
-            )"; then
-            test "$(jq -r '.tag_name' <<<"$release_json")" = "$RELEASE_TAG"
-            if [ "$EVENT_NAME" = release ]; then
-              test "$(jq -r '.draft' <<<"$release_json")" = false
-              test "$(jq -r '.id' <<<"$release_json")" \
-                = "$EXPECTED_RELEASE_ID"
-            else
-              test "$EVENT_NAME" = repository_dispatch
-              test "$(jq -r '.draft' <<<"$release_json")" = true
-            fi
+          release_json="$(get_release_json)"
+          test "$(jq -r '.tag_name' <<<"$release_json")" = "$RELEASE_TAG"
+          release_was_draft="$(jq -r '.draft' <<<"$release_json")"
+          if [ "$release_was_draft" = false ]; then
+            test "$(jq -r '.prerelease' <<<"$release_json")" = true
           else
-            test "$EVENT_NAME" = repository_dispatch
-            gh release create "$RELEASE_TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --draft \
-              --generate-notes \
-              --title "signal-purple $RELEASE_VERSION" \
-              --verify-tag
-            release_json="$(get_release_json)"
+            test "$release_was_draft" = true
           fi
 
           source_name="signal-purple_${RELEASE_VERSION}.orig.tar.xz"
@@ -418,7 +357,7 @@ jobs:
               --arg runtime "$runtime_name" \
               --arg debug "$debug_name" \
               --arg sbom "$sbom_name" \
-              '[$source, $runtime, $debug, $sbom, "SHA256SUMS", "SHA256SUMS.asc"]'
+              '[$source, $runtime, $debug, $sbom, "SHA256SUMS"]'
           )"
           unexpected="$(
             jq -r --argjson allowed "$allowed" \
@@ -461,6 +400,11 @@ jobs:
               return
             fi
             test "$count" -eq 0
+            if [ "$(jq -r '.draft' <<<"$release_json")" != true ]; then
+              printf 'cannot add missing asset to published release: %s\n' \
+                "$name" >&2
+              exit 1
+            fi
 
             gh release upload "$RELEASE_TAG" "$asset" \
               --repo "$GITHUB_REPOSITORY"
@@ -479,3 +423,17 @@ jobs:
           upload_asset "$artifact_directory/$debug_name"
           upload_asset "$artifact_directory/$sbom_name"
           upload_asset "$artifact_directory/SHA256SUMS"
+
+          release_json="$(get_release_json)"
+          release_id="$(jq -er '.id' <<<"$release_json")"
+          if [ "$(jq -r '.draft' <<<"$release_json")" = true ]; then
+            release_json="$(
+              gh api --method PATCH \
+                "repos/$GITHUB_REPOSITORY/releases/$release_id" \
+                -F draft=false \
+                -F prerelease=true \
+                -f make_latest=false
+            )"
+          fi
+          test "$(jq -r '.draft' <<<"$release_json")" = false
+          test "$(jq -r '.prerelease' <<<"$release_json")" = true

@@ -10,8 +10,8 @@ demonstrated. Version numbers are compatibility targets, not deadlines.
 
 ## Milestone 1: v0.1.0 foundation
 
-- Keep versions synchronized with release-please while signed tags remain a
-  deliberate release action.
+- Use Release Please as the single owner of version updates, release tags, and
+  GitHub release creation.
 - Produce a reproducible Debian 13 package.
 - Discover all current Signal groups, synchronize them into Purple's chat list,
   and refresh membership and titles without waiting for a new group message.

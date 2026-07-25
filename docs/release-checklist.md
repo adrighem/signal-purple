@@ -4,9 +4,10 @@ This checklist is the release contract. A box is complete only when its result
 is linked from the release issue or release pull request. Candidate-specific
 evidence for the 0.2.0 pre-release belongs in
 [validation tracker #5](https://github.com/adrighem/signal-purple/issues/5).
-The candidate is the post-merge `main` commit that will be signed and tagged,
-not the release pull-request head. Merging the release pull request establishes
-that candidate but does not publish it.
+The candidate is the reviewed release pull-request tree. Merging that pull
+request is the release approval: Release Please tags the resulting `main`
+commit, creates a draft, and publishes only after the automated artifact gates
+pass.
 
 For the explicitly labelled 0.2.0 pre-alpha, the release owner waived
 exact-candidate live interoperability, network recovery, idle/diagnostic, and
@@ -73,9 +74,8 @@ Those boxes remain unchecked and are known limitations, not test passes.
   every advertised installation scope.
 - [x] Security boundaries, data retention, limitations, and support are current.
 - [x] The release-please pull request matches the audited changelog and version.
-- [x] The signed release tag identifies the reviewed commit.
-- [x] The automated draft-release artifacts are reproduced, attested, and
-  smoke-tested from that tag.
-- [ ] Downloaded draft assets match `SHA256SUMS`; any required manual
-  `SHA256SUMS.asc` is attached before publication.
+- [x] The Release Please tag identifies the merged release commit.
+- [x] Release artifacts are reproduced, attested, smoke-tested, and attached
+  before the draft is published.
+- [ ] Downloaded release assets match `SHA256SUMS`.
 - [x] A rollback decision and recovery path exist before publication.

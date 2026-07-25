@@ -57,3 +57,21 @@
   privacy are compatible.
 - Preserve the live-validation waiver as a prominent pre-alpha limitation;
   publication does not convert any waived check into a pass.
+
+## 2026-07-25 — Release Please owns releases
+
+- For future releases, merging the reviewed Release Please pull request is the
+  release approval. This supersedes the manual-tag portion of the 2026-07-21
+  candidate-identity decision without changing historical releases.
+- Release Please owns the version change, changelog, canonical tag, and draft
+  GitHub release. Its exact tag, version, and commit outputs feed the artifact
+  workflow directly, avoiding event behavior that differs between a personal
+  token and `GITHUB_TOKEN`.
+- Keep releases private until reproducible builds, package probing, SBOM and
+  checksum generation, provenance attestation, and asset upload all pass. The
+  final trusted job publishes the existing draft as a prerelease that is not
+  marked `Latest`; it never creates or moves a release tag.
+- Replace maintainer-signed tag trust with protected `main`, a
+  checksum-pinned Release Please action, exact tag/commit/version checks,
+  least-privilege jobs, and OIDC artifact provenance. Retain the existing
+  OpenPGP public key only for historical verification.

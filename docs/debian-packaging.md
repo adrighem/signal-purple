@@ -84,11 +84,12 @@ container, followed by the install/probe check in a second fresh container.
 The workflow generates a
 normalized SPDX 2.3 SBOM from the extracted vendored source, writes and verifies
 `SHA256SUMS`, creates GitHub build-provenance attestations, and uploads the
-exact allowlisted files to a draft release. The SBOM catalogs the root
-`Cargo.lock` graph and excludes duplicate discovery inside `vendor/`; the
-generated DEP-5 inventory remains the licensing record for those vendored
-sources. Syft itself is downloaded as a versioned archive and verified against
-its pinned SHA-256 before execution.
+exact allowlisted files to the Release Please draft. Only after those checks
+and uploads pass does the workflow publish it as a GitHub prerelease. The SBOM
+catalogs the root `Cargo.lock` graph and excludes duplicate discovery inside
+`vendor/`; the generated DEP-5 inventory remains the licensing record for
+those vendored sources. Syft itself is downloaded as a versioned archive and
+verified against its pinned SHA-256 before execution.
 
 Runtime dependencies include libpurple 2, GLib, GdkPixbuf, libsecret, OpenSSL,
 and the native libraries linked by the bundled SQLCipher backend. Use
