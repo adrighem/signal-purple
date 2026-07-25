@@ -144,9 +144,10 @@ Each attachment is limited to 25 MiB, and one incoming message may contain at
 most 50 MiB. Save or reject existing receive prompts before retrying if Purple
 reports that 64 MiB is already waiting for a destination. Remote filenames are
 sanitized and decrypted bytes are held in memory rather than a plugin-managed
-temporary cache. Outgoing file uploads can be cancelled, but they are not kept
-in the persistent text-message outbox, so send the file again after a restart or
-failed upload.
+temporary cache. At most two outgoing files totaling 50 MiB can be queued or
+active per account; wait for or cancel a transfer before retrying when that
+limit is reached. Outgoing uploads are not kept in the persistent text-message
+outbox, so send the file again after a restart or failed upload.
 
 Incoming group JPEG and PNG images are shown inline when their MIME type and
 file signature agree, the complete image decodes, and it is no larger than 8192

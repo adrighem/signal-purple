@@ -31,6 +31,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, mpsc as tokio_mpsc, watch};
 use zeroize::Zeroizing;
 
+#[cfg(test)]
+use crate::attachment::AttachmentAdmission;
+use crate::attachment::{AttachmentPermit, MAX_ATTACHMENT_BYTES};
 use crate::event::{
     EVENT_ACCOUNT, EVENT_ATTACHMENT, EVENT_ATTACHMENT_SENT, EVENT_CONTACT,
     EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED, EVENT_GROUP,
@@ -42,7 +45,6 @@ use crate::event::{
 use crate::event_queue::EventSink;
 
 const MESSAGE_PROJECTION_CLIENT: &str = "signal-purple-v1";
-const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_MESSAGE_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 const GROUP_SYNC_RETRY_SECS: u64 = 30;
 const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
@@ -85,6 +87,7 @@ pub enum Command {
         content_type: String,
         data: Vec<u8>,
         group: bool,
+        permit: AttachmentPermit,
     },
     CancelAttachment {
         request_id: u64,
@@ -979,6 +982,7 @@ async fn receive_and_command_loop(
                             content_type,
                             data,
                             group,
+                            permit,
                         } => {
                             if group && !groups_authoritative {
                                 sink.emit(Event::request_error(
@@ -992,6 +996,7 @@ async fn receive_and_command_loop(
                             let abort = attachment_tasks.spawn_local(async move {
                                 attachment_task_result(
                                     request_id,
+                                    permit,
                                     upload_and_send_attachment(
                                         &mut attachment_manager,
                                         &recipient,
@@ -1147,9 +1152,14 @@ async fn handle_attachment_completion(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
     attachment_aborts: &mut HashMap<u64, tokio::task::AbortHandle>,
-    completed: Result<(u64, Result<SentMessage, String>), tokio::task::JoinError>,
+    completed: Result<AttachmentCompletion, tokio::task::JoinError>,
 ) {
-    let Ok((request_id, result)) = completed else {
+    let Ok(AttachmentCompletion {
+        request_id,
+        result,
+        permit: _permit,
+    }) = completed
+    else {
         return;
     };
     attachment_aborts.remove(&request_id);
@@ -1166,21 +1176,30 @@ async fn handle_attachment_completion(
     }
 }
 
+struct AttachmentCompletion {
+    request_id: u64,
+    result: Result<SentMessage, String>,
+    permit: AttachmentPermit,
+}
+
 async fn attachment_task_result(
     request_id: u64,
+    permit: AttachmentPermit,
     task: impl Future<Output = Result<SentMessage, String>>,
-) -> (u64, Result<SentMessage, String>) {
+) -> AttachmentCompletion {
     let result = std::panic::AssertUnwindSafe(task).catch_unwind().await;
-    (
+    AttachmentCompletion {
         request_id,
-        result.unwrap_or_else(|_| Err("Signal attachment task failed unexpectedly".to_owned())),
-    )
+        result: result
+            .unwrap_or_else(|_| Err("Signal attachment task failed unexpectedly".to_owned())),
+        permit,
+    }
 }
 
 async fn abort_in_flight_attachments(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
-    attachment_tasks: &mut tokio::task::JoinSet<(u64, Result<SentMessage, String>)>,
+    attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
     attachment_aborts: &mut HashMap<u64, tokio::task::AbortHandle>,
 ) {
     let completions = abort_and_drain_tasks(attachment_tasks, attachment_aborts.values()).await;
@@ -3252,14 +3271,22 @@ mod tests {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .build()
             .unwrap();
+        let admission = AttachmentAdmission::for_test(1, 1);
         let completed = runtime.block_on(async {
             let mut tasks = tokio::task::JoinSet::new();
-            tasks.spawn(attachment_task_result(41, async {
-                panic!("test attachment panic");
-            }));
+            tasks.spawn(attachment_task_result(
+                41,
+                admission.try_reserve(41, 1).unwrap(),
+                async {
+                    panic!("test attachment panic");
+                },
+            ));
             tasks.join_next().await.unwrap()
         });
-        let Ok((request_id, result)) = completed else {
+        let Ok(AttachmentCompletion {
+            request_id, result, ..
+        }) = completed
+        else {
             panic!("attachment panic escaped its task boundary");
         };
 
@@ -3285,6 +3312,9 @@ mod tests {
                 content_type: "text/plain".into(),
                 data: b"attachment".to_vec(),
                 group: false,
+                permit: AttachmentAdmission::for_test(1024, 1)
+                    .try_reserve(41, b"attachment".len())
+                    .unwrap(),
             },
         ]);
 

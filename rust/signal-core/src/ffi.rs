@@ -11,6 +11,7 @@ use zeroize::Zeroizing;
 
 const BACKEND_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
+use crate::attachment::{AttachmentAdmission, AttachmentAdmissionError, MAX_ATTACHMENT_BYTES};
 use crate::backend::{self, Command, Config, WorkerContext};
 use crate::event::{ABI_VERSION, Event, OwnedEvent, SignalEvent};
 #[cfg(test)]
@@ -19,7 +20,6 @@ use crate::event_queue::{EventPoll, EventQueue, event_queue};
 
 const MAX_RECIPIENT_BYTES: usize = 256;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
-const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_ATTACHMENT_FILENAME_BYTES: usize = 255;
 const MAX_CONTENT_TYPE_BYTES: usize = 255;
 const EVENT_QUEUE_CAPACITY: usize = 4096;
@@ -48,6 +48,7 @@ pub struct SignalCore {
     shutdown: watch::Sender<bool>,
     events: EventQueue,
     ready: Arc<AtomicBool>,
+    attachments: Arc<AttachmentAdmission>,
     join: Mutex<Option<JoinHandle<()>>>,
 }
 
@@ -201,6 +202,7 @@ pub unsafe extern "C" fn signal_core_new(
             shutdown: shutdown_tx,
             events,
             ready,
+            attachments: AttachmentAdmission::new(),
             join: Mutex::new(Some(join)),
         });
         // SAFETY: `out_core` was checked above. Ownership transfers to C and
@@ -334,6 +336,11 @@ unsafe fn send_attachment(
         {
             return SignalStatus::InvalidArgument;
         }
+        // SAFETY: `core` remains live and ABI calls are serialized by C.
+        let core = unsafe { &*core };
+        if !core.ready.load(Ordering::Acquire) {
+            return SignalStatus::NotReady;
+        }
         // SAFETY: all strings and bytes are copied during this call.
         let recipient =
             status_try!(unsafe { required_string(input.recipient, MAX_RECIPIENT_BYTES) });
@@ -347,21 +354,31 @@ unsafe fn send_attachment(
         {
             return SignalStatus::InvalidArgument;
         }
+        let attachment_permit = match core.attachments.try_reserve(request_id, input.data_len) {
+            Ok(permit) => permit,
+            Err(AttachmentAdmissionError::Invalid) => return SignalStatus::InvalidArgument,
+            Err(AttachmentAdmissionError::Capacity) => return SignalStatus::QueueFull,
+        };
+        let command_slot = match core.commands.try_reserve() {
+            Ok(slot) => slot,
+            Err(tokio_mpsc::error::TrySendError::Full(_)) => return SignalStatus::QueueFull,
+            Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
+                return SignalStatus::InternalError;
+            }
+        };
         // SAFETY: the caller guarantees `data_len` readable bytes; the bound
         // above prevents an oversized allocation, and the bytes are copied.
         let data = unsafe { std::slice::from_raw_parts(input.data, input.data_len) }.to_vec();
-        // SAFETY: `core` remains live and ABI calls are serialized by C.
-        queue_command(
-            unsafe { &*core },
-            Command::SendAttachment {
-                request_id,
-                recipient,
-                filename,
-                content_type,
-                data,
-                group,
-            },
-        )
+        command_slot.send(Command::SendAttachment {
+            request_id,
+            recipient,
+            filename,
+            content_type,
+            data,
+            group,
+            permit: attachment_permit,
+        });
+        SignalStatus::Ok
     })
 }
 
@@ -706,6 +723,7 @@ mod tests {
             shutdown,
             events,
             ready: Arc::new(AtomicBool::new(ready)),
+            attachments: AttachmentAdmission::new(),
             join: Mutex::new(join),
         }
     }
@@ -720,6 +738,7 @@ mod tests {
                 shutdown,
                 events,
                 ready: Arc::new(AtomicBool::new(true)),
+                attachments: AttachmentAdmission::new(),
                 join: Mutex::new(None),
             },
             event_sink,
@@ -997,6 +1016,105 @@ mod tests {
             )
         };
         assert_eq!(status, SignalStatus::InvalidArgument);
+    }
+
+    #[test]
+    fn attachment_abi_bounds_aggregate_payload_and_active_ids() {
+        let (commands, mut receiver) = tokio_mpsc::channel(3);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let mut core = test_core(commands, shutdown, None, true);
+        core.attachments = AttachmentAdmission::for_test(8, 2);
+        let value = CString::new("value").unwrap();
+        let data = [1u8; 4];
+
+        let send = |core: &mut SignalCore, request_id, data: &[u8]| {
+            // SAFETY: the core, strings, and byte slice remain valid for this call.
+            unsafe {
+                signal_core_send_attachment(
+                    core,
+                    request_id,
+                    value.as_ptr(),
+                    value.as_ptr(),
+                    value.as_ptr(),
+                    data.as_ptr(),
+                    data.len(),
+                )
+            }
+        };
+
+        assert_eq!(send(&mut core, 1, &data), SignalStatus::Ok);
+        assert_eq!(send(&mut core, 2, &data), SignalStatus::Ok);
+        assert_eq!(core.attachments.usage(), (8, 2));
+        assert_eq!(send(&mut core, 3, &[1]), SignalStatus::QueueFull);
+        assert_eq!(send(&mut core, 1, &[1]), SignalStatus::InvalidArgument);
+
+        drop(receiver.try_recv().unwrap());
+        assert_eq!(send(&mut core, 1, &data), SignalStatus::Ok);
+    }
+
+    #[test]
+    fn attachment_abi_rejects_zero_ids_without_consuming_capacity() {
+        let (commands, _receiver) = tokio_mpsc::channel(1);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let mut core = test_core(commands, shutdown, None, true);
+        core.attachments = AttachmentAdmission::for_test(1, 1);
+        let value = CString::new("value").unwrap();
+        let data = [1u8];
+
+        // SAFETY: the core, strings, and byte slice remain valid for this call.
+        let status = unsafe {
+            signal_core_send_attachment(
+                &mut core,
+                0,
+                value.as_ptr(),
+                value.as_ptr(),
+                value.as_ptr(),
+                data.as_ptr(),
+                data.len(),
+            )
+        };
+
+        assert_eq!(status, SignalStatus::InvalidArgument);
+        assert_eq!(core.attachments.usage(), (0, 0));
+    }
+
+    #[test]
+    fn attachment_abi_checks_readiness_and_queue_space_before_admission() {
+        let (commands, mut receiver) = tokio_mpsc::channel(1);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let mut core = test_core(commands, shutdown, None, false);
+        core.attachments = AttachmentAdmission::for_test(1, 1);
+        let value = CString::new("value").unwrap();
+        let data = [1u8];
+
+        let send = |core: &mut SignalCore, request_id| {
+            // SAFETY: the core, strings, and byte slice remain valid for this call.
+            unsafe {
+                signal_core_send_attachment(
+                    core,
+                    request_id,
+                    value.as_ptr(),
+                    value.as_ptr(),
+                    value.as_ptr(),
+                    data.as_ptr(),
+                    data.len(),
+                )
+            }
+        };
+
+        assert_eq!(send(&mut core, 1), SignalStatus::NotReady);
+        assert_eq!(core.attachments.usage(), (0, 0));
+
+        core.ready.store(true, Ordering::Release);
+        assert_eq!(
+            queue_control_command(&core, Command::AcknowledgeMessage { delivery_id: 1 }),
+            SignalStatus::Ok
+        );
+        assert_eq!(send(&mut core, 1), SignalStatus::QueueFull);
+        assert_eq!(core.attachments.usage(), (0, 0));
+
+        drop(receiver.try_recv().unwrap());
+        assert_eq!(send(&mut core, 1), SignalStatus::Ok);
     }
 
     #[test]

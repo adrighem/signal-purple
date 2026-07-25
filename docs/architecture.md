@@ -103,9 +103,12 @@ older messages from the primary phone or Signal service.
   attachment falls back to Purple's receive-file flow. Outgoing transfers use
   Purple's direct and group send-file callbacks and a cancellable backend upload
   task.
-  Each file is capped at 25 MiB, each incoming message at 50 MiB, queued binary
-  events at 64 MiB, and unresolved Purple receive prompts at 64 MiB. Decrypted
-  attachment data is never written to a plugin-managed plaintext cache.
+  Each file is capped at 25 MiB and each incoming message at 50 MiB. Outgoing
+  admission spans queued, recovery-deferred, and active work, with at most two
+  files totaling 50 MiB per account. Queued binary events and unresolved Purple
+  receive prompts each have independent 64 MiB budgets. The
+  [attachment policy](attachment-policy.md) maps these limits to their owners.
+  Decrypted attachment data is never written to a plugin-managed plaintext cache.
   Attachment sends are not part of the durable text-message outbox.
 - Presage acknowledges an envelope to Signal before the Purple UI can display
   it, but saves supported content in SQLCipher first. signal-purple records a

@@ -45,9 +45,13 @@ and message bodies are sensitive. Production code must not log them.
 - Worker shutdown is joined before account state is freed.
 - Backend events use a bounded queue; overflow fails visibly and reconnects
   rather than allowing unbounded process memory growth.
-- Attachments are capped at 25 MiB each and 50 MiB per incoming message. Binary
-  backend events and unresolved receive prompts each have separate 64 MiB
-  ceilings. Group images are eligible for inline display only when a JPEG or
+- Attachments are capped at 25 MiB each and 50 MiB per incoming message.
+  Outgoing queued, recovery-deferred, and active attachments share a per-account
+  limit of two files and 50 MiB. Admission capacity and active request identity
+  are released together on every terminal path. Binary backend events and
+  unresolved receive prompts each have separate 64 MiB ceilings; see the
+  [attachment policy](attachment-policy.md). Group images are eligible for
+  inline display only when a JPEG or
   PNG MIME type agrees with its file signature, the complete payload decodes,
   and its dimensions are no larger than 8192 pixels per edge or 16 megapixels
   total. Decoder validation is chunked, and rejected dimensions are scaled down

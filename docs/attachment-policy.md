@@ -1,0 +1,25 @@
+# Attachment resource policy
+
+These are local defensive limits, not Signal service guarantees. They bound
+different ownership stages independently and may change without a C ABI bump.
+
+| Direction and stage | Limit | Owner | Outcome |
+| --- | ---: | --- | --- |
+| Incoming or outgoing file | 25 MiB per file | Rust core and C adapter | Reject the file |
+| Decrypted incoming files | 50 MiB per Signal message | Rust backend | Reject remaining attachments |
+| Admitted outgoing files | 2 files and 50 MiB total per account | Rust core | Retryable queue-full result |
+| Queued binary events | 64 MiB | Rust event queue | Visible overflow and reconnect |
+| Unresolved receive prompts | 64 MiB | C adapter | Ask the user to resolve existing prompts |
+| Inline group images | 8192 pixels per edge and 16 megapixels | C image decoder | Fall back to a file prompt |
+
+Outgoing admission covers commands waiting in the core, commands deferred
+during recovery, and active upload tasks. A non-cloneable permit owns both the
+payload budget and request identifier through terminal event delivery; dropping
+it on rejection, cancellation, panic, recovery failure, or shutdown restores
+capacity automatically. The two-file admission ceiling also bounds concurrent
+uploads.
+
+The retained-payload limit is not a complete resident-memory bound. The C
+adapter and upstream libraries may temporarily hold additional copies while a
+file crosses their APIs. Attachments are not stored in the durable text-message
+outbox and must be sent again after a failed upload or restart.
