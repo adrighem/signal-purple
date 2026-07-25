@@ -84,7 +84,15 @@ def validate_release_workflows() -> None:
         release_please,
         RELEASE_PLEASE_WORKFLOW,
         [
+            "id: app-token",
+            "actions/create-github-app-token@"
+            "bcd2ba49218906704ab6c1aa796996da409d3eb1",
+            "client-id: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}",
+            "private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}",
+            "permission-contents: write",
+            "permission-pull-requests: write",
             "id: release",
+            "token: ${{ steps.app-token.outputs.token }}",
             "release_created: ${{ steps.release.outputs.release_created }}",
             "release_sha: ${{ steps.release.outputs.sha }}",
             "release_tag: ${{ steps.release.outputs.tag_name }}",
@@ -96,7 +104,11 @@ def validate_release_workflows() -> None:
     reject_fragments(
         release_please,
         RELEASE_PLEASE_WORKFLOW,
-        ["workflow_dispatch"],
+        [
+            "workflow_dispatch",
+            "RELEASE_PLEASE_TOKEN",
+            "secrets.GITHUB_TOKEN",
+        ],
     )
 
     release_artifacts = (PROJECT_ROOT / RELEASE_ARTIFACTS_WORKFLOW).read_text(

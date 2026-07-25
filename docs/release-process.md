@@ -20,10 +20,12 @@
    GitHub prerelease without marking it as `Latest`. A failed build leaves the
    release private and does not move or recreate its tag.
 
-The workflow uses `RELEASE_PLEASE_TOKEN` when configured and otherwise falls
-back to `GITHUB_TOKEN`. Configure a fine-grained token or GitHub App token when
-release pull requests must trigger other workflows automatically; events made
-with the repository `GITHUB_TOKEN` do not start new workflow runs.
+The workflow uses a repository-scoped installation token from the private
+Release Please GitHub App. The App has only Contents and Pull requests
+read/write permissions and is installed only on this repository. This lets
+release pull requests trigger their checks automatically; events made with the
+repository `GITHUB_TOKEN` do not start new workflow runs. The workflow fails
+closed if its App Client ID variable or private-key secret is unavailable.
 
 The artifact workflow is reusable only from the trusted Release Please
 workflow; it has no public event or manual dispatch trigger. Release Please

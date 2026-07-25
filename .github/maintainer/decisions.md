@@ -75,3 +75,7 @@
   checksum-pinned Release Please action, exact tag/commit/version checks,
   least-privilege jobs, and OIDC artifact provenance. Retain the existing
   OpenPGP public key only for historical verification.
+- Authenticate Release Please with a private, repository-scoped GitHub App
+  limited to Contents and Pull requests read/write. Do not fall back to
+  `GITHUB_TOKEN`: missing App configuration must fail visibly, while
+  App-authored release pull requests start their checks automatically.
