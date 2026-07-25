@@ -286,3 +286,62 @@ absent. `state.json` was left unchanged rather than inferring its schema.
 - Downloaded release assets passed `SHA256SUMS`; the detached checksum signature
   verifies with the release signing key. Exact-candidate live Signal
   interoperability and soak testing remain explicitly waived for this alpha.
+
+## 2026-07-25 — Dependabot queue review
+
+- Repository `main` is clean at `6b63c70`; current main CI, CodeQL, and Release
+  Please runs pass. Published pre-releases are v0.2.0, v0.2.1, and v0.2.2.
+- Inbox and open queue contain PR:15 through PR:21. There are no open issues,
+  Dependabot alerts, or code-scanning alerts.
+- Complete diff and provenance review found PR:17 low-risk and merge-ready.
+  PR:15 and PR:16 are also merge-ready with low-to-moderate residual risk
+  because pull-request CI does not execute their release-only artifact paths.
+  Recommended merge order is PR:17, PR:16, then PR:15, with checks revalidated
+  after each merge.
+- PR:18, PR:20, and PR:21 have green CI but must not merge as generated:
+  Dependabot removed the release-sensitive signal-core version marker from
+  `Cargo.lock`. PR:21 additionally needs an exact historical group-ID digest
+  regression before changing the hash implementation dependency.
+- PR:19 is not mergeable. Its breaking websocket upgrade duplicates the HTTP
+  and websocket dependency stacks while pinned Presage remains on the old API;
+  both normal and Debian builds fail. Defer it until the Signal stack can move
+  in sync.
+- PR CodeQL checks are neutral because the expected configurations were not
+  found; repository CodeQL on current `main` passes. Notes: `notes/pr-15.md`
+  through `notes/pr-21.md`.
+- After explicit approval, PR:17 merged normally as `8c426259`. The installed
+  GitHub credentials lack workflow scope, so API merges of PR:16 and PR:15
+  were not viable. Their exact reviewed heads were merged through isolated
+  worktrees and pushed as `f60b2d39` and `d62542c6`; GitHub recognized both
+  source PRs as merged.
+- Post-merge CI, Debian build/install/probe, CodeQL, and Release Please pass for
+  all three commits. PR:15's first Release Please attempt failed on a GitHub
+  GraphQL internal error while fetching merge history. A direct history query
+  confirmed API recovery, and the failed job rerun passed without repository
+  changes.
+- The final inbox contains only PR:18 through PR:21. Dependabot and
+  code-scanning alerts remain empty.
+- PR:22 added a focused regression guard for the signal-core lockfile marker
+  and Release Please generic extra-file mapping. It merged as `a5baaacf`; PR
+  and exact-main validation passed.
+- PR:18 was rebased onto the guard, its marker was restored, and the final
+  futures-only diff merged as `a020a2a4`. PR:20 was then rebased onto that
+  lockfile, repaired, and merged as `116156c9`.
+- PR:21 was rebased onto the combined graph, gained an independently reproduced
+  historical group-ID digest vector, restored the marker, and merged as
+  `6160293a`. The final graph intentionally retains transitive sha2 0.10.9
+  alongside direct sha2 0.11.0.
+- The rebased Dependabot commits and maintainer repair commits for PR:18,
+  PR:20, and PR:21 are unsigned. Their account provenance and complete diffs
+  were independently reviewed and fully explained; do not describe them as
+  cryptographically verified.
+- PR:19 received the approved compatibility explanation and was closed
+  unmerged. Revisit reqwest-websocket 0.6 only with a coordinated
+  Presage/libsignal-service upgrade and live reconnect validation.
+- Final exact-main CI, Debian build/install/probe, CodeQL, and Release Please
+  passed after each dependency merge. No source or alert failure was retried
+  without diagnosis.
+
+The installed maintainer package still lacks its referenced triage script and
+reference files, so this run was captured manually and `state.json` was left
+unchanged rather than inferring its schema.
