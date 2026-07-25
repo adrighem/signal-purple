@@ -6,6 +6,8 @@ project_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/signal-purple-release-test.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 
+python3 "$project_root/tests/test_release_please.py"
+
 expected_fingerprint=B3C0B75FA3B33AC278738C5CB1798BCDA76054BD
 key_listing=$(gpg --batch --with-colons --show-keys \
     "$project_root/keys/release-signing-key.asc")
