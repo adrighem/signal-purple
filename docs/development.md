@@ -8,7 +8,7 @@ graph requires Rust 1.94 or later; `rust-toolchain.toml` pins 1.95.0.
 Install system dependencies:
 
 ```sh
-sudo apt install build-essential cmake ninja-build pkg-config \
+sudo apt install build-essential cmake git gnupg ninja-build pkg-config python3 xz-utils \
   libpurple-dev libglib2.0-dev libgdk-pixbuf-2.0-dev libsecret-1-dev libssl-dev \
   clang libclang-dev protobuf-compiler
 rustup toolchain install 1.95.0 --component rustfmt,clippy
@@ -19,15 +19,35 @@ the SQLCipher/OpenSSL build used here.
 
 ## Standard checks
 
-```sh
-cargo fmt --manifest-path rust/signal-core/Cargo.toml -- --check
-cargo clippy --locked --manifest-path rust/signal-core/Cargo.toml \
-  --all-targets -- -D warnings
-cargo test --locked --manifest-path rust/signal-core/Cargo.toml --lib
+Use the canonical fast feedback loop while changing Rust code:
 
-cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-cmake --build build
-ctest --test-dir build --output-on-failure
+```sh
+scripts/check.sh fast
+```
+
+Before requesting review, run the same complete local gate used by the primary
+CI job:
+
+```sh
+scripts/check.sh full
+```
+
+The full gate runs Rust format, clippy, and all Rust tests; release-helper
+tests; a Debug CMake/Ninja build; CTest; and a staged installation/plugin-load
+probe. Set `SIGNAL_PURPLE_BUILD_DIR` to use a different build directory and
+`SIGNAL_PURPLE_BUILD_JOBS` to change build parallelism. The separate Debian 13
+CI job validates the clean supported-platform environment.
+
+Each phase is also directly runnable, for example:
+
+```sh
+scripts/check.sh rust-test
+scripts/check.sh configure
+scripts/check.sh build
+scripts/check.sh c-test
+ctest --test-dir build --output-on-failure -R contact-sync
+cargo test --locked --manifest-path rust/signal-core/Cargo.toml \
+  bounds_binary_events
 ```
 
 The C tests include a headless libpurple core that probes and loads the actual
@@ -54,6 +74,9 @@ requests.
   unwind into C.
 - Never expose raw upstream `libsignal` bridge symbols.
 - Keep `Cargo.lock` and exact Git revisions in reviewable commits.
+- Keep bounded producer/consumer mechanics in `event_queue.rs`; the backend
+  actor emits events and the FFI layer polls them rather than reimplementing
+  notification state.
 
 ## Updating dependencies
 

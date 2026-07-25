@@ -366,3 +366,25 @@ absent. `state.json` was left unchanged rather than inferring its schema.
 The installed maintainer package still lacks its referenced triage script and
 reference files, so this run was captured manually and `state.json` was left
 unchanged rather than inferring its schema.
+
+## 2026-07-25 — Architecture and contributor-maintainability refactor
+
+- Parallel production, Rust-test, and contributor-workflow reviews identified
+  event delivery, stale CMake Rust dependencies, and validation-command drift
+  as the highest-leverage behavior-preserving refactor seams.
+- Event producer/consumer state, descriptor notification, overflow, and byte
+  accounting moved into one module. Boundary tests now use small injected byte
+  budgets and still observe the real Unix-stream notification token.
+- Attachment-task panics retain their request identity and become bounded
+  request failures instead of leaving a transfer pending.
+- Cargo now remains the Rust dependency authority during every CMake build.
+  A repeated no-change CMake build invoked Cargo and completed incrementally.
+- `scripts/check.sh` became the shared contributor and primary-CI gate, with
+  warning-as-error policy and a reusable staged-install probe.
+- Rust formatting, 51 Rust tests, release-helper tests, actionlint, yamllint,
+  shell syntax checks, CMake/Ninja with `-Werror`, four CTest targets, and the
+  staged plugin installation/load probe passed locally. Local Clippy awaits CI
+  because the host has Clippy 1.87 beside Rust/Cargo 1.95.
+- The remaining attachment-admission, recovery-state, connection-lifecycle,
+  projection-acknowledgment, and ABI-conformance work is recorded in
+  `work/architecture-refactor-2026-07-25.md`.

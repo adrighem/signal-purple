@@ -62,9 +62,9 @@ operating-system baselines are not supported. See the full
 On Debian 13:
 
 ```sh
-sudo apt install pidgin git build-essential cmake ninja-build pkg-config \
+sudo apt install pidgin git gnupg build-essential cmake ninja-build pkg-config python3 \
   libpurple-dev libglib2.0-dev libgdk-pixbuf-2.0-dev libsecret-1-dev \
-  libssl-dev clang libclang-dev protobuf-compiler
+  libssl-dev clang libclang-dev protobuf-compiler xz-utils
 ```
 
 Install [rustup](https://rustup.rs/), then install the pinned toolchain when the
@@ -86,6 +86,11 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 cargo test --locked --manifest-path rust/signal-core/Cargo.toml
 ```
+
+A contributor should run the canonical `scripts/check.sh full` gate before
+requesting review; it also checks formatting, linting, release helpers, and a
+staged plugin installation. See the [development guide](docs/development.md)
+for faster targeted modes.
 
 A normal checkout downloads the exact Git dependencies recorded in
 [`Cargo.lock`](rust/signal-core/Cargo.lock) on its first build. Source archives

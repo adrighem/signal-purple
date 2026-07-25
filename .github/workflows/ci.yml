@@ -19,10 +19,9 @@ jobs:
     timeout-minutes: 45
     env:
       CARGO_NET_GIT_FETCH_WITH_CLI: "true"
-      CFLAGS: "-Werror"
     steps:
       - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 
@@ -32,7 +31,7 @@ jobs:
           sudo apt-get install --no-install-recommends \
             build-essential clang cmake git libclang-dev libglib2.0-dev \
             libgdk-pixbuf-2.0-dev libpurple-dev libsecret-1-dev libssl-dev ninja-build \
-            pkg-config protobuf-compiler python3 xz-utils
+            gnupg pkg-config protobuf-compiler python3 xz-utils
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
@@ -40,39 +39,8 @@ jobs:
           toolchain: 1.95.0
           components: rustfmt, clippy
 
-      - name: Check Rust formatting
-        run: cargo fmt --manifest-path rust/signal-core/Cargo.toml -- --check
-
-      - name: Lint Rust
-        run: cargo clippy --locked --manifest-path rust/signal-core/Cargo.toml --all-targets -- -D warnings
-
-      - name: Test Rust core
-        run: cargo test --locked --manifest-path rust/signal-core/Cargo.toml --lib
-
-      - name: Test deterministic source archives
-        run: sh tests/test_make_source_archive.sh
-
-      - name: Test release artifact helpers
-        run: sh tests/test_release_artifacts.sh
-
-      - name: Configure
-        run: >-
-          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Debug
-          -DCMAKE_INSTALL_PREFIX=/usr
-
-      - name: Build
-        run: cmake --build build --parallel 2
-
-      - name: Test C adapter and plugin
-        run: ctest --test-dir build --output-on-failure
-
-      - name: Install smoke test
-        run: |
-          cmake --install build --prefix "$RUNNER_TEMP/signal-purple"
-          plugin_path="$(awk '/libsignal-purple\.so$/ { print; exit }' \
-            build/install_manifest.txt)"
-          test -n "$plugin_path"
-          G_DEBUG=fatal-warnings ./build/plugin-probe "$plugin_path"
+      - name: Run canonical checks
+        run: scripts/check.sh full
 
   debian-13-build-and-install:
     runs-on: ubuntu-latest
@@ -95,7 +63,7 @@ jobs:
             libsecret-1-dev libssl-dev ninja-build pkgconf protobuf-compiler tar
 
       - name: Check out source
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
 

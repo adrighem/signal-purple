@@ -31,3 +31,10 @@
   `# x-release-please-version` marker from `Cargo.lock`. Treat that as a
   release blocker and guard the marker in CI before merging automated lockfile
   changes.
+- Manually listing Rust modules as CMake custom-command dependencies can leave
+  incremental CMake builds using a stale backend after a new module is added.
+  Invoke Cargo as the dependency authority and let its incremental build
+  decide whether compilation is needed.
+- Keep contributor commands and primary CI phases behind one repository-owned
+  driver. Duplicated command lists drift in warning policy, test scope, and
+  install probing even when each list is individually reasonable.

@@ -13,9 +13,11 @@ keys, provisioning URIs, database passphrases, or private message contents.
 
 ## Supported versions
 
-There is no supported release yet. Security fixes target the latest `main`
-revision until the first tagged release. The project may need urgent dependency
-updates when Signal changes its service or cryptographic stack.
+There is no supported stable release yet; all published versions are alpha
+prereleases. Security fixes target the latest `main` revision. The maintainer
+may publish an updated alpha release when a fix is suitable for users, but
+older alpha versions do not receive backports. The project may need urgent
+dependency updates when Signal changes its service or cryptographic stack.
 
 ## Scope
 

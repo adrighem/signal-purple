@@ -67,24 +67,19 @@ set(SIGNAL_CORE_BUILD_RUNTIME_LIBRARY
     "${SIGNAL_CORE_BUILD_RUNTIME_DIR}/libsignal_core.so")
 
 find_program(CARGO_EXECUTABLE cargo REQUIRED)
-add_custom_command(
-    OUTPUT "${SIGNAL_CORE_LIBRARY}"
+add_custom_target(signal-core-build ALL
     COMMAND "${CMAKE_COMMAND}" -E env
             "CARGO_TARGET_DIR=${SIGNAL_CARGO_TARGET_DIR}"
             "${CARGO_EXECUTABLE}" build --locked ${SIGNAL_CARGO_FLAGS}
             --manifest-path "${SIGNAL_CORE_MANIFEST}"
+    BYPRODUCTS "${SIGNAL_CORE_LIBRARY}"
     DEPENDS
         "${SIGNAL_CORE_MANIFEST}"
         "${CMAKE_CURRENT_SOURCE_DIR}/rust/signal-core/Cargo.lock"
-        "${CMAKE_CURRENT_SOURCE_DIR}/rust/signal-core/src/lib.rs"
-        "${CMAKE_CURRENT_SOURCE_DIR}/rust/signal-core/src/backend.rs"
-        "${CMAKE_CURRENT_SOURCE_DIR}/rust/signal-core/src/event.rs"
-        "${CMAKE_CURRENT_SOURCE_DIR}/rust/signal-core/src/ffi.rs"
         "${CMAKE_CURRENT_SOURCE_DIR}/rust-toolchain.toml"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
     COMMENT "Building the pinned Presage backend"
     VERBATIM)
-add_custom_target(signal-core-build ALL DEPENDS "${SIGNAL_CORE_LIBRARY}")
 add_custom_command(
     OUTPUT "${SIGNAL_CORE_BUILD_RUNTIME_LIBRARY}"
     COMMAND "${CMAKE_COMMAND}" -E make_directory

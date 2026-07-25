@@ -79,3 +79,17 @@
   limited to Contents and Pull requests read/write. Do not fall back to
   `GITHUB_TOKEN`: missing App configuration must fail visibly, while
   App-authored release pull requests start their checks automatically.
+
+## 2026-07-25 — Refactor along owned boundaries
+
+- Prefer small behavior-preserving extractions over splitting the backend actor
+  or Purple connection lifecycle in one change.
+- Event delivery owns its producer, consumer, descriptor notification,
+  overflow state, and byte accounting in one Rust module.
+- Cargo remains the Rust dependency authority; CMake invokes its incremental
+  build rather than maintaining a second source-file list.
+- `scripts/check.sh` is the canonical contributor and primary-CI validation
+  entry point. The clean Debian 13 job remains the supported-platform gate.
+- Track the remaining attachment-admission, recovery-state, connection
+  lifecycle, acknowledgment, and ABI-conformance work in
+  `work/architecture-refactor-2026-07-25.md`.

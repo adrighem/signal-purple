@@ -1,13 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::Write;
-use std::os::unix::net::UnixStream;
+use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures::{StreamExt, channel::oneshot, pin_mut};
+use futures::{FutureExt, StreamExt, channel::oneshot, pin_mut};
 use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::content::{
     Content, ContentBody, DataMessage, GroupContextV2, ServiceError,
@@ -40,11 +39,11 @@ use crate::event::{
     EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT, EVENT_RECOVERING, EVENT_TYPING, Event,
     FLAG_OUTGOING,
 };
+use crate::event_queue::EventSink;
 
 const MESSAGE_PROJECTION_CLIENT: &str = "signal-purple-v1";
 const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_MESSAGE_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
-const MAX_QUEUED_EVENT_BYTES: usize = 64 * 1024 * 1024;
 const GROUP_SYNC_RETRY_SECS: u64 = 30;
 const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
 const RECENT_PROJECTION_IDENTITY_LIMIT: usize = 4096;
@@ -59,11 +58,7 @@ pub(crate) struct WorkerContext {
     pub(crate) config: Config,
     pub(crate) commands: tokio_mpsc::Receiver<Command>,
     pub(crate) shutdown: watch::Receiver<bool>,
-    pub(crate) events: mpsc::SyncSender<Event>,
-    pub(crate) event_notification: Arc<EventNotification>,
-    pub(crate) event_notification_writer: Arc<UnixStream>,
-    pub(crate) overflowed: Arc<AtomicBool>,
-    pub(crate) queued_bytes: Arc<AtomicUsize>,
+    pub(crate) events: EventSink,
     pub(crate) ready: Arc<AtomicBool>,
 }
 
@@ -522,129 +517,15 @@ fn receive_error_is_transient(
     }
 }
 
-#[derive(Clone)]
-struct EventSink {
-    sender: mpsc::SyncSender<Event>,
-    notification: Arc<EventNotification>,
-    notification_writer: Arc<UnixStream>,
-    overflowed: Arc<AtomicBool>,
-    queued_bytes: Arc<AtomicUsize>,
-}
-
-pub(crate) struct EventNotification {
-    pending: AtomicBool,
-    serial: Mutex<()>,
-}
-
-impl EventNotification {
-    pub(crate) fn new() -> Self {
-        Self {
-            pending: AtomicBool::new(false),
-            serial: Mutex::new(()),
-        }
-    }
-
-    pub(crate) fn lock(&self) -> std::sync::MutexGuard<'_, ()> {
-        self.serial
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-    }
-
-    pub(crate) fn mark_pending(&self) -> bool {
-        self.pending.swap(true, Ordering::AcqRel)
-    }
-
-    pub(crate) fn clear_pending(&self) {
-        self.pending.store(false, Ordering::Release);
-    }
-
-    #[cfg(test)]
-    pub(crate) fn is_pending(&self) -> bool {
-        self.pending.load(Ordering::Acquire)
-    }
-}
-
-impl EventSink {
-    fn notify_locked(&self) {
-        if self.notification.mark_pending() {
-            return;
-        }
-
-        let mut writer = self.notification_writer.as_ref();
-        loop {
-            match writer.write(&[1]) {
-                Ok(1) => return,
-                Ok(_) => {
-                    self.notification.clear_pending();
-                    return;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-                // A full socket means its peer is already readable, so the
-                // level-trigger invariant still holds.
-                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => return,
-                Err(_) => {
-                    self.notification.clear_pending();
-                    return;
-                }
-            }
-        }
-    }
-
-    fn emit(&self, event: Event) {
-        if self.overflowed.load(Ordering::Acquire) {
-            return;
-        }
-        let event_bytes = event.data.len();
-        if event_bytes > 0
-            && self
-                .queued_bytes
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-                    queued
-                        .checked_add(event_bytes)
-                        .filter(|total| *total <= MAX_QUEUED_EVENT_BYTES)
-                })
-                .is_err()
-        {
-            let _notification_guard = self.notification.lock();
-            self.overflowed.store(true, Ordering::Release);
-            self.notify_locked();
-            return;
-        }
-        let _notification_guard = self.notification.lock();
-        match self.sender.try_send(event) {
-            Ok(()) => self.notify_locked(),
-            Err(error) => {
-                if event_bytes > 0 {
-                    self.queued_bytes.fetch_sub(event_bytes, Ordering::AcqRel);
-                }
-                if matches!(error, mpsc::TrySendError::Full(_)) {
-                    self.overflowed.store(true, Ordering::Release);
-                    self.notify_locked();
-                }
-            }
-        }
-    }
-}
-
 pub(crate) fn run_worker(context: WorkerContext) {
     let WorkerContext {
         config,
         commands,
         shutdown,
         events,
-        event_notification,
-        event_notification_writer,
-        overflowed,
-        queued_bytes,
         ready,
     } = context;
-    let sink = EventSink {
-        sender: events,
-        notification: event_notification,
-        notification_writer: event_notification_writer,
-        overflowed,
-        queued_bytes,
-    };
+    let sink = events;
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1109,16 +990,19 @@ async fn receive_and_command_loop(
                             let mut attachment_manager = manager.clone();
                             let attachment_departed_groups = departed_groups.clone();
                             let abort = attachment_tasks.spawn_local(async move {
-                                let result = upload_and_send_attachment(
-                                    &mut attachment_manager,
-                                    &recipient,
-                                    filename,
-                                    content_type,
-                                    data,
-                                    group,
-                                    &attachment_departed_groups,
-                                ).await;
-                                (request_id, result)
+                                attachment_task_result(
+                                    request_id,
+                                    upload_and_send_attachment(
+                                        &mut attachment_manager,
+                                        &recipient,
+                                        filename,
+                                        content_type,
+                                        data,
+                                        group,
+                                        &attachment_departed_groups,
+                                    ),
+                                )
+                                .await
                             });
                             attachment_aborts.insert(request_id, abort);
                         }
@@ -1280,6 +1164,17 @@ async fn handle_attachment_completion(
         }
         Err(error) => sink.emit(Event::request_error(request_id, error)),
     }
+}
+
+async fn attachment_task_result(
+    request_id: u64,
+    task: impl Future<Output = Result<SentMessage, String>>,
+) -> (u64, Result<SentMessage, String>) {
+    let result = std::panic::AssertUnwindSafe(task).catch_unwind().await;
+    (
+        request_id,
+        result.unwrap_or_else(|_| Err("Signal attachment task failed unexpectedly".to_owned())),
+    )
 }
 
 async fn abort_in_flight_attachments(
@@ -2890,14 +2785,6 @@ fn qr_png(value: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
-
-    fn test_notification() -> (Arc<EventNotification>, Arc<UnixStream>, UnixStream) {
-        let (reader, writer) = UnixStream::pair().unwrap();
-        reader.set_nonblocking(true).unwrap();
-        writer.set_nonblocking(true).unwrap();
-        (Arc::new(EventNotification::new()), Arc::new(writer), reader)
-    }
 
     #[test]
     fn derives_stable_non_secret_group_identifiers() {
@@ -3361,6 +3248,29 @@ mod tests {
     }
 
     #[test]
+    fn attachment_task_panics_keep_the_request_identity() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let completed = runtime.block_on(async {
+            let mut tasks = tokio::task::JoinSet::new();
+            tasks.spawn(attachment_task_result(41, async {
+                panic!("test attachment panic");
+            }));
+            tasks.join_next().await.unwrap()
+        });
+        let Ok((request_id, result)) = completed else {
+            panic!("attachment panic escaped its task boundary");
+        };
+
+        assert_eq!(request_id, 41);
+        let Err(error) = result else {
+            panic!("panicking attachment task unexpectedly succeeded");
+        };
+        assert_eq!(error, "Signal attachment task failed unexpectedly");
+    }
+
+    #[test]
     fn cancels_an_attachment_before_deferred_replay() {
         let mut commands = VecDeque::from([
             Command::SendMessage {
@@ -3539,176 +3449,5 @@ mod tests {
                 .as_deref(),
             Some("actual.pdf")
         );
-    }
-
-    #[test]
-    fn reports_event_queue_overflow_without_growing_the_queue() {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let (notification, notification_writer, mut notification_reader) = test_notification();
-        let overflowed = Arc::new(AtomicBool::new(false));
-        let sink = EventSink {
-            sender,
-            notification: Arc::clone(&notification),
-            notification_writer,
-            overflowed: Arc::clone(&overflowed),
-            queued_bytes: Arc::new(AtomicUsize::new(0)),
-        };
-
-        sink.emit(Event {
-            kind: EVENT_MESSAGE,
-            ..Event::default()
-        });
-        sink.emit(Event {
-            kind: EVENT_GROUP_MESSAGE,
-            ..Event::default()
-        });
-        sink.emit(Event::default());
-
-        assert!(overflowed.load(Ordering::Acquire));
-        assert!(notification.is_pending());
-        let mut token = [0u8; 1];
-        assert_eq!(notification_reader.read(&mut token).unwrap(), 1);
-        assert_eq!(token, [1]);
-        assert_eq!(
-            notification_reader.read(&mut token).unwrap_err().kind(),
-            std::io::ErrorKind::WouldBlock
-        );
-        assert_eq!(receiver.try_recv().unwrap().kind, EVENT_MESSAGE);
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
-    }
-
-    #[test]
-    fn bounds_binary_event_queue_memory() {
-        let (sender, receiver) = mpsc::sync_channel(4);
-        let (notification, notification_writer, _notification_reader) = test_notification();
-        let overflowed = Arc::new(AtomicBool::new(false));
-        let queued_bytes = Arc::new(AtomicUsize::new(0));
-        let sink = EventSink {
-            sender,
-            notification,
-            notification_writer,
-            overflowed: Arc::clone(&overflowed),
-            queued_bytes: Arc::clone(&queued_bytes),
-        };
-
-        sink.emit(Event {
-            kind: EVENT_ATTACHMENT,
-            data: vec![0; MAX_QUEUED_EVENT_BYTES],
-            ..Event::default()
-        });
-        sink.emit(Event {
-            kind: EVENT_ATTACHMENT,
-            data: vec![0],
-            ..Event::default()
-        });
-
-        assert!(overflowed.load(Ordering::Acquire));
-        assert_eq!(queued_bytes.load(Ordering::Acquire), MAX_QUEUED_EVENT_BYTES);
-        assert_eq!(
-            receiver.try_recv().unwrap().data.len(),
-            MAX_QUEUED_EVENT_BYTES
-        );
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
-    }
-
-    #[test]
-    fn notifies_when_binary_overflow_happens_before_any_enqueue() {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let (notification, notification_writer, mut notification_reader) = test_notification();
-        let overflowed = Arc::new(AtomicBool::new(false));
-        let sink = EventSink {
-            sender,
-            notification: Arc::clone(&notification),
-            notification_writer,
-            overflowed: Arc::clone(&overflowed),
-            queued_bytes: Arc::new(AtomicUsize::new(0)),
-        };
-
-        sink.emit(Event {
-            kind: EVENT_ATTACHMENT,
-            data: vec![0; MAX_QUEUED_EVENT_BYTES + 1],
-            ..Event::default()
-        });
-
-        assert!(overflowed.load(Ordering::Acquire));
-        assert!(notification.is_pending());
-        assert!(matches!(
-            receiver.try_recv(),
-            Err(mpsc::TryRecvError::Empty)
-        ));
-        let mut token = [0u8; 1];
-        assert_eq!(notification_reader.read(&mut token).unwrap(), 1);
-        assert_eq!(token, [1]);
-    }
-
-    #[test]
-    fn failed_notification_write_does_not_leave_pending_set() {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        let (reader, writer) = UnixStream::pair().unwrap();
-        writer.set_nonblocking(true).unwrap();
-        drop(reader);
-        let notification = Arc::new(EventNotification::new());
-        let sink = EventSink {
-            sender,
-            notification: Arc::clone(&notification),
-            notification_writer: Arc::new(writer),
-            overflowed: Arc::new(AtomicBool::new(false)),
-            queued_bytes: Arc::new(AtomicUsize::new(0)),
-        };
-
-        sink.emit(Event {
-            kind: EVENT_MESSAGE,
-            ..Event::default()
-        });
-
-        assert!(!notification.is_pending());
-        assert_eq!(receiver.try_recv().unwrap().kind, EVENT_MESSAGE);
-    }
-
-    #[test]
-    fn coalesces_notifications_until_the_event_queue_is_observed_empty() {
-        let (sender, receiver) = mpsc::sync_channel(2);
-        let (notification, notification_writer, mut notification_reader) = test_notification();
-        let sink = EventSink {
-            sender,
-            notification: Arc::clone(&notification),
-            notification_writer,
-            overflowed: Arc::new(AtomicBool::new(false)),
-            queued_bytes: Arc::new(AtomicUsize::new(0)),
-        };
-        let mut token = [0u8; 1];
-
-        sink.emit(Event {
-            kind: EVENT_MESSAGE,
-            ..Event::default()
-        });
-        assert_eq!(receiver.try_recv().unwrap().kind, EVENT_MESSAGE);
-        sink.emit(Event {
-            kind: EVENT_GROUP_MESSAGE,
-            ..Event::default()
-        });
-
-        assert_eq!(notification_reader.read(&mut token).unwrap(), 1);
-        assert_eq!(
-            notification_reader.read(&mut token).unwrap_err().kind(),
-            std::io::ErrorKind::WouldBlock
-        );
-        assert_eq!(receiver.try_recv().unwrap().kind, EVENT_GROUP_MESSAGE);
-
-        {
-            let _guard = notification.lock();
-            notification.clear_pending();
-        }
-        sink.emit(Event {
-            kind: EVENT_MESSAGE,
-            ..Event::default()
-        });
-        assert_eq!(notification_reader.read(&mut token).unwrap(), 1);
     }
 }

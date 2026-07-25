@@ -3,6 +3,7 @@
 
 mod backend;
 mod event;
+mod event_queue;
 mod ffi;
 
 pub use ffi::*;
