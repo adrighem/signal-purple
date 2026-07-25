@@ -342,6 +342,27 @@ absent. `state.json` was left unchanged rather than inferring its schema.
   passed after each dependency merge. No source or alert failure was retried
   without diagnosis.
 
+## 2026-07-25 — Release Please architecture migration
+
+- Commit `6efa21e` made Release Please the owner of release tags and draft
+  GitHub releases, connected its exact outputs directly to the reusable
+  artifact workflow, and removed the manual tag, dispatch, and
+  published-release recovery paths.
+- Release publication now remains private through reproducible builds,
+  package probing, SBOM and checksum generation, provenance attestation, and
+  digest-verified uploads. The final job publishes a non-Latest prerelease.
+- Focused release tests, artifact-helper tests, YAML parsing, upstream config
+  schema checks, actionlint 1.7.12, and an independent architecture/security
+  review passed before push.
+- Release Please run `30158948607` initially failed because historical release
+  PR:4 and PR:13 still had `autorelease: pending`, causing the newly enabled
+  releaser to replay the former manual-tag path. After explicit approval, the
+  stale labels were replaced with `autorelease: tagged`; the failed job rerun
+  passed and correctly skipped artifacts for the non-release-bearing `ci:`
+  commit.
+- Exact-main CI run `30158948498` and CodeQL run `30158948254` passed. No tag,
+  draft, or release was created during the migration.
+
 The installed maintainer package still lacks its referenced triage script and
 reference files, so this run was captured manually and `state.json` was left
 unchanged rather than inferring its schema.
