@@ -4,6 +4,15 @@ All notable changes will be documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 semantic versioning after the first stable release.
 
+## [0.2.3](https://github.com/adrighem/signal-purple/compare/v0.2.2...v0.2.3) (2026-07-25)
+
+
+### Bug Fixes
+
+* preserve release version marker ([afee503](https://github.com/adrighem/signal-purple/commit/afee503b3b06c0494bbc941e0cfab38b7ad6c6ce)), closes [#21](https://github.com/adrighem/signal-purple/issues/21)
+* preserve release version marker ([2c3aaef](https://github.com/adrighem/signal-purple/commit/2c3aaefff3156db3fb2d49a6d29a7920222847bd)), closes [#20](https://github.com/adrighem/signal-purple/issues/20)
+* preserve release version marker ([d5dc805](https://github.com/adrighem/signal-purple/commit/d5dc80503c7f9aa4397e0e7085806dfafe2797c3)), closes [#18](https://github.com/adrighem/signal-purple/issues/18)
+
 ## [Unreleased]
 
 No user-facing changes yet.
