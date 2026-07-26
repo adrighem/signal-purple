@@ -101,6 +101,12 @@ older messages from the primary phone or Signal service.
   submission. Failed entries retain their original Signal timestamp and retry
   with bounded exponential backoff across reconnects. Accepting a verified
   identity change immediately expedites that contact's queued messages.
+- Adapter-generated text, attachment, typing, delivery-receipt, and read-receipt
+  sends share one timestamp allocator per core. It uses the wall clock as a
+  floor and atomically advances beyond the last allocation, so concurrent sends
+  and clock rollback cannot reuse a timestamp. Durable message retries retain
+  their original timestamp, while retry deadlines continue to use the wall
+  clock directly.
 - Incoming direct and group attachments are downloaded on the backend thread
   and copied across the owned ABI. An incoming group JPEG or PNG whose declared
   MIME type matches its file signature, passes decoder validation, and remains
@@ -219,6 +225,11 @@ The first version does not implement in-plugin safety-number comparison,
 primary registration, contact discovery, calls, or official backup
 compatibility. It also does not project disappearing timers or remote deletion
 into Purple.
+The pinned Presage dependency owns contact-sync request and group-leave
+notification timestamps. Contact sync uses the local wall clock; group leave
+uses Signal's response timestamp with a local wall-clock fallback. These sends
+do not participate in signal-purple's per-core timestamp sequence and are not
+covered by its uniqueness guarantee.
 The adapter disables logging on every Signal conversation. Text messages keep
 their normal send/receive flags because Pidgin deliberately renders no-log
 messages as grey informational notices. Synced buddy aliases and identifiers

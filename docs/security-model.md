@@ -79,6 +79,11 @@ and message bodies are sensitive. Production code must not log them.
 - Unsent message bodies, recipients, timestamps, and retry counters remain in
   the SQLCipher outbox. Purple receives errors at the first failure and at
   bounded later attempts without logging the message body.
+- Adapter-generated text, attachment, typing, and receipt sends share an atomic
+  per-core timestamp allocator. Every new allocation remains strictly
+  increasing under concurrent sends and wall-clock rollback. Durable retries
+  reuse their original protocol timestamp, and retry scheduling uses a separate
+  wall-clock value.
 
 ## Known gaps
 
@@ -98,6 +103,10 @@ and message bodies are sensitive. Production code must not log them.
 - The bounded local-file read is synchronous on Purple's main thread.
   `O_NONBLOCK` prevents special-file open hangs but does not make regular-file
   I/O asynchronous, so a slow local or network-mounted file can pause the UI.
+- The pinned Presage dependency owns contact-sync request and group-leave
+  notification timestamps. Contact sync uses the local wall clock; group leave
+  uses Signal's response timestamp with a local wall-clock fallback. These
+  sends do not participate in signal-purple's per-core timestamp sequence.
 - Pidgin/libpurple 2 is a legacy in-process plugin environment. A memory-safety
   flaw in the UI or another plugin can access this process.
 - Signal does not support third-party clients or promise protocol stability.

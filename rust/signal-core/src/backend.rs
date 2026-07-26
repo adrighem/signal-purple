@@ -2,7 +2,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -50,6 +50,36 @@ const MAX_MESSAGE_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 const GROUP_SYNC_RETRY_SECS: u64 = 30;
 const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
 const RECENT_PROJECTION_IDENTITY_LIMIT: usize = 4096;
+
+#[derive(Clone, Default)]
+struct MessageTimestampAllocator {
+    latest: Arc<AtomicU64>,
+}
+
+impl MessageTimestampAllocator {
+    fn next(&self) -> u64 {
+        self.next_at(wall_clock_ms())
+    }
+
+    fn next_at(&self, wall_clock_ms: u64) -> u64 {
+        let mut previous = self.latest.load(Ordering::Relaxed);
+        loop {
+            let minimum = previous
+                .checked_add(1)
+                .expect("Signal message timestamp space was exhausted");
+            let next = wall_clock_ms.max(minimum);
+            match self.latest.compare_exchange_weak(
+                previous,
+                next,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => return next,
+                Err(observed) => previous = observed,
+            }
+        }
+    }
+}
 
 pub struct Config {
     pub store_path: String,
@@ -707,6 +737,7 @@ async fn receive_and_command_loop(
         .initialize_client_outbox()
         .await
         .map_err(|error| format!("Could not initialize the encrypted outbox: {error}"))?;
+    let timestamps = MessageTimestampAllocator::default();
     let mut projection = MessageProjection::new(Arc::clone(&acknowledgments));
     let mut deferred_commands = VecDeque::new();
     let mut attachment_tasks = tokio::task::JoinSet::new();
@@ -968,6 +999,7 @@ async fn receive_and_command_loop(
                                     &mut projection,
                                     &departed_groups,
                                     groups_authoritative,
+                                    &timestamps,
                                 ).await;
                                 emit_identity_changes(&manager, &sink).await;
                                 retry_outbox(
@@ -1010,6 +1042,7 @@ async fn receive_and_command_loop(
                                     &mut projection,
                                     &departed_groups,
                                     groups_authoritative,
+                                    &timestamps,
                                 ).await;
                                 emit_identity_changes(&manager, &sink).await;
                             }
@@ -1066,6 +1099,7 @@ async fn receive_and_command_loop(
                             }
                             let mut attachment_manager = manager.clone();
                             let attachment_departed_groups = departed_groups.clone();
+                            let attachment_timestamps = timestamps.clone();
                             let control = permit.control();
                             let task = attachment_tasks.spawn_local(async move {
                                 attachment_task_result(
@@ -1079,6 +1113,7 @@ async fn receive_and_command_loop(
                                         data,
                                         group,
                                         &attachment_departed_groups,
+                                        &attachment_timestamps,
                                     ),
                                 )
                                 .await
@@ -1101,6 +1136,7 @@ async fn receive_and_command_loop(
                                 &sink,
                                 &departed_groups,
                                 groups_authoritative,
+                                &timestamps,
                             ).await {
                                 contact_sync.abort();
                                 stop_attachments_and_drain_acknowledgments(
@@ -1153,6 +1189,7 @@ async fn receive_and_command_loop(
                                 &mut projection,
                                 &departed_groups,
                                 true,
+                                &timestamps,
                             ).await;
                             retry_outbox(&mut manager, &sink, &departed_groups, true).await;
                         }
@@ -1412,6 +1449,7 @@ async fn handle_command_interruptibly(
     sink: &EventSink,
     departed_groups: &DepartedGroups,
     groups_authoritative: bool,
+    timestamps: &MessageTimestampAllocator,
 ) -> bool {
     let operation = handle_command(
         manager,
@@ -1419,6 +1457,7 @@ async fn handle_command_interruptibly(
         sink,
         departed_groups,
         groups_authoritative,
+        timestamps,
     );
     pin_mut!(operation);
 
@@ -1681,7 +1720,7 @@ async fn finish_outbox_attempt(
                 .defer_client_message(
                     message.id,
                     attempts,
-                    now_ms().saturating_add(retry_delay_ms(attempts)),
+                    wall_clock_ms().saturating_add(retry_delay_ms(attempts)),
                 )
                 .await
                 .map_err(|error| format!("Could not schedule message retry: {error}"))
@@ -1695,7 +1734,7 @@ async fn retry_outbox(
     departed_groups: &DepartedGroups,
     groups_authoritative: bool,
 ) {
-    let messages = match manager.store().due_client_messages(now_ms()).await {
+    let messages = match manager.store().due_client_messages(wall_clock_ms()).await {
         Ok(messages) => messages,
         Err(error) => {
             sink.emit(Event::error(
@@ -1747,8 +1786,9 @@ async fn enqueue_and_send(
     body: String,
     departed_groups: &DepartedGroups,
     sink: &EventSink,
+    timestamps: &MessageTimestampAllocator,
 ) -> Result<(), String> {
-    let timestamp = now_ms();
+    let timestamp = timestamps.next();
     let id = manager
         .store()
         .enqueue_client_message(kind, &recipient, &body, timestamp)
@@ -1778,6 +1818,7 @@ async fn upload_and_send_attachment(
     data: Vec<u8>,
     group: bool,
     departed_groups: &DepartedGroups,
+    timestamps: &MessageTimestampAllocator,
 ) -> Result<SentMessage, String> {
     if data.is_empty() || data.len() > MAX_ATTACHMENT_BYTES {
         return Err("Attachment size is outside the supported range".into());
@@ -1812,7 +1853,7 @@ async fn upload_and_send_attachment(
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
-    let timestamp = now_ms();
+    let timestamp = timestamps.next();
     if group {
         let (key, _) = group_target.expect("group target was resolved before upload");
         let _operation = departed_groups.lock_operation().await;
@@ -1870,6 +1911,7 @@ async fn replay_unprojected_messages(
     projection: &mut MessageProjection,
     departed_groups: &DepartedGroups,
     groups_authoritative: bool,
+    timestamps: &MessageTimestampAllocator,
 ) {
     let messages = match manager
         .store()
@@ -1894,6 +1936,7 @@ async fn replay_unprojected_messages(
             projection,
             departed_groups,
             groups_authoritative,
+            timestamps,
         )
         .await;
     }
@@ -1906,6 +1949,7 @@ async fn project_content(
     projection: &mut MessageProjection,
     departed_groups: &DepartedGroups,
     groups_authoritative: bool,
+    timestamps: &MessageTimestampAllocator,
 ) {
     if !content_is_projectable(&content.body, groups_authoritative) {
         return;
@@ -1914,7 +1958,15 @@ async fn project_content(
         return;
     };
     let effect = projection_effect(
-        handle_content(manager, content.clone(), delivery_id, sink, departed_groups).await,
+        handle_content(
+            manager,
+            content.clone(),
+            delivery_id,
+            sink,
+            departed_groups,
+            timestamps,
+        )
+        .await,
     );
     if !effect.remove_pending {
         return;
@@ -2044,6 +2096,7 @@ async fn handle_command(
     sink: &EventSink,
     departed_groups: &DepartedGroups,
     groups_authoritative: bool,
+    timestamps: &MessageTimestampAllocator,
 ) {
     if let Command::AcceptIdentity {
         request_id,
@@ -2099,11 +2152,15 @@ async fn handle_command(
     } = command
     {
         let result = match parse_recipient(&recipient) {
-            Some(recipient) => {
-                send_receipt(manager, recipient, timestamp, receipt_message::Type::Read)
-                    .await
-                    .map_err(|error| error.to_string())
-            }
+            Some(recipient) => send_receipt(
+                manager,
+                recipient,
+                timestamp,
+                receipt_message::Type::Read,
+                timestamps,
+            )
+            .await
+            .map_err(|error| error.to_string()),
             None => Err("Recipient is not a canonical Signal service identifier".into()),
         };
         if let Err(error) = result {
@@ -2197,6 +2254,7 @@ async fn handle_command(
                     message,
                     departed_groups,
                     sink,
+                    timestamps,
                 )
                 .await
             } else {
@@ -2224,6 +2282,7 @@ async fn handle_command(
                             message,
                             departed_groups,
                             sink,
+                            timestamps,
                         )
                         .await
                     }
@@ -2242,7 +2301,7 @@ async fn handle_command(
         } => {
             let result = match parse_recipient(&recipient) {
                 Some(recipient) => {
-                    let timestamp = now_ms();
+                    let timestamp = timestamps.next();
                     manager
                         .send_message(
                             recipient,
@@ -2281,6 +2340,7 @@ async fn handle_content(
     delivery_id: u64,
     sink: &EventSink,
     departed_groups: &DepartedGroups,
+    timestamps: &MessageTimestampAllocator,
 ) -> ProjectionDisposition {
     let timestamp = content_timestamp(&content);
     let sender = content.metadata.sender.service_id_string();
@@ -2303,12 +2363,14 @@ async fn handle_content(
                 let mut receipt_manager = manager.clone();
                 let receipt_sink = sink.clone();
                 let receipt_recipient = content.metadata.sender;
+                let receipt_timestamps = timestamps.clone();
                 tokio::task::spawn_local(async move {
                     send_delivery_receipt(
                         &mut receipt_manager,
                         receipt_recipient,
                         timestamp,
                         &receipt_sink,
+                        &receipt_timestamps,
                     )
                     .await;
                 });
@@ -2668,12 +2730,14 @@ async fn send_delivery_receipt(
     recipient: ServiceId,
     message_timestamp: u64,
     sink: &EventSink,
+    timestamps: &MessageTimestampAllocator,
 ) {
     if let Err(error) = send_receipt(
         manager,
         recipient,
         message_timestamp,
         receipt_message::Type::Delivery,
+        timestamps,
     )
     .await
     {
@@ -2689,8 +2753,9 @@ async fn send_receipt(
     recipient: ServiceId,
     message_timestamp: u64,
     receipt_type: receipt_message::Type,
+    timestamps: &MessageTimestampAllocator,
 ) -> Result<(), presage::Error<presage_store_sqlite::SqliteStoreError>> {
-    let timestamp = now_ms();
+    let timestamp = timestamps.next();
     manager
         .send_message(
             recipient,
@@ -2861,7 +2926,7 @@ fn content_timestamp(content: &Content) -> u64 {
     }
 }
 
-fn now_ms() -> u64 {
+fn wall_clock_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -2907,6 +2972,51 @@ fn qr_png(value: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn message_timestamps_advance_when_wall_clock_stalls() {
+        let timestamps = MessageTimestampAllocator::default();
+
+        assert_eq!(timestamps.next_at(1_000), 1_000);
+        assert_eq!(timestamps.next_at(1_000), 1_001);
+        assert_eq!(timestamps.next_at(1_000), 1_002);
+    }
+
+    #[test]
+    fn message_timestamps_advance_when_wall_clock_moves_backwards() {
+        let timestamps = MessageTimestampAllocator::default();
+
+        assert_eq!(timestamps.next_at(2_000), 2_000);
+        assert_eq!(timestamps.next_at(1_000), 2_001);
+    }
+
+    #[test]
+    fn message_timestamp_clones_share_one_concurrent_sequence() {
+        const WORKERS: u64 = 8;
+        const ALLOCATIONS_PER_WORKER: u64 = 128;
+
+        let timestamps = MessageTimestampAllocator::default();
+        let handles = (0..WORKERS)
+            .map(|_| {
+                let timestamps = timestamps.clone();
+                std::thread::spawn(move || {
+                    (0..ALLOCATIONS_PER_WORKER)
+                        .map(|_| timestamps.next_at(10_000))
+                        .collect::<Vec<_>>()
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut allocated = handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("timestamp worker panicked"))
+            .collect::<Vec<_>>();
+
+        allocated.sort_unstable();
+        assert_eq!(
+            allocated,
+            (10_000..10_000 + WORKERS * ALLOCATIONS_PER_WORKER).collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn derives_stable_non_secret_group_identifiers() {

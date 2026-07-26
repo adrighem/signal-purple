@@ -84,6 +84,9 @@ requests.
 - Keep correctness-critical control paths out of best-effort work admission:
   projection acknowledgements coalesce by registered delivery ID and attachment
   cancellation lives on the admission permit.
+- Allocate adapter-generated protocol timestamps through the shared per-core
+  allocator. Keep outbox retry deadlines on the wall clock and preserve the
+  original timestamp when retransmitting a durable message.
 
 ## Updating dependencies
 
