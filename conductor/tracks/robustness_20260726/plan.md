@@ -2,12 +2,12 @@
 
 ## Phase 1: Reliability and lifecycle hardening
 
-- [~] Task: Make display acknowledgements and attachment cancellation reliable
-  - [ ] Sub-task: Add queue-pressure and cancellation-state regression tests
-  - [ ] Sub-task: Add a coalescing acknowledgement inbox with shutdown draining
-  - [ ] Sub-task: Put cancellation state directly in attachment admission permits
-  - [ ] Sub-task: Document the reliable control-path invariants
-- [ ] Task: Make the C validation gate fail closed
+- [x] Task: Make display acknowledgements and attachment cancellation reliable 374a92a
+  - [x] Sub-task: Add queue-pressure and cancellation-state regression tests
+  - [x] Sub-task: Add a coalescing acknowledgement inbox with shutdown draining
+  - [x] Sub-task: Put cancellation state directly in attachment admission permits
+  - [x] Sub-task: Document the reliable control-path invariants
+- [~] Task: Make the C validation gate fail closed
   - [ ] Sub-task: Enable C tests explicitly in the canonical build
   - [ ] Sub-task: Make CTest fail when no tests are discovered
 - [ ] Task: Close outgoing transfer lifetime and local file-admission gaps
