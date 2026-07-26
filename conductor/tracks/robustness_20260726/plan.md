@@ -41,4 +41,8 @@
   - [x] Sub-task: Lock ABI status, event, and flag values in C and Rust tests
   - [x] Sub-task: Check ABI and status-value documentation against regression coverage
   - [x] Sub-task: Check ownership, cancellation, timestamp, shutdown, and credential docs
+- [x] Task: Prevent same-pool startup SQLite lock failures 6834a5c
+  - [x] Sub-task: Reproduce the unsafe multi-connection pool with a deterministic regression
+  - [x] Sub-task: Serialize concurrent store writes at the SQLx pool boundary
+  - [x] Sub-task: Pin the regression-covered Presage revision in signal-purple
 - [ ] Task: Conductor - User Manual Verification 'Reliability and lifecycle hardening' (Protocol in workflow.md)
