@@ -1,0 +1,5 @@
+Task: make display acknowledgements and attachment cancellation reliable.
+
+Added a bounded coalescing acknowledgement inbox with retry and orderly shutdown draining. Moved attachment cancellation into admission state, used Abortable uploads, linearized terminal outcomes, suppressed cancelled recovery errors, and cancelled all admitted work before worker shutdown.
+
+TDD evidence: the initial queue-pressure ACK and cancellation tests failed with QueueFull. Final sanitized cargo test passed 69 unit tests plus doc tests; cargo fmt and cargo check passed. Clippy could not run because the host clippy-driver is 1.87 while cargo and rustc are 1.95.
