@@ -14,8 +14,12 @@
 ## Content Rules
 
 - Use "Signal", "Pidgin", "Purple", and "linked device" consistently.
-- Never log credentials, provisioning URIs, message bodies, account
-  identifiers, or complete environment data.
+- Never put credentials, provisioning URIs, message bodies, account
+  identifiers, or complete environment data in diagnostic or error logs.
+- Treat user-controlled Purple conversation transcripts as user-facing local
+  storage, not diagnostic output. Preserve Purple's standard global and
+  per-conversation controls without appending diagnostic-only protocol
+  metadata.
 - Keep public errors short and put diagnostic detail only in safe debug output.
 
 ## UX Principles

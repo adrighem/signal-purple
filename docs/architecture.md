@@ -214,7 +214,7 @@ frontend-delivery acknowledgment, and its backend documentation leaves retry
 functionality as future work. signal-purple instead replays only content which
 Purple has not acknowledged, because loading a full stored timeline into a
 libpurple conversation would create duplicates and expose historical messages
-that the adapter deliberately does not log.
+beyond the linked device's normal delivery and crash-replay boundary.
 
 signal-purple applies the same essential contact-request step automatically on
 every connection. It then reconciles complete snapshots into plugin-managed
@@ -240,7 +240,11 @@ notification timestamps. Contact sync uses the local wall clock; group leave
 uses Signal's response timestamp with a local wall-clock fallback. These sends
 do not participate in signal-purple's per-core timestamp sequence and are not
 covered by its uniqueness guarantee.
-The adapter disables logging on every Signal conversation. Text messages keep
-their normal send/receive flags because Pidgin deliberately renders no-log
-messages as grey informational notices. Synced buddy aliases and identifiers
-still live in Purple's plaintext buddy list.
+The adapter leaves conversation logging to Purple. New direct and group
+conversations inherit libpurple's `log_ims` and `log_chats` defaults; the
+frontend may then apply a saved conversation-specific choice. Reusing a
+conversation or sending through the PRPL preserves its current runtime setting.
+Messages keep normal send/receive flags, without `PURPLE_MESSAGE_NO_LOG`, so an
+enabled conversation is logged normally. Purple owns those transcript files
+outside signal-purple's SQLCipher store. Synced buddy aliases and identifiers
+also live in Purple's plaintext buddy list.

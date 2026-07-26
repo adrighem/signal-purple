@@ -992,7 +992,6 @@ signal_open_group(SignalConnection *connection, const char *group_key,
                                              group_key);
     purple_conversation_set_title(
         conversation, signal_group_display_title(connection, group_key));
-    purple_conversation_set_logging(conversation, FALSE);
     signal_refresh_group_members(connection, group_key);
     return conversation;
 }
@@ -1014,7 +1013,6 @@ signal_deliver_direct(SignalConnection *connection, const SignalEvent *event)
     if (conversation == NULL)
         conversation = purple_conversation_new(PURPLE_CONV_TYPE_IM, account,
                                                event->peer_id);
-    purple_conversation_set_logging(conversation, FALSE);
 
     escaped = g_markup_escape_text(event->text, -1);
     timestamp = event->timestamp_ms > 0
@@ -1808,7 +1806,6 @@ signal_send_im(PurpleConnection *gc, const char *who, const char *message,
     if (conversation == NULL)
         conversation = purple_conversation_new(PURPLE_CONV_TYPE_IM, account,
                                                who);
-    purple_conversation_set_logging(conversation, FALSE);
 
     status = signal_core_send_message(connection->core,
                                       connection->next_request_id++, who, plain);
@@ -1994,8 +1991,6 @@ signal_chat_send(PurpleConnection *gc, int id, const char *message,
         return -EINVAL;
     if (strlen(plain) > SIGNAL_MAX_MESSAGE_BYTES)
         return -E2BIG;
-
-    purple_conversation_set_logging(conversation, FALSE);
 
     send_group_message = connection->send_group_message;
     if (send_group_message == NULL)

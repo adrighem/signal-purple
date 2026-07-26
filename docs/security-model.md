@@ -8,7 +8,10 @@ passphrase is held by the user's secret service via libsecret, not in Purple's
 account XML. The default data directory is restricted to mode `0700`.
 
 QR provisioning URIs, passphrases, keys, canonical identifiers, phone numbers,
-and message bodies are sensitive. Production code must not log them.
+and message bodies are sensitive. Production diagnostic and error paths must
+not log them. User-controlled Purple conversation transcripts are an explicit
+UI data feature and may contain message bodies plus conversation or participant
+identifiers; they are user-facing local storage, not diagnostic output.
 
 ## Trust boundaries
 
@@ -37,9 +40,11 @@ and message bodies are sensitive. Production code must not log them.
   discovered or cached candidate from GroupsV2, and commits the result in one
   SQLite transaction. Group sends resolve only against that active set.
 - Remote message text is escaped before Purple renders it.
-- Conversation logging is disabled on every Signal conversation. Text messages
-  use normal send/receive flags because Pidgin renders Purple's per-message
-  no-log flag as an informational notice instead of a chat message.
+- Direct and group conversations follow Purple's user-controlled logging
+  policy. Libpurple 2 defaults new conversation logging on unless the profile
+  changes it, and the frontend may apply a conversation-specific setting.
+  These transcripts are owned by Purple and are not encrypted by
+  signal-purple's SQLCipher store.
 - Upstream info-level tracing is compiled out so Presage cannot emit the
   provisioning URI through its linking log statement.
 - Worker shutdown cancels admitted attachments before signaling and joining the
@@ -85,7 +90,7 @@ and message bodies are sensitive. Production code must not log them.
   configuration.
 - Unsent message bodies, recipients, timestamps, and retry counters remain in
   the SQLCipher outbox. Purple receives errors at the first failure and at
-  bounded later attempts without logging the message body.
+  bounded later attempts, and those error events omit the message body.
 - Adapter-generated text, attachment, typing, and receipt sends share an atomic
   per-core timestamp allocator. Every new allocation remains strictly
   increasing under concurrent sends and wall-clock rollback. Durable retries
@@ -120,8 +125,10 @@ and message bodies are sensitive. Production code must not log them.
 - Disappearing timers and remote deletions are not projected into Purple.
 - Purple's buddy list stores synced contact aliases, group titles, canonical
   contact identifiers, and opaque group identifiers in plaintext. The plugin
-  cannot prevent another in-process UI or plugin from retaining message text
-  despite its no-log defaults.
+  cannot prevent another in-process UI or plugin from retaining message text.
+  Purple may also persist direct and group transcripts according to the user's
+  global and per-conversation logging settings. Disabling future logging does
+  not remove existing transcript files.
 
 ## Update response
 

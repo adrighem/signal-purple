@@ -1048,6 +1048,110 @@ new_transfer_connection(PurpleConnection *gc)
 }
 
 static void
+test_standard_conversation_logging(PurplePlugin *plugin,
+                                   PurplePluginProtocolInfo *protocol)
+{
+    const gboolean configured_states[] = {FALSE, TRUE};
+    const gboolean original_im_logging =
+        purple_prefs_get_bool("/purple/logging/log_ims");
+    const gboolean original_chat_logging =
+        purple_prefs_get_bool("/purple/logging/log_chats");
+    union {
+        gpointer pointer;
+        SignalHandleEventFunc function;
+    } handle_event = {0};
+
+    g_assert_true(g_module_symbol((GModule *)plugin->handle,
+                                  "signal_handle_event",
+                                  &handle_event.pointer));
+
+    for (guint index = 0; index < G_N_ELEMENTS(configured_states); index++) {
+        const gboolean configured = configured_states[index];
+        g_autofree char *username =
+            g_strdup_printf("conversation-logging-%u", index);
+        PurpleAccount *account =
+            purple_account_new(username, SIGNAL_PLUGIN_ID);
+        PurpleConnection gc = {
+            .prpl = plugin,
+            .state = PURPLE_CONNECTED,
+            .account = account,
+        };
+        SignalConnection *connection;
+        PurpleConversation *direct;
+        PurpleConversation *group;
+        int group_id;
+        SignalEvent direct_event = {
+            .abi_version = SIGNAL_CORE_ABI_VERSION,
+            .struct_size = sizeof(SignalEvent),
+            .kind = SIGNAL_EVENT_MESSAGE,
+            .peer_id = "aci:logging-contact",
+            .text = "direct logging probe",
+        };
+        SignalEvent group_event = {
+            .abi_version = SIGNAL_CORE_ABI_VERSION,
+            .struct_size = sizeof(SignalEvent),
+            .kind = SIGNAL_EVENT_GROUP_MESSAGE,
+            .peer_id = "aci:logging-member",
+            .chat_id = "logging-group",
+            .title = "Logging group",
+            .text = "group logging probe",
+        };
+
+        purple_prefs_set_bool("/purple/logging/log_ims", configured);
+        purple_prefs_set_bool("/purple/logging/log_chats", configured);
+        purple_account_set_connection(account, &gc);
+        connection = new_transfer_connection(&gc);
+        connection->group_snapshot_complete = TRUE;
+
+        g_assert_true(handle_event.function(connection, &direct_event));
+        g_assert_true(handle_event.function(connection, &group_event));
+        direct = purple_find_conversation_with_account(
+            PURPLE_CONV_TYPE_IM, direct_event.peer_id, account);
+        group = signal_group_sync_lookup_conversation(account,
+                                                      group_event.chat_id);
+        g_assert_nonnull(direct);
+        g_assert_nonnull(group);
+        g_assert_cmpint(purple_conversation_is_logging(direct), ==,
+                        configured);
+        g_assert_cmpint(purple_conversation_is_logging(group), ==,
+                        configured);
+
+        purple_conversation_set_logging(direct, !configured);
+        purple_conversation_set_logging(group, !configured);
+        g_assert_true(handle_event.function(connection, &direct_event));
+        g_assert_true(handle_event.function(connection, &group_event));
+        g_assert_cmpint(purple_conversation_is_logging(direct), ==,
+                        !configured);
+        g_assert_cmpint(purple_conversation_is_logging(group), ==,
+                        !configured);
+
+        group_id =
+            purple_conv_chat_get_id(PURPLE_CONV_CHAT(group));
+        g_assert_cmpint(protocol->send_im(&gc, direct_event.peer_id,
+                                         "outbound direct probe", 0),
+                        ==, -EINVAL);
+        g_assert_cmpint(protocol->chat_send(&gc, group_id,
+                                           "outbound group probe", 0),
+                        ==, -EINVAL);
+        g_assert_cmpint(purple_conversation_is_logging(direct), ==,
+                        !configured);
+        g_assert_cmpint(purple_conversation_is_logging(group), ==,
+                        !configured);
+
+        serv_got_chat_left(&gc, group_id);
+        purple_conversation_destroy(group);
+        purple_conversation_destroy(direct);
+        protocol->close(&gc);
+        purple_account_set_connection(account, NULL);
+        purple_account_destroy(account);
+    }
+
+    purple_prefs_set_bool("/purple/logging/log_ims", original_im_logging);
+    purple_prefs_set_bool("/purple/logging/log_chats",
+                          original_chat_logging);
+}
+
+static void
 test_pending_transfer_disconnect(PurplePluginProtocolInfo *protocol,
                                  const char *user_dir)
 {
@@ -1223,6 +1327,7 @@ main(int argc, char **argv)
     g_assert_nonnull(protocol->chat_send_file);
     g_assert_nonnull(protocol->find_blist_chat);
     g_assert_nonnull(protocol->get_cb_alias);
+    test_standard_conversation_logging(plugin, protocol);
     test_pending_transfer_disconnect(protocol, user_dir);
     test_vanished_transfer_cleanup(protocol, user_dir);
 

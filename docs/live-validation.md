@@ -152,7 +152,7 @@ service, and an isolated temporary Pidgin profile.
 | Messages queued while the linked device is offline | Implemented by the receive queue; not separately exercised live |
 | Primary phone to plugin direct-message synchronization | Passed |
 | Plugin to primary phone direct message | Passed |
-| Incoming direct-message presentation | Reproduced in Pidgin: `PURPLE_MESSAGE_NO_LOG` forced informational-notice styling even with `PURPLE_MESSAGE_RECV`; fixed by retaining normal receive flags while conversation logging remains disabled |
+| Incoming direct-message presentation | Reproduced in Pidgin: `PURPLE_MESSAGE_NO_LOG` forced informational-notice styling even with `PURPLE_MESSAGE_RECV`; fixed by retaining normal receive flags. The current PRPL policy preserves Purple's user-controlled direct and group logging state, with deterministic plugin coverage |
 | Durable message projection startup | Passed on the normal desktop profile: the SQLCipher projection schema initialized, the account reached connected state, and the versioned plugin/core pair loaded system-wide; an interrupted-message replay still needs a controlled live send |
 | Identity-change policy | Store tests pass for uninterrupted unverified contacts, verified-contact send blocking, receive allowance, session reset, acceptance, and verification downgrade; controlled live replacement is not yet exercised |
 | Outbound retry | Encrypted outbox persistence, completion, deferral, restart loading, bounded backoff, and identity-acceptance expediting are implemented and tested; forced live network loss is not yet exercised |

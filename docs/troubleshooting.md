@@ -103,8 +103,10 @@ sharing the log.
 
 On reconnect, the plugin drains envelopes still queued by Signal for this
 linked device. It cannot request arbitrary older conversation history or copy
-history from the primary phone. Conversation logging is deliberately disabled,
-so previously displayed messages are not reconstructed from Purple logs.
+history from the primary phone. Purple may show locally logged transcripts when
+a conversation opens, according to the profile's global and per-conversation
+logging settings. Those local files are not Signal history and are never fetched
+or replayed by signal-purple.
 
 Current builds also replay messages which Presage saved but Purple did not
 acknowledge before a crash. The acknowledgment is encrypted in the Signal

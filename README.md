@@ -245,11 +245,14 @@ replacement for an explicitly verified contact blocks sending until the user
 accepts it after verification through another trusted channel.
 
 Pidgin is a legacy in-process client: the UI and other loaded plugins can access
-message memory. Signal conversation logging is disabled, but Purple still
-stores aliases, group titles, canonical contact identifiers, and opaque group
-identifiers in plaintext in `blist.xml`; a UI or another plugin may retain
-more. No independent security audit has occurred. Read the
-[security model](docs/security-model.md) before using a real account.
+message memory. Direct and group conversations follow Purple's standard
+user-controlled logging policy, which may store message transcripts outside
+SQLCipher. In Pidgin, review Preferences > Logging and each conversation's
+Options > Enable Logging. Disabling future logging does not delete existing
+transcript files. Purple also stores aliases, group titles, canonical contact
+identifiers, and opaque group identifiers in plaintext in `blist.xml`; a UI or
+another plugin may retain more. No independent security audit has occurred.
+Read the [security model](docs/security-model.md) before using a real account.
 
 ## Troubleshooting and bug reports
 
