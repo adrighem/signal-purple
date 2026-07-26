@@ -1,0 +1,7 @@
+Phase checkpoint: Reliability and lifecycle hardening.
+
+Automated verification: env -i HOME=/home/vincent PATH=/tmp/signal-purple-clippy.k6Aonv/extracted/usr/bin:/usr/local/bin:/usr/bin:/bin CARGO_HOME=/home/vincent/.cargo RUSTUP_HOME=/home/vincent/.rustup scripts/check.sh full. Result: formatting, matching Clippy, 86 Rust tests, 5 C/plugin tests, validation-gate checks, release-artifact checks, and staged-install probing all passed.
+
+Manual verification steps presented: fully quit Pidgin; install both libraries from the same build; cold-start one Pidgin instance with one Signal account; confirm connection without the three database-lock popups; send and receive direct and group messages without acknowledgement or delivery-receipt errors; verify global and per-conversation Purple logging; disconnect during a small outgoing transfer and confirm clean cancellation.
+
+User confirmation: yes, manual verification passed.
