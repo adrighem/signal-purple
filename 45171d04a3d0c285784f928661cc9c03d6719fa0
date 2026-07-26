@@ -1,0 +1,5 @@
+Task: close final teardown findings.
+
+Made logical backend shutdown and recovery cleanup bounded even after panics, kept the Linux Rust backend process-resident for unjoinable SQLx SQLite workers, emitted deterministic terminal attachment events, and hardened Purple transfer start/disconnect ownership.
+
+TDD evidence: new runtime, recovery-timeout, synchronous-start-failure, and started-transfer-disconnect regressions failed before their fixes. Sanitized validation passed 86 Rust tests, all 5 C/plugin tests, Clippy, and the staged ELF NODELETE probe. Two independent architecture reviews found no remaining blocker.
