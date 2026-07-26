@@ -32,8 +32,10 @@ teardown can wait on uncancelled network work.
   sequence.
 - Worker teardown must be able to interrupt synchronization, replay, outbox,
   and attachment-download waits.
-- The SQLCipher passphrase must enter zeroizing ownership immediately and be
-  dropped after store opening.
+- After FFI validation, signal-purple's owned SQLCipher passphrase allocation
+  must immediately enter zeroizing ownership and be wiped on every store-open
+  outcome before session startup. Dependency-owned connection-key copies are
+  documented separately.
 - Direct and group conversations must follow Purple's standard user-controlled
   logging policy instead of forcing logging off in the protocol plugin.
 
@@ -62,8 +64,10 @@ teardown can wait on uncancelled network work.
   through the shutdown boundary terminate promptly. Shutdown cleanup has a
   bounded budget; undrained projection state remains eligible for durable
   replay.
-- Constructor and worker code never hold the passphrase in a plain `String`
-  after validation and do not retain it for the session lifetime.
+- After FFI validation, signal-purple's owned passphrase allocation remains
+  under zeroizing ownership and is wiped on every store-open outcome before
+  session startup. Dependency-owned SQLCipher connection-key copies are
+  documented separately.
 - Focused plugin coverage confirms that new direct and group conversations keep
   Purple's configured logging state.
 - Focused suites and `scripts/check.sh full` pass.

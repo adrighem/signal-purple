@@ -7,13 +7,12 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use tokio::sync::{mpsc as tokio_mpsc, watch};
-use zeroize::Zeroizing;
 
 const BACKEND_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 use crate::acknowledgment::AcknowledgmentInbox;
 use crate::attachment::{AttachmentAdmission, AttachmentAdmissionError, MAX_ATTACHMENT_BYTES};
-use crate::backend::{self, Command, Config, WorkerContext};
+use crate::backend::{self, Command, Config, StorePassphrase, WorkerContext};
 use crate::event::{ABI_VERSION, Event, OwnedEvent, SignalEvent};
 #[cfg(test)]
 use crate::event_queue::EventSink;
@@ -83,6 +82,14 @@ unsafe fn required_string(
     std::str::from_utf8(bytes)
         .map(str::to_owned)
         .map_err(|_| SignalStatus::InvalidArgument)
+}
+
+unsafe fn required_store_passphrase(
+    value: *const c_char,
+    maximum_bytes: usize,
+) -> Result<StorePassphrase, SignalStatus> {
+    // SAFETY: this helper has the same C-string contract as `required_string`.
+    unsafe { required_string(value, maximum_bytes) }.map(StorePassphrase::new)
 }
 
 fn queue_command(core: &SignalCore, command: Command) -> SignalStatus {
@@ -171,9 +178,6 @@ pub unsafe extern "C" fn signal_core_new(
         );
         // SAFETY: validated and copied by `required_string`.
         let device_name = status_try!(unsafe { required_string(config.device_name, 128) });
-        // SAFETY: validated and copied by `required_string`.
-        let passphrase = status_try!(unsafe { required_string(config.passphrase, 4096) });
-
         let (command_tx, command_rx) = tokio_mpsc::channel(128);
         let acknowledgments = AcknowledgmentInbox::new();
         let worker_acknowledgments = Arc::clone(&acknowledgments);
@@ -182,10 +186,13 @@ pub unsafe extern "C" fn signal_core_new(
             status_try!(event_queue(EVENT_QUEUE_CAPACITY).map_err(|_| SignalStatus::InternalError));
         let ready = Arc::new(AtomicBool::new(false));
         let worker_ready = Arc::clone(&ready);
+        // SAFETY: validated, copied, and immediately put under zeroizing
+        // ownership by `required_store_passphrase`.
+        let passphrase = status_try!(unsafe { required_store_passphrase(config.passphrase, 4096) });
         let worker_config = Config {
             store_path,
             device_name,
-            passphrase: Zeroizing::new(passphrase),
+            passphrase,
         };
 
         let join = status_try!(
@@ -773,6 +780,20 @@ mod tests {
 
         assert_eq!(status, SignalStatus::InvalidArgument);
         assert!(output.is_null());
+    }
+
+    #[test]
+    fn required_passphrase_copy_enters_zeroizing_ownership() {
+        let input = CString::new("test-store-passphrase").unwrap();
+        let dropped = Arc::new(AtomicBool::new(false));
+
+        // SAFETY: `input` is a live, NUL-terminated C string.
+        let mut passphrase = unsafe { required_store_passphrase(input.as_ptr(), 4096) }.unwrap();
+        passphrase.observe_drop(Arc::clone(&dropped));
+
+        assert_eq!(passphrase.as_str().len(), input.as_bytes().len());
+        drop(passphrase);
+        assert!(dropped.load(Ordering::Acquire));
     }
 
     #[test]

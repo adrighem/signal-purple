@@ -60,7 +60,10 @@ destruction.
 
 1. Purple resolves an account-specific database path.
 2. The plugin loads or generates its SQLCipher passphrase through libsecret.
-3. The Rust core opens the database.
+   The C-owned secret is freed as soon as the Rust constructor returns.
+3. The Rust FFI copies the passphrase directly into a non-debuggable,
+   zeroizing owner. The worker consumes that owner while opening SQLCipher and
+   wipes it before checking registration or starting the session.
 4. An existing linked device loads immediately. A fresh store starts Presage's
    secondary-device provisioning and emits a QR PNG.
 5. The backend starts the receive stream and processes queued sync/session data.

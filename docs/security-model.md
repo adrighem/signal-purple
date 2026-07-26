@@ -5,7 +5,10 @@
 The Rust store contains linked-device credentials, identity/session keys,
 contacts, groups, and message state. Its randomly generated SQLCipher
 passphrase is held by the user's secret service via libsecret, not in Purple's
-account XML. The default data directory is restricted to mode `0700`.
+account XML. The FFI copy immediately enters zeroizing ownership and is wiped
+after the SQLCipher open attempt, including error or shutdown paths. It is not
+retained for the worker session. The default data directory is restricted to
+mode `0700`.
 
 QR provisioning URIs, passphrases, keys, canonical identifiers, phone numbers,
 and message bodies are sensitive. Production diagnostic and error paths must
@@ -119,6 +122,10 @@ identifiers; they are user-facing local storage, not diagnostic output.
   notification timestamps. Contact sync uses the local wall clock; group leave
   uses Signal's response timestamp with a local wall-clock fallback. These
   sends do not participate in signal-purple's per-core timestamp sequence.
+- Presage and SQLx derive a separate SQLCipher connection-option copy which the
+  pool retains for reconnects. That dependency-owned copy is outside
+  signal-purple's zeroizing owner and requires upstream support to shorten or
+  zeroize.
 - Pidgin/libpurple 2 is a legacy in-process plugin environment. A memory-safety
   flaw in the UI or another plugin can access this process.
 - Signal does not support third-party clients or promise protocol stability.

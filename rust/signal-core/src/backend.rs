@@ -29,7 +29,7 @@ use qrcode::QrCode;
 use qrcode::types::Color;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, mpsc as tokio_mpsc, watch};
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::acknowledgment::AcknowledgmentInbox;
 #[cfg(test)]
@@ -83,10 +83,45 @@ impl MessageTimestampAllocator {
     }
 }
 
-pub struct Config {
-    pub store_path: String,
-    pub device_name: String,
-    pub passphrase: Zeroizing<String>,
+pub(crate) struct StorePassphrase {
+    value: Zeroizing<String>,
+    #[cfg(test)]
+    drop_observer: Option<Arc<AtomicBool>>,
+}
+
+impl StorePassphrase {
+    pub(crate) fn new(value: String) -> Self {
+        Self {
+            value: Zeroizing::new(value),
+            #[cfg(test)]
+            drop_observer: None,
+        }
+    }
+
+    pub(crate) fn as_str(&self) -> &str {
+        self.value.as_str()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn observe_drop(&mut self, observer: Arc<AtomicBool>) {
+        self.drop_observer = Some(observer);
+    }
+}
+
+impl Drop for StorePassphrase {
+    fn drop(&mut self) {
+        self.value.zeroize();
+        #[cfg(test)]
+        if let Some(observer) = &self.drop_observer {
+            observer.store(true, Ordering::Release);
+        }
+    }
+}
+
+pub(crate) struct Config {
+    pub(crate) store_path: String,
+    pub(crate) device_name: String,
+    pub(crate) passphrase: StorePassphrase,
 }
 
 pub(crate) struct WorkerContext {
@@ -606,20 +641,15 @@ async fn run(
     sink: EventSink,
     ready: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let open_store = SqliteStore::open_with_passphrase(
-        &config.store_path,
-        Some(config.passphrase.as_str()),
-        OnNewIdentity::TrustUnverified,
-    );
-    pin_mut!(open_store);
-    let store = tokio::select! {
-        result = &mut open_store => {
-            result.map_err(|error| {
-                format!("Could not open encrypted Signal store: {error}")
-            })?
-        }
-        _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+    let Config {
+        store_path,
+        device_name,
+        passphrase,
+    } = config;
+    let Some(store) = open_encrypted_store(&store_path, passphrase, &mut shutdown).await? else {
+        return Ok(());
     };
+    drop(store_path);
 
     let Some(is_registered) = await_or_shutdown(store.is_registered(), &mut shutdown).await else {
         return Ok(());
@@ -636,13 +666,35 @@ async fn run(
             _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
         }
     } else {
-        match link_device(store, &config.device_name, &mut shutdown, &sink).await? {
+        match link_device(store, &device_name, &mut shutdown, &sink).await? {
             Some(manager) => manager,
             None => return Ok(()),
         }
     };
 
     receive_and_command_loop(manager, commands, acknowledgments, shutdown, sink, ready).await
+}
+
+async fn open_encrypted_store(
+    store_path: &str,
+    passphrase: StorePassphrase,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Result<Option<SqliteStore>, String> {
+    let result = {
+        let open_store = SqliteStore::open_with_passphrase(
+            store_path,
+            Some(passphrase.as_str()),
+            OnNewIdentity::TrustUnverified,
+        );
+        await_or_shutdown(open_store, shutdown).await
+    };
+    drop(passphrase);
+
+    match result {
+        Some(Ok(store)) => Ok(Some(store)),
+        Some(Err(error)) => Err(format!("Could not open encrypted Signal store: {error}")),
+        None => Ok(None),
+    }
 }
 
 async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
@@ -3108,12 +3160,42 @@ fn qr_png(value: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
 
     struct DropFlag(Arc<AtomicBool>);
 
     impl Drop for DropFlag {
         fn drop(&mut self) {
             self.0.store(true, Ordering::Release);
+        }
+    }
+
+    struct TestDirectory(PathBuf);
+
+    impl TestDirectory {
+        fn new(label: &str) -> Self {
+            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
+
+            loop {
+                let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+                let path = std::env::temp_dir()
+                    .join(format!("signal-purple-{label}-{}-{id}", std::process::id()));
+                match std::fs::create_dir(&path) {
+                    Ok(()) => return Self(path),
+                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+                    Err(error) => panic!("could not create test directory: {error}"),
+                }
+            }
+        }
+
+        fn join(&self, path: &str) -> PathBuf {
+            self.0.join(path)
+        }
+    }
+
+    impl Drop for TestDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
         }
     }
 
@@ -3208,6 +3290,76 @@ mod tests {
             let completed = finish_shutdown_cleanup(cleanup, Duration::from_millis(10)).await;
 
             assert!(!completed);
+            assert!(dropped.load(Ordering::Acquire));
+        });
+    }
+
+    #[test]
+    fn encrypted_store_open_drops_passphrase_before_returning() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let directory = TestDirectory::new("credential-lifetime");
+        let store_path = directory.join("store.db3");
+        runtime.block_on(async {
+            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+            let dropped = Arc::new(AtomicBool::new(false));
+            let mut passphrase = StorePassphrase::new("test-store-passphrase".to_owned());
+            passphrase.observe_drop(Arc::clone(&dropped));
+
+            let store =
+                open_encrypted_store(store_path.to_str().unwrap(), passphrase, &mut shutdown_rx)
+                    .await
+                    .unwrap()
+                    .expect("store opening was interrupted");
+
+            assert!(dropped.load(Ordering::Acquire));
+            drop(store);
+        });
+    }
+
+    #[test]
+    fn encrypted_store_shutdown_drops_passphrase_without_polling_open() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
+            let dropped = Arc::new(AtomicBool::new(false));
+            let mut passphrase = StorePassphrase::new("test-store-passphrase".to_owned());
+            passphrase.observe_drop(Arc::clone(&dropped));
+            shutdown_tx.send(true).unwrap();
+
+            let store = open_encrypted_store("/not/polled", passphrase, &mut shutdown_rx)
+                .await
+                .unwrap();
+
+            assert!(store.is_none());
+            assert!(dropped.load(Ordering::Acquire));
+        });
+    }
+
+    #[test]
+    fn encrypted_store_error_drops_passphrase_before_returning() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let directory = TestDirectory::new("credential-error");
+        let store_path = directory.join("missing-parent").join("store.db3");
+        runtime.block_on(async {
+            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
+            let dropped = Arc::new(AtomicBool::new(false));
+            let mut passphrase = StorePassphrase::new("test-store-passphrase".to_owned());
+            passphrase.observe_drop(Arc::clone(&dropped));
+
+            let result =
+                open_encrypted_store(store_path.to_str().unwrap(), passphrase, &mut shutdown_rx)
+                    .await;
+
+            assert!(result.is_err());
             assert!(dropped.load(Ordering::Acquire));
         });
     }

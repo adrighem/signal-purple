@@ -237,7 +237,9 @@ upload or restart.
 Protocol state, identity/session keys, group secrets, the durable text outbox,
 and replay state are stored in SQLCipher. The database passphrase lives in the
 desktop secret service, and the plugin refuses to fall back to plaintext when
-that service is unavailable.
+that service is unavailable. The Rust FFI copies it directly into zeroizing
+ownership, and the worker wipes that copy immediately after the SQLCipher store
+open completes or is interrupted.
 
 Identity handling uses trust on first use. An identity replacement for an
 unverified contact produces a one-time warning and sending continues. A

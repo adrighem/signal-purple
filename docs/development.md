@@ -94,6 +94,9 @@ requests.
   and dropping an outbox attempt must leave its encrypted row for a later retry.
   Keep shutdown cleanup bounded; undrained projection acknowledgements rely on
   the same durable replay path.
+- Copy passphrases from the C ABI directly into `StorePassphrase`. Move that
+  owner into the store-opening boundary and wipe it before returning the store
+  or an error; never retain it in session configuration.
 
 ## Updating dependencies
 
