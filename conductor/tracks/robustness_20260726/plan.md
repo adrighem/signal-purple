@@ -10,12 +10,12 @@
 - [x] Task: Make the C validation gate fail closed c7c7bc8
   - [x] Sub-task: Enable C tests explicitly in the canonical build
   - [x] Sub-task: Make CTest fail when no tests are discovered
-- [~] Task: Close outgoing transfer lifetime and local file-admission gaps
-  - [ ] Sub-task: Add pending-transfer disconnect coverage
-  - [ ] Sub-task: Track every outgoing transfer from creation
-  - [ ] Sub-task: Add and use a bounded single-open regular-file reader
-  - [ ] Sub-task: Document transfer ownership and local file admission
-- [ ] Task: Centralize locally generated message timestamps
+- [x] Task: Close outgoing transfer lifetime and local file-admission gaps ccb548f
+  - [x] Sub-task: Add pending-transfer disconnect coverage
+  - [x] Sub-task: Track every outgoing transfer from creation
+  - [x] Sub-task: Add and use a bounded single-open regular-file reader
+  - [x] Sub-task: Document transfer ownership and local file admission
+- [~] Task: Centralize locally generated message timestamps
   - [ ] Sub-task: Add concurrent and clock-rollback timestamp tests
   - [ ] Sub-task: Route locally generated message timestamps through one allocator
   - [ ] Sub-task: Keep wall-clock retry deadlines separate from protocol timestamps

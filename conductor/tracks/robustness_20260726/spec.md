@@ -45,8 +45,8 @@ teardown can wait on uncancelled network work.
   `QUEUE_FULL`, and accepted acknowledgements are eventually persisted.
 - An accepted cancellation cannot later start or continue its upload task,
   including when it overtakes a queued send.
-- Closing a connection nulls every pending outgoing transfer's connection
-  pointer.
+- Closing a connection severs every live pending transfer from its plugin
+  context before freeing connection state, so late callbacks are safe.
 - A sparse file larger than 25 MiB is rejected without reading its contents.
 - Repeated and concurrent timestamp allocation, including simulated wall-clock
   rollback, produces unique increasing values.
