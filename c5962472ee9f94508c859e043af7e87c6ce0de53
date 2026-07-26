@@ -1,0 +1,5 @@
+Task: follow the standard PRPL conversation logging policy.
+
+Removed four plugin-level overrides that forced direct and group conversation logging off. New conversations now inherit Purple defaults, frontend and per-conversation choices remain authoritative, and repeated inbound or outbound paths preserve live toggles. Privacy documentation identifies Purple transcripts as user-facing local storage outside SQLCipher.
+
+TDD evidence: the new plugin probe first failed when redispatch reset a live direct-conversation toggle to false. After removing the overrides, the strict -Werror C build and all 5 C tests passed, including global false/true defaults and live direct/group override preservation. Independent C lifecycle review found no remaining blocker.
