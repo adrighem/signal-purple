@@ -34,6 +34,8 @@ teardown can wait on uncancelled network work.
   and attachment-download waits.
 - The SQLCipher passphrase must enter zeroizing ownership immediately and be
   dropped after store opening.
+- Direct and group conversations must follow Purple's standard user-controlled
+  logging policy instead of forcing logging off in the protocol plugin.
 
 ## Non-Functional Requirements
 
@@ -57,9 +59,13 @@ teardown can wait on uncancelled network work.
   allocator, including simulated wall-clock rollback, produces unique, strictly
   increasing values. Durable retries preserve their original timestamp.
 - Synchronization, replay, outbox, and attachment-download waits selected
-  through the shutdown boundary terminate promptly.
+  through the shutdown boundary terminate promptly. Shutdown cleanup has a
+  bounded budget; undrained projection state remains eligible for durable
+  replay.
 - Constructor and worker code never hold the passphrase in a plain `String`
   after validation and do not retain it for the session lifetime.
+- Focused plugin coverage confirms that new direct and group conversations keep
+  Purple's configured logging state.
 - Focused suites and `scripts/check.sh full` pass.
 
 ## Out of Scope

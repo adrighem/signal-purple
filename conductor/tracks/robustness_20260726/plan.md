@@ -20,11 +20,14 @@
   - [x] Sub-task: Route signal-purple-owned message timestamps through one allocator
   - [x] Sub-task: Keep wall-clock retry deadlines separate from protocol timestamps
   - [x] Sub-task: Document the monotonic timestamp invariant
-- [~] Task: Make blocking backend phases cancellable
-  - [ ] Sub-task: Inventory synchronization, replay, outbox, and download waits
-  - [ ] Sub-task: Add bounded worker-shutdown regression tests
-  - [ ] Sub-task: Apply the shutdown boundary to every inventoried wait
-  - [ ] Sub-task: Document the worker shutdown boundary
+- [x] Task: Make blocking backend phases cancellable ce0de33
+  - [x] Sub-task: Inventory synchronization, replay, outbox, and download waits
+  - [x] Sub-task: Add bounded worker-shutdown regression tests
+  - [x] Sub-task: Apply the shutdown boundary to every inventoried wait
+  - [x] Sub-task: Document the worker shutdown boundary
+- [~] Task: Follow the standard PRPL conversation logging policy
+  - [ ] Sub-task: Enable user-controlled Purple logging with direct and group regression coverage
+  - [ ] Sub-task: Update the privacy and architecture documentation
 - [ ] Task: Minimize credential lifetime
   - [ ] Sub-task: Add constructor and worker credential-lifetime coverage
   - [ ] Sub-task: Move the passphrase immediately into zeroizing ownership
