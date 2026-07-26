@@ -28,12 +28,12 @@
 - [x] Task: Follow the standard PRPL conversation logging policy c596247
   - [x] Sub-task: Enable user-controlled Purple logging with direct and group regression coverage
   - [x] Sub-task: Update the privacy and architecture documentation
-- [~] Task: Minimize credential lifetime
-  - [ ] Sub-task: Add constructor and worker credential-lifetime coverage
-  - [ ] Sub-task: Move the passphrase immediately into zeroizing ownership
-  - [ ] Sub-task: Drop the passphrase immediately after store opening
-  - [ ] Sub-task: Document the credential ownership boundary
-- [ ] Task: Audit architecture and security documentation for consistency
+- [x] Task: Minimize credential lifetime a9760d1
+  - [x] Sub-task: Add constructor and worker credential-lifetime coverage
+  - [x] Sub-task: Move the passphrase immediately into zeroizing ownership
+  - [x] Sub-task: Drop the passphrase immediately after store opening
+  - [x] Sub-task: Document the credential ownership boundary
+- [~] Task: Audit architecture and security documentation for consistency
   - [ ] Sub-task: Check ABI and status-value documentation against regression coverage
   - [ ] Sub-task: Check ownership, cancellation, timestamp, shutdown, and credential docs
 - [ ] Task: Conductor - User Manual Verification 'Reliability and lifecycle hardening' (Protocol in workflow.md)
