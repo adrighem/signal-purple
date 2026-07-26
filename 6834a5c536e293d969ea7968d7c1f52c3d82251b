@@ -1,0 +1,5 @@
+Task: prevent same-pool startup SQLite lock failures.
+
+Root cause: Presage used SQLx SQLite pool defaults with up to ten connections while startup replay, receipts, acknowledgements, contact sync, protocol refresh, and outbox work could write concurrently. Presage commits cb792382d, 66d144ec8, and fc2825f5c serialize each store pool through one connection and make the file-backed contention control deterministic; signal-purple pins fc2825f5cd7c69174beeffd4411eb0b39a9dfe28.
+
+TDD and validation evidence: the strengthened regression failed against max_connections(10) in 0.05 seconds, then all 11 presage-store-sqlite tests passed with max_connections(1). The signal-purple fast gate passed matching Clippy and all 86 Rust tests. Independent reviews found no remaining blocker. The Presage fork branch has no configured GitHub workflow or check run.
