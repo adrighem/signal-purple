@@ -11,6 +11,8 @@ pub const EVENT_MESSAGE: u32 = 5;
 pub const EVENT_GROUP_MESSAGE: u32 = 6;
 pub const EVENT_TYPING: u32 = 7;
 pub const EVENT_RECEIPT: u32 = 8;
+#[allow(dead_code, reason = "reserved legacy ABI value")]
+pub const EVENT_NOTICE_RESERVED: u32 = 9;
 pub const EVENT_ERROR: u32 = 10;
 pub const EVENT_DISCONNECTED: u32 = 11;
 pub const EVENT_CONTACT_SYNC_BEGIN: u32 = 12;
@@ -186,6 +188,41 @@ impl OwnedEvent {
 mod tests {
     use super::*;
     use std::ffi::CStr;
+
+    #[test]
+    fn abi_event_values_remain_stable() {
+        let kinds = [
+            EVENT_LINK_QR,
+            EVENT_READY,
+            EVENT_CONTACT,
+            EVENT_GROUP,
+            EVENT_MESSAGE,
+            EVENT_GROUP_MESSAGE,
+            EVENT_TYPING,
+            EVENT_RECEIPT,
+            EVENT_NOTICE_RESERVED,
+            EVENT_ERROR,
+            EVENT_DISCONNECTED,
+            EVENT_CONTACT_SYNC_BEGIN,
+            EVENT_CONTACT_SYNC_END,
+            EVENT_GROUP_SYNC_BEGIN,
+            EVENT_GROUP_SYNC_END,
+            EVENT_GROUP_MEMBER,
+            EVENT_IDENTITY_CHANGE,
+            EVENT_IDENTITY_ACCEPTED,
+            EVENT_ATTACHMENT,
+            EVENT_ATTACHMENT_SENT,
+            EVENT_GROUP_LEFT,
+            EVENT_RECOVERING,
+            EVENT_ACCOUNT,
+        ];
+
+        assert_eq!(ABI_VERSION, 7);
+        for (index, kind) in kinds.into_iter().enumerate() {
+            assert_eq!(kind, index as u32 + 1);
+        }
+        assert_eq!([FLAG_OUTGOING, FLAG_FATAL, FLAG_TRANSIENT], [1, 2, 4]);
+    }
 
     #[test]
     fn owns_and_sanitizes_event_payloads() {

@@ -11,10 +11,13 @@ retained for the worker session. The default data directory is restricted to
 mode `0700`.
 
 QR provisioning URIs, passphrases, keys, canonical identifiers, phone numbers,
-and message bodies are sensitive. Production diagnostic and error paths must
-not log them. User-controlled Purple conversation transcripts are an explicit
-UI data feature and may contain message bodies plus conversation or participant
-identifiers; they are user-facing local storage, not diagnostic output.
+and message bodies are sensitive. signal-purple-owned diagnostic messages must
+not deliberately interpolate them. Raw upstream error text remains a trust
+boundary and can reach Purple diagnostics, so diagnostic output must still be
+treated as sensitive and sanitized before sharing. User-controlled Purple
+conversation transcripts are an explicit UI data feature and may contain
+message bodies plus conversation or participant identifiers; they are
+user-facing local storage, not diagnostic output.
 
 ## Trust boundaries
 
@@ -22,7 +25,9 @@ identifiers; they are user-facing local storage, not diagnostic output.
 - The Rust backend is a separate shared library in that process and runs its
   protocol work on a dedicated thread.
 - The versioned ABI copies commands and transfers owned event allocations. No
-  Presage object or borrowed Rust pointer crosses it.
+  Presage object or ownerless borrowed Rust pointer crosses it. Event payload
+  pointers borrow from their Rust-owned event allocation until
+  `signal_event_free`.
 - Presage and its Signal dependencies are unreviewed upstream code from pinned
   revisions. Pinning improves reproducibility, not trustworthiness.
 
@@ -55,18 +60,22 @@ identifiers; they are user-facing local storage, not diagnostic output.
   store registration and initialization, profile lookup, group synchronization,
   durable replay, outbox retry, and live projection waits against shutdown.
   Filesystem preparation completes before the worker is created, so it cannot
-  outlive the core or plugin. Cleanup has a two-second budget so a stalled store
-  operation is cancelled before the join continues. Interrupted projections
-  and undrained acknowledgements remain eligible for replay, and interrupted
-  outbox attempts retain their encrypted rows.
+  outlive the core. Cleanup and Tokio runtime shutdown have bounded budgets.
+  Dropping an async wait does not interrupt an already dispatched SQLx SQLite
+  call, so the Linux backend is marked ELF `NODELETE` and remains mapped until
+  process exit while dependency-owned work finishes. No late dependency work
+  calls C or Purple. Interrupted projections and undrained acknowledgements
+  remain eligible for replay, and interrupted outbox attempts retain their
+  encrypted rows.
 - Backend events use a bounded queue; overflow fails visibly and reconnects
   rather than allowing unbounded process memory growth.
 - Attachments are capped at 25 MiB each and 50 MiB per incoming message.
   The C adapter rejects non-regular and known-oversized outgoing files before
   allocating their contents, rejects empty files, and enforces the same limit
   while reading from the already inspected descriptor. Every outgoing Purple
-  transfer is registered from creation and detached before its connection state
-  is freed.
+  transfer is registered from creation. Start callbacks are protected by a
+  temporary reference, started transfers are cancelled on disconnect, and all
+  remaining contexts are detached before connection state is freed.
   Outgoing queued, recovery-deferred, and active attachments share a per-account
   limit of two files and 50 MiB. Admission capacity and active request identity
   are released together on every terminal path. Cancellation is stored on the
@@ -126,6 +135,14 @@ identifiers; they are user-facing local storage, not diagnostic output.
   pool retains for reconnects. That dependency-owned copy is outside
   signal-purple's zeroizing owner and requires upstream support to shorten or
   zeroize.
+- SQLx does not expose join handles for its SQLite worker threads. Linux builds
+  keep the Rust backend mapped until process exit to make bounded logical
+  shutdown safe. True backend unloading after the last account closes requires
+  upstream interruption and thread-joining support.
+- Some pinned upstream error values are rendered into Purple errors and
+  transient diagnostics. Reviewed signal-purple call sites do not directly add
+  credentials or message bodies, but raw diagnostic output must be treated as
+  private and sanitized before it is shared.
 - Pidgin/libpurple 2 is a legacy in-process plugin environment. A memory-safety
   flaw in the UI or another plugin can access this process.
 - Signal does not support third-party clients or promise protocol stability.

@@ -730,6 +730,15 @@ mod tests {
     use super::*;
     use std::ffi::CString;
 
+    #[test]
+    fn abi_status_values_remain_stable() {
+        assert_eq!(SignalStatus::Ok as i32, 0);
+        assert_eq!(SignalStatus::InvalidArgument as i32, -1);
+        assert_eq!(SignalStatus::NotReady as i32, -2);
+        assert_eq!(SignalStatus::QueueFull as i32, -3);
+        assert_eq!(SignalStatus::InternalError as i32, -4);
+    }
+
     fn test_core(
         commands: tokio_mpsc::Sender<Command>,
         shutdown: watch::Sender<bool>,

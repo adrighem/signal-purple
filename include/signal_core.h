@@ -85,7 +85,14 @@ uint32_t signal_core_abi_version(void);
  * Config allocations must contain at least the abi_version/struct_size prefix;
  * all string arguments must be valid NUL-terminated UTF-8. Calls for one core
  * must be serialized. Shutdown/free require exclusive access and must not race
- * polling or command submission. Every returned event must be freed once.
+ * polling or command submission. Input strings and attachment bytes are
+ * borrowed only for the call and copied before an accepted command returns.
+ *
+ * signal_core_new clears out_core before validation and transfers one owned
+ * core only on success. signal_core_poll_event likewise clears out_event
+ * before polling. Every returned event is one Rust-owned allocation which
+ * must be freed once. Its string and data fields borrow from that allocation
+ * and remain valid only until signal_event_free.
  */
 SignalStatus signal_core_new(const SignalCoreConfig *config,
                              SignalCore **out_core);

@@ -51,12 +51,15 @@ cargo test --locked --manifest-path rust/signal-core/Cargo.toml \
 ```
 
 The C tests include a headless libpurple core that probes and loads the actual
-plugin module plus focused markup, inline-image ownership and routing, and
-contact-snapshot reconciliation. The Rust tests cover owned ABI payloads, FFI
-error outputs, bounded event overflow, QR PNG generation, group-key validation,
-and group-image placeholder projection. Live compatibility tests require
-dedicated non-production Signal accounts and are not run for untrusted pull
-requests.
+plugin module plus focused ABI values, conversation logging, outgoing-transfer
+lifetime, bounded file admission, markup, inline-image ownership and routing,
+and contact-snapshot reconciliation. The Rust tests cover ABI values and owned
+payloads, FFI error outputs, acknowledgement and cancellation pressure,
+timestamp allocation, bounded shutdown, credential lifetime, event overflow,
+QR PNG generation, group-key validation, and group-image projection. The
+staged-install probe also verifies the Linux backend's ELF `NODELETE` contract.
+Live compatibility tests require dedicated non-production Signal accounts and
+are not run for untrusted pull requests.
 
 ## C rules
 
@@ -65,6 +68,8 @@ requests.
 - Track and destroy every source/request before freeing connection state.
 - Register outgoing transfers at creation and detach their contexts before
   freeing connection state, including transfers still awaiting file selection.
+- Hold a temporary transfer reference across `purple_xfer_start`, which may
+  synchronously cancel, and cancel every started transfer during disconnect.
 - Admit local attachment bytes through the bounded, single-open regular-file
   reader rather than an unbounded path-based convenience API.
 - Treat Rust events as immutable and call `signal_event_free` exactly once.
@@ -92,8 +97,10 @@ requests.
   Complete blocking filesystem setup before creating the worker so it cannot
   outlive teardown. Dropping a projection must leave it eligible for replay,
   and dropping an outbox attempt must leave its encrypted row for a later retry.
-  Keep shutdown cleanup bounded; undrained projection acknowledgements rely on
-  the same durable replay path.
+  Keep recovery cleanup and Tokio runtime shutdown bounded; undrained
+  projection acknowledgements rely on the same durable replay path. SQLx
+  SQLite workers are dependency-owned and unjoinable, so Linux builds must keep
+  the Rust backend process-resident with ELF `NODELETE`.
 - Copy passphrases from the C ABI directly into `StorePassphrase`. Move that
   owner into the store-opening boundary and wipe it before returning the store
   or an error; never retain it in session configuration.
