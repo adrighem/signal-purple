@@ -87,6 +87,13 @@ requests.
 - Allocate adapter-generated protocol timestamps through the shared per-core
   allocator. Keep outbox retry deadlines on the wall clock and preserve the
   original timestamp when retransmitting a durable message.
+- Race network-backed profile, synchronization, replay, outbox, and projection
+  phases, plus store registration and initialization, against worker shutdown.
+  Complete blocking filesystem setup before creating the worker so it cannot
+  outlive teardown. Dropping a projection must leave it eligible for replay,
+  and dropping an outbox attempt must leave its encrypted row for a later retry.
+  Keep shutdown cleanup bounded; undrained projection acknowledgements rely on
+  the same durable replay path.
 
 ## Updating dependencies
 

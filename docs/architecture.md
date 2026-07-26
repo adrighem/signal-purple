@@ -43,8 +43,18 @@ destruction.
   backoff interval.
 - Teardown destroys the descriptor source, cancels every admitted attachment,
   sends shutdown, joins the worker, then frees the core. The worker aborts
-  attachment tasks before draining accepted projection acknowledgements. No
-  worker calls into C or Purple.
+  contact synchronization and attachment tasks before draining accepted
+  projection acknowledgements. Profile lookup, group synchronization, durable
+  replay, outbox retry, and live message projection all race the authoritative
+  shutdown signal, as do store registration and schema initialization. Parent
+  directory setup completes synchronously before the worker is created, so no
+  filesystem operation can outlive the joined worker and unloadable plugin.
+  Cleanup gets a two-second budget so a stalled local store operation is
+  cancelled before the synchronous worker join continues. Cancelling projection,
+  including an attachment download or an acknowledgement left after the cleanup
+  budget, leaves the content eligible for replay. Cancelling an outbox retry
+  leaves its encrypted row available for the next connection. No worker calls
+  into C or Purple.
 
 ## Connection sequence
 
@@ -136,7 +146,7 @@ older messages from the primary phone or Signal service.
   corresponding event. A crash anywhere between network receipt and UI
   delivery therefore leaves the message eligible for replay on reconnect.
   Acknowledgements are coalesced by registered delivery ID, retried after local
-  store failures, and drained during orderly worker shutdown.
+  store failures, and drained within the bounded orderly-shutdown budget.
   Existing stored history is marked projected when this mechanism is first
   initialized, preventing an upgrade from flooding conversations.
 - Purple 2 has no robust per-message receipt update API, so received receipts

@@ -43,7 +43,14 @@ and message bodies are sensitive. Production code must not log them.
 - Upstream info-level tracing is compiled out so Presage cannot emit the
   provisioning URI through its linking log statement.
 - Worker shutdown cancels admitted attachments before signaling and joining the
-  backend, and account state is freed only after that join.
+  backend, and account state is freed only after that join. The backend races
+  store registration and initialization, profile lookup, group synchronization,
+  durable replay, outbox retry, and live projection waits against shutdown.
+  Filesystem preparation completes before the worker is created, so it cannot
+  outlive the core or plugin. Cleanup has a two-second budget so a stalled store
+  operation is cancelled before the join continues. Interrupted projections
+  and undrained acknowledgements remain eligible for replay, and interrupted
+  outbox attempts retain their encrypted rows.
 - Backend events use a bounded queue; overflow fails visibly and reconnects
   rather than allowing unbounded process memory growth.
 - Attachments are capped at 25 MiB each and 50 MiB per incoming message.

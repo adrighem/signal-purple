@@ -166,6 +166,9 @@ pub unsafe extern "C" fn signal_core_new(
 
         // SAFETY: validated and copied by `required_string`.
         let store_path = status_try!(unsafe { required_string(config.store_path, 4096) });
+        status_try!(
+            backend::ensure_store_parent(&store_path).map_err(|_| SignalStatus::InternalError)
+        );
         // SAFETY: validated and copied by `required_string`.
         let device_name = status_try!(unsafe { required_string(config.device_name, 128) });
         // SAFETY: validated and copied by `required_string`.
