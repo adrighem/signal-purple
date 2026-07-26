@@ -1,0 +1,7 @@
+Task: centralize signal-purple-owned message timestamps.
+
+Added one Arc-backed atomic allocator per core and routed new text, attachment, typing, delivery-receipt, and read-receipt timestamps through it. Concurrent tasks share one sequence; wall-clock rollback cannot repeat an allocation. Durable retries keep their original timestamp, while retry deadlines use a separately named wall clock.
+
+TDD evidence: the new stalled-clock, rollback, and concurrent-clone tests initially failed because MessageTimestampAllocator did not exist. Final sanitized Rust tests passed all 72 unit tests plus doc tests; cargo fmt and all-target cargo check passed. Clippy could not run because the host clippy-driver is 1.87 while cargo and rustc are 1.95.
+
+Scope: pinned Presage still owns contact-sync and group-leave notification timestamps; the specification and architecture docs explicitly exclude those upstream paths.
