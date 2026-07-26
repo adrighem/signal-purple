@@ -4,6 +4,24 @@ All notable changes will be documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 semantic versioning after the first stable release.
 
+## [0.3.0](https://github.com/adrighem/signal-purple/compare/v0.2.4...v0.3.0) (2026-07-26)
+
+
+### Features
+
+* **purple:** honor standard conversation logging ([c596247](https://github.com/adrighem/signal-purple/commit/c5962472ee9f94508c859e043af7e87c6ce0de53))
+
+
+### Bug Fixes
+
+* **core:** bound backend shutdown phases ([ce0de33](https://github.com/adrighem/signal-purple/commit/ce0de3343e2792a4132158b8e341bed4394bd29d))
+* **core:** make control paths reliable ([374a92a](https://github.com/adrighem/signal-purple/commit/374a92a8bc099a0bd9d6b91569fc759ef374ab57))
+* **core:** minimize passphrase lifetime ([a9760d1](https://github.com/adrighem/signal-purple/commit/a9760d12868d46723595779679c5d03adc23562b))
+* **core:** serialize message timestamp allocation ([2dbae8c](https://github.com/adrighem/signal-purple/commit/2dbae8c851c2213466b159a273953063aed51fa9))
+* **core:** serialize SQLite store access ([6834a5c](https://github.com/adrighem/signal-purple/commit/6834a5c536e293d969ea7968d7c1f52c3d82251b))
+* harden final teardown boundaries ([45171d0](https://github.com/adrighem/signal-purple/commit/45171d04a3d0c285784f928661cc9c03d6719fa0))
+* **plugin:** harden outgoing attachment lifecycle ([ccb548f](https://github.com/adrighem/signal-purple/commit/ccb548fc204c68d6a1022efe1c6146c92751507d))
+
 ## [0.2.4](https://github.com/adrighem/signal-purple/compare/v0.2.3...v0.2.4) (2026-07-25)
 
 
