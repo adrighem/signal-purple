@@ -41,6 +41,9 @@ teardown can wait on uncancelled network work.
   documented separately.
 - Direct and group conversations must follow Purple's standard user-controlled
   logging policy instead of forcing logging off in the protocol plugin.
+- Concurrent startup replay, receipt, acknowledgement, contact-sync, and
+  protocol-state writes within one live core must serialize through one SQLite
+  connection so they do not race each other into `SQLITE_BUSY` failures.
 
 ## Non-Functional Requirements
 
@@ -76,11 +79,14 @@ teardown can wait on uncancelled network work.
   documented separately.
 - Focused plugin coverage confirms that new direct and group conversations keep
   Purple's configured logging state.
+- The pinned Presage store has regression coverage proving its SQLx pool allows
+  only one connection and queues same-pool writes behind an active transaction.
 - Focused suites and `scripts/check.sh full` pass.
 
 ## Out of Scope
 
 - Changing the upstream Presage projection schema or attachment downloader.
+- Supporting multiple cores or processes against one physical store path.
 - Live production-service validation.
 - New Signal or Purple features.
 - ABI version changes.

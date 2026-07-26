@@ -22,10 +22,13 @@ does not authorize merging them.
 
 The Presage dependency currently uses the public
 [`adrighem/presage`](https://github.com/adrighem/presage) fork at the exact Git
-revision `5e584595b3723e6904a09246deaa830b93bbae7b`. The fork carries the
+revision `fc2825f5cd7c69174beeffd4411eb0b39a9dfe28`. The fork carries the
 Storage Service group refresh needed to build and atomically reconcile an
-authoritative active set, together with the remote group-leave operation and
-focused tests. Its nested libsignal-service dependency is the public
+authoritative active set, the remote group-leave operation, and a
+single-connection SQLx pool which serializes writes within each store pool. Its
+file-backed regression holds one write transaction, proves a second write
+queues rather than returning `SQLITE_BUSY`, then verifies completion after the
+first transaction commits. Its nested libsignal-service dependency is the public
 [`adrighem/libsignal-service-rs`](https://github.com/adrighem/libsignal-service-rs)
 fork at `c41a2d0332634dd3cbc830d0d4a77bdc0e9d2cae`, whose only fork change
 preserves Storage response keys for exact completeness validation. Treat any

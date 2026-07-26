@@ -78,6 +78,9 @@ are not run for untrusted pull requests.
 ## Rust rules
 
 - Keep Presage work on the backend actor's Tokio `LocalSet`.
+- Keep the pinned Presage SQLx pool at one connection. Signal protocol
+  read-modify-write transactions must serialize at the database boundary;
+  retrying an entire send after a store error can duplicate its remote effect.
 - Validate every public ABI pointer, UTF-8 string, and length.
 - Contain panics at exported boundaries and keep teardown non-panicking; never
   unwind into C.

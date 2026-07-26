@@ -37,6 +37,15 @@ The plugin requires a Secret Service provider. Unlock the desktop keyring and
 confirm libsecret applications can store a secret. It intentionally refuses to
 open a plaintext store when the service is unavailable.
 
+## The database is locked
+
+Current builds serialize SQLite work within each Signal core. A remaining
+`database is locked` error can mean a rapid reconnect overlapped a prior core's
+database worker, or another Pidgin process or account is using the same
+configured store path. Fully quit every Pidgin process, then start one instance
+with only one account assigned to that store. Do not delete the database, its
+`-wal` file, or its `-shm` file while diagnosing the owner.
+
 ## Linking fails or the QR expires
 
 Disable and re-enable a fresh account to request a new provisioning flow. Make

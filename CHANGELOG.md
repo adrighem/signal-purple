@@ -22,7 +22,11 @@ semantic versioning after the first stable release.
 
 ## [Unreleased]
 
-No user-facing changes yet.
+### Fixed
+
+- Serialize Presage SQLite access so concurrent startup replay, receipts,
+  acknowledgements, and protocol-state refreshes in one live core do not race
+  each other into `database is locked` errors.
 
 ## 0.2.2 (2026-07-24)
 

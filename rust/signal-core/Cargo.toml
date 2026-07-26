@@ -16,8 +16,8 @@ crate-type = ["cdylib", "rlib"]
 futures = "0.3.31"
 hex = "0.4.3"
 png = "0.18.0"
-presage = { git = "https://github.com/adrighem/presage.git", rev = "5e584595b3723e6904a09246deaa830b93bbae7b", default-features = false }
-presage-store-sqlite = { git = "https://github.com/adrighem/presage.git", rev = "5e584595b3723e6904a09246deaa830b93bbae7b" }
+presage = { git = "https://github.com/adrighem/presage.git", rev = "fc2825f5cd7c69174beeffd4411eb0b39a9dfe28", default-features = false }
+presage-store-sqlite = { git = "https://github.com/adrighem/presage.git", rev = "fc2825f5cd7c69174beeffd4411eb0b39a9dfe28" }
 qrcode = { version = "0.14.1", default-features = false }
 reqwest-websocket = { version = "0.4.4", default-features = false }
 sha2 = "0.11.0"
