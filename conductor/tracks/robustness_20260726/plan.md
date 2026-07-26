@@ -25,10 +25,10 @@
   - [x] Sub-task: Add bounded worker-shutdown regression tests
   - [x] Sub-task: Apply the shutdown boundary to every inventoried wait
   - [x] Sub-task: Document the worker shutdown boundary
-- [~] Task: Follow the standard PRPL conversation logging policy
-  - [ ] Sub-task: Enable user-controlled Purple logging with direct and group regression coverage
-  - [ ] Sub-task: Update the privacy and architecture documentation
-- [ ] Task: Minimize credential lifetime
+- [x] Task: Follow the standard PRPL conversation logging policy c596247
+  - [x] Sub-task: Enable user-controlled Purple logging with direct and group regression coverage
+  - [x] Sub-task: Update the privacy and architecture documentation
+- [~] Task: Minimize credential lifetime
   - [ ] Sub-task: Add constructor and worker credential-lifetime coverage
   - [ ] Sub-task: Move the passphrase immediately into zeroizing ownership
   - [ ] Sub-task: Drop the passphrase immediately after store opening
