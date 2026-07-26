@@ -6,7 +6,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures::{FutureExt, StreamExt, channel::oneshot, pin_mut};
+use futures::{FutureExt, StreamExt, channel::oneshot, future::Abortable, pin_mut};
 use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::content::{
     Content, ContentBody, DataMessage, GroupContextV2, ServiceError,
@@ -31,9 +31,10 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, mpsc as tokio_mpsc, watch};
 use zeroize::Zeroizing;
 
+use crate::acknowledgment::AcknowledgmentInbox;
 #[cfg(test)]
 use crate::attachment::AttachmentAdmission;
-use crate::attachment::{AttachmentPermit, MAX_ATTACHMENT_BYTES};
+use crate::attachment::{AttachmentControl, AttachmentPermit, MAX_ATTACHMENT_BYTES};
 use crate::event::{
     EVENT_ACCOUNT, EVENT_ATTACHMENT, EVENT_ATTACHMENT_SENT, EVENT_CONTACT,
     EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED, EVENT_GROUP,
@@ -59,6 +60,7 @@ pub struct Config {
 pub(crate) struct WorkerContext {
     pub(crate) config: Config,
     pub(crate) commands: tokio_mpsc::Receiver<Command>,
+    pub(crate) acknowledgments: Arc<AcknowledgmentInbox>,
     pub(crate) shutdown: watch::Receiver<bool>,
     pub(crate) events: EventSink,
     pub(crate) ready: Arc<AtomicBool>,
@@ -89,16 +91,10 @@ pub enum Command {
         group: bool,
         permit: AttachmentPermit,
     },
-    CancelAttachment {
-        request_id: u64,
-    },
     SetTyping {
         request_id: u64,
         recipient: String,
         typing: bool,
-    },
-    AcknowledgeMessage {
-        delivery_id: u64,
     },
     AcceptIdentity {
         request_id: u64,
@@ -115,11 +111,11 @@ pub enum Command {
     },
 }
 
-#[derive(Default)]
 struct MessageProjection {
     next_delivery_id: u64,
     pending: HashMap<u64, Content>,
     identities: ProjectionIdentities,
+    acknowledgments: Arc<AcknowledgmentInbox>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -386,6 +382,15 @@ impl std::fmt::Display for OutboxAttemptError {
 }
 
 impl MessageProjection {
+    fn new(acknowledgments: Arc<AcknowledgmentInbox>) -> Self {
+        Self {
+            next_delivery_id: 0,
+            pending: HashMap::new(),
+            identities: ProjectionIdentities::default(),
+            acknowledgments,
+        }
+    }
+
     fn track(&mut self, content: Content) -> Option<u64> {
         if !self.identities.reserve(projection_identity(&content)) {
             return None;
@@ -393,11 +398,13 @@ impl MessageProjection {
         self.next_delivery_id = self.next_delivery_id.wrapping_add(1).max(1);
         let delivery_id = self.next_delivery_id;
         self.pending.insert(delivery_id, content);
+        self.acknowledgments.register(delivery_id);
         Some(delivery_id)
     }
 
     fn release(&mut self, delivery_id: u64) -> Option<Content> {
         let content = self.pending.remove(&delivery_id)?;
+        self.acknowledgments.unregister(delivery_id);
         self.identities
             .release_pending(&projection_identity(&content));
         Some(content)
@@ -405,6 +412,7 @@ impl MessageProjection {
 
     fn complete(&mut self, delivery_id: u64) -> Option<Content> {
         let content = self.pending.remove(&delivery_id)?;
+        self.acknowledgments.unregister(delivery_id);
         self.identities.complete(projection_identity(&content));
         Some(content)
     }
@@ -524,11 +532,13 @@ pub(crate) fn run_worker(context: WorkerContext) {
     let WorkerContext {
         config,
         commands,
+        acknowledgments,
         shutdown,
         events,
         ready,
     } = context;
     let sink = events;
+    let worker_acknowledgments = Arc::clone(&acknowledgments);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -538,12 +548,14 @@ pub(crate) fn run_worker(context: WorkerContext) {
         runtime.block_on(local.run_until(run(
             config,
             commands,
+            worker_acknowledgments,
             shutdown,
             sink.clone(),
             Arc::clone(&ready),
         )))
     }));
 
+    acknowledgments.close();
     ready.store(false, Ordering::Release);
     match result {
         Ok(Ok(())) => {}
@@ -555,6 +567,7 @@ pub(crate) fn run_worker(context: WorkerContext) {
 async fn run(
     config: Config,
     commands: tokio_mpsc::Receiver<Command>,
+    acknowledgments: Arc<AcknowledgmentInbox>,
     mut shutdown: watch::Receiver<bool>,
     sink: EventSink,
     ready: Arc<AtomicBool>,
@@ -593,7 +606,7 @@ async fn run(
         }
     };
 
-    receive_and_command_loop(manager, commands, shutdown, sink, ready).await
+    receive_and_command_loop(manager, commands, acknowledgments, shutdown, sink, ready).await
 }
 
 async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
@@ -674,6 +687,7 @@ async fn link_device(
 async fn receive_and_command_loop(
     mut manager: Manager<SqliteStore, Registered>,
     mut commands: tokio_mpsc::Receiver<Command>,
+    acknowledgments: Arc<AcknowledgmentInbox>,
     mut shutdown: watch::Receiver<bool>,
     sink: EventSink,
     ready: Arc<AtomicBool>,
@@ -693,13 +707,16 @@ async fn receive_and_command_loop(
         .initialize_client_outbox()
         .await
         .map_err(|error| format!("Could not initialize the encrypted outbox: {error}"))?;
-    let mut projection = MessageProjection::default();
+    let mut projection = MessageProjection::new(Arc::clone(&acknowledgments));
     let mut deferred_commands = VecDeque::new();
     let mut attachment_tasks = tokio::task::JoinSet::new();
     let mut attachment_aborts = HashMap::new();
     let departed_groups = DepartedGroups::default();
     let mut retry_tick = tokio::time::interval(std::time::Duration::from_secs(5));
     retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut acknowledgment_retry_tick = tokio::time::interval(std::time::Duration::from_secs(5));
+    acknowledgment_retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    acknowledgment_retry_tick.reset();
     let mut group_sync_retry_tick =
         tokio::time::interval(std::time::Duration::from_secs(GROUP_SYNC_RETRY_SECS));
     group_sync_retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -710,20 +727,16 @@ async fn receive_and_command_loop(
 
     loop {
         if recovering {
-            if drain_recovery_commands(
-                &mut manager,
-                &mut commands,
-                &mut shutdown,
-                &sink,
-                &mut projection,
-                &departed_groups,
-                RecoveryQueues {
-                    attachment_aborts: &mut attachment_aborts,
-                    deferred_commands: &mut deferred_commands,
-                },
-            )
-            .await
-            {
+            if drain_recovery_commands(&mut commands, &mut deferred_commands) {
+                stop_attachments_and_drain_acknowledgments(
+                    &manager,
+                    &sink,
+                    &mut attachment_tasks,
+                    &mut attachment_aborts,
+                    &acknowledgments,
+                    &mut projection,
+                )
+                .await;
                 return Ok(());
             }
             let Some(delay) = recovery_backoff.next_delay() else {
@@ -739,6 +752,15 @@ async fn receive_and_command_loop(
                     text: Some(error),
                     ..Event::default()
                 });
+                stop_attachments_and_drain_acknowledgments(
+                    &manager,
+                    &sink,
+                    &mut attachment_tasks,
+                    &mut attachment_aborts,
+                    &acknowledgments,
+                    &mut projection,
+                )
+                .await;
                 return Ok(());
             };
             if !delay.is_zero() {
@@ -749,22 +771,29 @@ async fn receive_and_command_loop(
                         _ = &mut sleep => break,
                         command = commands.recv() => {
                             let Some(command) = command else {
+                                stop_attachments_and_drain_acknowledgments(
+                                    &manager,
+                                    &sink,
+                                    &mut attachment_tasks,
+                                    &mut attachment_aborts,
+                                    &acknowledgments,
+                                    &mut projection,
+                                ).await;
                                 return Ok(());
                             };
-                            if handle_recovery_command(
-                                &mut manager,
-                                command,
-                                &mut shutdown,
+                            handle_recovery_command(command, &mut deferred_commands);
+                        }
+                        _ = acknowledgments.wait() => {
+                            process_acknowledgments(
+                                &manager,
+                                &acknowledgments,
                                 &sink,
                                 &mut projection,
-                                &departed_groups,
-                                &mut RecoveryQueues {
-                                    attachment_aborts: &mut attachment_aborts,
-                                    deferred_commands: &mut deferred_commands,
-                                },
-                            ).await {
-                                return Ok(());
-                            }
+                                true,
+                            ).await;
+                        }
+                        _ = acknowledgment_retry_tick.tick() => {
+                            acknowledgments.activate_retries();
                         }
                         completed = attachment_tasks.join_next(),
                             if !attachment_tasks.is_empty() =>
@@ -778,7 +807,17 @@ async fn receive_and_command_loop(
                                 ).await;
                             }
                         }
-                        _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+                        _ = wait_for_shutdown(&mut shutdown) => {
+                            stop_attachments_and_drain_acknowledgments(
+                                &manager,
+                                &sink,
+                                &mut attachment_tasks,
+                                &mut attachment_aborts,
+                                &acknowledgments,
+                                &mut projection,
+                            ).await;
+                            return Ok(());
+                        },
                     }
                 }
             }
@@ -792,22 +831,29 @@ async fn receive_and_command_loop(
                     result = &mut receive => break result,
                     command = commands.recv(), if recovering => {
                         let Some(command) = command else {
+                            stop_attachments_and_drain_acknowledgments(
+                                &manager,
+                                &sink,
+                                &mut attachment_tasks,
+                                &mut attachment_aborts,
+                                &acknowledgments,
+                                &mut projection,
+                            ).await;
                             return Ok(());
                         };
-                        if handle_recovery_command(
-                            &mut manager,
-                            command,
-                            &mut shutdown,
+                        handle_recovery_command(command, &mut deferred_commands);
+                    }
+                    _ = acknowledgments.wait() => {
+                        process_acknowledgments(
+                            &manager,
+                            &acknowledgments,
                             &sink,
                             &mut projection,
-                            &departed_groups,
-                            &mut RecoveryQueues {
-                                attachment_aborts: &mut attachment_aborts,
-                                deferred_commands: &mut deferred_commands,
-                            },
-                        ).await {
-                            return Ok(());
-                        }
+                            true,
+                        ).await;
+                    }
+                    _ = acknowledgment_retry_tick.tick() => {
+                        acknowledgments.activate_retries();
                     }
                     completed = attachment_tasks.join_next(),
                         if recovering && !attachment_tasks.is_empty() =>
@@ -821,7 +867,17 @@ async fn receive_and_command_loop(
                             ).await;
                         }
                     }
-                    _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
+                    _ = wait_for_shutdown(&mut shutdown) => {
+                        stop_attachments_and_drain_acknowledgments(
+                            &manager,
+                            &sink,
+                            &mut attachment_tasks,
+                            &mut attachment_aborts,
+                            &acknowledgments,
+                            &mut projection,
+                        ).await;
+                        return Ok(());
+                    },
                 }
             }
         };
@@ -837,6 +893,15 @@ async fn receive_and_command_loop(
                         &mut deferred_commands,
                         "Signal connection recovery stopped before the request could be sent",
                     );
+                    stop_attachments_and_drain_acknowledgments(
+                        &manager,
+                        &sink,
+                        &mut attachment_tasks,
+                        &mut attachment_aborts,
+                        &acknowledgments,
+                        &mut projection,
+                    )
+                    .await;
                     return Err(error);
                 }
                 if !recovering {
@@ -869,6 +934,15 @@ async fn receive_and_command_loop(
 
         loop {
             tokio::select! {
+                _ = acknowledgments.wait() => {
+                    process_acknowledgments(
+                        &manager,
+                        &acknowledgments,
+                        &sink,
+                        &mut projection,
+                        true,
+                    ).await;
+                }
                 received = messages.next() => {
                     match received {
                         Some(Received::QueueEmpty) => {
@@ -954,24 +1028,18 @@ async fn receive_and_command_loop(
                 } => {
                     let Some(command) = command else {
                         contact_sync.abort();
+                        stop_attachments_and_drain_acknowledgments(
+                            &manager,
+                            &sink,
+                            &mut attachment_tasks,
+                            &mut attachment_aborts,
+                            &acknowledgments,
+                            &mut projection,
+                        ).await;
                         return Ok(());
                     };
                     if !synchronized {
-                        if handle_recovery_command(
-                            &mut manager,
-                            command,
-                            &mut shutdown,
-                            &sink,
-                            &mut projection,
-                            &departed_groups,
-                            &mut RecoveryQueues {
-                                attachment_aborts: &mut attachment_aborts,
-                                deferred_commands: &mut deferred_commands,
-                            },
-                        ).await {
-                            contact_sync.abort();
-                            return Ok(());
-                        }
+                        handle_recovery_command(command, &mut deferred_commands);
                         continue;
                     }
                     match command {
@@ -984,16 +1052,22 @@ async fn receive_and_command_loop(
                             group,
                             permit,
                         } => {
+                            if permit.is_cancelled() {
+                                continue;
+                            }
                             if group && !groups_authoritative {
-                                sink.emit(Event::request_error(
-                                    request_id,
-                                    "Signal groups are temporarily unavailable until authoritative synchronization succeeds",
-                                ));
+                                if permit.claim_terminal() {
+                                    sink.emit(Event::request_error(
+                                        request_id,
+                                        "Signal groups are temporarily unavailable until authoritative synchronization succeeds",
+                                    ));
+                                }
                                 continue;
                             }
                             let mut attachment_manager = manager.clone();
                             let attachment_departed_groups = departed_groups.clone();
-                            let abort = attachment_tasks.spawn_local(async move {
+                            let control = permit.control();
+                            let task = attachment_tasks.spawn_local(async move {
                                 attachment_task_result(
                                     request_id,
                                     permit,
@@ -1009,12 +1083,10 @@ async fn receive_and_command_loop(
                                 )
                                 .await
                             });
-                            attachment_aborts.insert(request_id, abort);
-                        }
-                        Command::CancelAttachment { request_id } => {
-                            if let Some(abort) = attachment_aborts.remove(&request_id) {
-                                abort.abort();
-                            }
+                            attachment_aborts.insert(
+                                request_id,
+                                AttachmentTaskControl { task, control },
+                            );
                         }
                         command => {
                             if groups_authoritative
@@ -1027,11 +1099,18 @@ async fn receive_and_command_loop(
                                 command,
                                 &mut shutdown,
                                 &sink,
-                                &mut projection,
                                 &departed_groups,
                                 groups_authoritative,
                             ).await {
                                 contact_sync.abort();
+                                stop_attachments_and_drain_acknowledgments(
+                                    &manager,
+                                    &sink,
+                                    &mut attachment_tasks,
+                                    &mut attachment_aborts,
+                                    &acknowledgments,
+                                    &mut projection,
+                                ).await;
                                 return Ok(());
                             }
                             emit_identity_changes(&manager, &sink).await;
@@ -1056,6 +1135,9 @@ async fn receive_and_command_loop(
                         groups_authoritative,
                     ).await;
                 }
+                _ = acknowledgment_retry_tick.tick() => {
+                    acknowledgments.activate_retries();
+                }
                 _ = group_sync_retry_tick.tick(), if synchronized && !groups_authoritative => {
                     match synchronize_and_emit_group_snapshot(
                         &mut manager,
@@ -1079,6 +1161,14 @@ async fn receive_and_command_loop(
                 }
                 _ = wait_for_shutdown(&mut shutdown) => {
                     contact_sync.abort();
+                    stop_attachments_and_drain_acknowledgments(
+                        &manager,
+                        &sink,
+                        &mut attachment_tasks,
+                        &mut attachment_aborts,
+                        &acknowledgments,
+                        &mut projection,
+                    ).await;
                     return Ok(());
                 },
             }
@@ -1151,7 +1241,7 @@ async fn request_contacts_with_retries(
 async fn handle_attachment_completion(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
-    attachment_aborts: &mut HashMap<u64, tokio::task::AbortHandle>,
+    attachment_aborts: &mut HashMap<u64, AttachmentTaskControl>,
     completed: Result<AttachmentCompletion, tokio::task::JoinError>,
 ) {
     let Ok(AttachmentCompletion {
@@ -1164,7 +1254,7 @@ async fn handle_attachment_completion(
     };
     attachment_aborts.remove(&request_id);
     match result {
-        Ok(sent) => {
+        AttachmentTaskResult::Finished(Ok(sent)) => {
             mark_sent_message_projected_or_report(manager, &sent, sink).await;
             sink.emit(Event {
                 kind: EVENT_ATTACHMENT_SENT,
@@ -1172,26 +1262,51 @@ async fn handle_attachment_completion(
                 ..Event::default()
             });
         }
-        Err(error) => sink.emit(Event::request_error(request_id, error)),
+        AttachmentTaskResult::Finished(Err(error)) => {
+            sink.emit(Event::request_error(request_id, error));
+        }
+        AttachmentTaskResult::Cancelled => {}
     }
+}
+
+enum AttachmentTaskResult {
+    Finished(Result<SentMessage, String>),
+    Cancelled,
+}
+
+struct AttachmentTaskControl {
+    task: tokio::task::AbortHandle,
+    control: AttachmentControl,
 }
 
 struct AttachmentCompletion {
     request_id: u64,
-    result: Result<SentMessage, String>,
+    result: AttachmentTaskResult,
     permit: AttachmentPermit,
 }
 
 async fn attachment_task_result(
     request_id: u64,
-    permit: AttachmentPermit,
+    mut permit: AttachmentPermit,
     task: impl Future<Output = Result<SentMessage, String>>,
 ) -> AttachmentCompletion {
-    let result = std::panic::AssertUnwindSafe(task).catch_unwind().await;
+    let cancellation = permit.take_cancellation_registration();
+    let task = std::panic::AssertUnwindSafe(task).catch_unwind();
+    let result = match Abortable::new(task, cancellation).await {
+        Ok(result) => {
+            let result = result
+                .unwrap_or_else(|_| Err("Signal attachment task failed unexpectedly".to_owned()));
+            if permit.claim_terminal() || result.is_ok() {
+                AttachmentTaskResult::Finished(result)
+            } else {
+                AttachmentTaskResult::Cancelled
+            }
+        }
+        Err(_) => AttachmentTaskResult::Cancelled,
+    };
     AttachmentCompletion {
         request_id,
-        result: result
-            .unwrap_or_else(|_| Err("Signal attachment task failed unexpectedly".to_owned())),
+        result,
         permit,
     }
 }
@@ -1200,18 +1315,30 @@ async fn abort_in_flight_attachments(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
     attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
-    attachment_aborts: &mut HashMap<u64, tokio::task::AbortHandle>,
+    attachment_aborts: &mut HashMap<u64, AttachmentTaskControl>,
 ) {
-    let completions = abort_and_drain_tasks(attachment_tasks, attachment_aborts.values()).await;
+    let completions = abort_and_drain_tasks(
+        attachment_tasks,
+        attachment_aborts.values().map(|control| &control.task),
+    )
+    .await;
     for completed in completions {
         handle_attachment_completion(manager, sink, attachment_aborts, completed).await;
     }
-    for (request_id, _) in attachment_aborts.drain() {
-        sink.emit(Event::request_error(
+    for (request_id, control) in attachment_aborts.drain() {
+        if let Some(event) = interrupted_attachment_event(request_id, &control.control) {
+            sink.emit(event);
+        }
+    }
+}
+
+fn interrupted_attachment_event(request_id: u64, control: &AttachmentControl) -> Option<Event> {
+    control.claim_terminal().then(|| {
+        Event::request_error(
             request_id,
             "Signal connection was interrupted before the attachment completed",
-        ));
-    }
+        )
+    })
 }
 
 async fn abort_and_drain_tasks<T: Send + 'static>(
@@ -1229,22 +1356,6 @@ async fn abort_and_drain_tasks<T: Send + 'static>(
     completions
 }
 
-fn cancel_deferred_attachment(commands: &mut VecDeque<Command>, request_id: u64) -> bool {
-    let Some(index) = commands.iter().position(|command| {
-        matches!(
-            command,
-            Command::SendAttachment {
-                request_id: queued_request_id,
-                ..
-            } if *queued_request_id == request_id
-        )
-    }) else {
-        return false;
-    };
-    commands.remove(index);
-    true
-}
-
 fn deferred_command_failure(command: Command, message: &str) -> Option<Event> {
     match command {
         Command::LeaveGroup {
@@ -1253,13 +1364,14 @@ fn deferred_command_failure(command: Command, message: &str) -> Option<Event> {
         } => Some(Event::group_request_error(request_id, group_key, message)),
         Command::SendMessage { request_id, .. }
         | Command::SendGroupMessage { request_id, .. }
-        | Command::SendAttachment { request_id, .. }
         | Command::AcceptIdentity { request_id, .. }
         | Command::DismissIdentity { request_id, .. }
         | Command::MarkRead { request_id, .. } => Some(Event::request_error(request_id, message)),
-        Command::CancelAttachment { .. }
-        | Command::SetTyping { .. }
-        | Command::AcknowledgeMessage { .. } => None,
+        Command::SendAttachment {
+            request_id, permit, ..
+        } if permit.claim_terminal() => Some(Event::request_error(request_id, message)),
+        Command::SendAttachment { .. } => None,
+        Command::SetTyping { .. } => None,
     }
 }
 
@@ -1271,74 +1383,22 @@ fn fail_deferred_commands(sink: &EventSink, commands: &mut VecDeque<Command>, me
     }
 }
 
-struct RecoveryQueues<'a> {
-    attachment_aborts: &'a mut HashMap<u64, tokio::task::AbortHandle>,
-    deferred_commands: &'a mut VecDeque<Command>,
-}
-
-async fn handle_recovery_command(
-    manager: &mut Manager<SqliteStore, Registered>,
-    command: Command,
-    shutdown: &mut watch::Receiver<bool>,
-    sink: &EventSink,
-    projection: &mut MessageProjection,
-    departed_groups: &DepartedGroups,
-    queues: &mut RecoveryQueues<'_>,
-) -> bool {
+fn handle_recovery_command(command: Command, deferred_commands: &mut VecDeque<Command>) {
     match command {
-        Command::AcknowledgeMessage { .. } => {
-            handle_command_interruptibly(
-                manager,
-                command,
-                shutdown,
-                sink,
-                projection,
-                departed_groups,
-                false,
-            )
-            .await
-        }
-        Command::CancelAttachment { request_id } => {
-            cancel_deferred_attachment(queues.deferred_commands, request_id);
-            if let Some(abort) = queues.attachment_aborts.remove(&request_id) {
-                abort.abort();
-            }
-            false
-        }
-        Command::SetTyping { .. } => false,
+        Command::SetTyping { .. } => {}
         command => {
-            queues.deferred_commands.push_back(command);
-            false
+            deferred_commands.push_back(command);
         }
     }
 }
 
-async fn drain_recovery_commands(
-    manager: &mut Manager<SqliteStore, Registered>,
+fn drain_recovery_commands(
     commands: &mut tokio_mpsc::Receiver<Command>,
-    shutdown: &mut watch::Receiver<bool>,
-    sink: &EventSink,
-    projection: &mut MessageProjection,
-    departed_groups: &DepartedGroups,
-    mut queues: RecoveryQueues<'_>,
+    deferred_commands: &mut VecDeque<Command>,
 ) -> bool {
     loop {
         match commands.try_recv() {
-            Ok(command) => {
-                if handle_recovery_command(
-                    manager,
-                    command,
-                    shutdown,
-                    sink,
-                    projection,
-                    departed_groups,
-                    &mut queues,
-                )
-                .await
-                {
-                    return true;
-                }
-            }
+            Ok(command) => handle_recovery_command(command, deferred_commands),
             Err(tokio_mpsc::error::TryRecvError::Empty) => return false,
             Err(tokio_mpsc::error::TryRecvError::Disconnected) => return true,
         }
@@ -1350,7 +1410,6 @@ async fn handle_command_interruptibly(
     command: Command,
     shutdown: &mut watch::Receiver<bool>,
     sink: &EventSink,
-    projection: &mut MessageProjection,
     departed_groups: &DepartedGroups,
     groups_authoritative: bool,
 ) -> bool {
@@ -1358,7 +1417,6 @@ async fn handle_command_interruptibly(
         manager,
         command,
         sink,
-        projection,
         departed_groups,
         groups_authoritative,
     );
@@ -1910,37 +1968,83 @@ fn content_is_projectable(content: &ContentBody, groups_authoritative: bool) -> 
     groups_authoritative || !content_has_group_context(content)
 }
 
+async fn acknowledge_message(
+    manager: &Manager<SqliteStore, Registered>,
+    delivery_id: u64,
+    sink: &EventSink,
+    projection: &mut MessageProjection,
+) -> bool {
+    let Some(content) = projection.pending.get(&delivery_id) else {
+        projection.acknowledgments.unregister(delivery_id);
+        return true;
+    };
+    match manager
+        .store()
+        .mark_message_projected(MESSAGE_PROJECTION_CLIENT, content)
+        .await
+    {
+        Ok(()) => {
+            projection.complete(delivery_id);
+            true
+        }
+        Err(error) => {
+            sink.emit(Event::error(
+                format!("Could not acknowledge a displayed Signal message: {error}"),
+                false,
+            ));
+            false
+        }
+    }
+}
+
+async fn process_acknowledgments(
+    manager: &Manager<SqliteStore, Registered>,
+    acknowledgments: &AcknowledgmentInbox,
+    sink: &EventSink,
+    projection: &mut MessageProjection,
+    retry_failures: bool,
+) -> usize {
+    const ACKNOWLEDGMENT_BATCH_SIZE: usize = 64;
+
+    let delivery_ids = acknowledgments.take_ready(ACKNOWLEDGMENT_BATCH_SIZE);
+    let count = delivery_ids.len();
+    for delivery_id in delivery_ids {
+        if !acknowledge_message(manager, delivery_id, sink, projection).await && retry_failures {
+            acknowledgments.defer_retry(delivery_id);
+        }
+    }
+    count
+}
+
+async fn drain_acknowledgments(
+    manager: &Manager<SqliteStore, Registered>,
+    acknowledgments: &AcknowledgmentInbox,
+    sink: &EventSink,
+    projection: &mut MessageProjection,
+) {
+    acknowledgments.close();
+    while process_acknowledgments(manager, acknowledgments, sink, projection, false).await != 0 {}
+}
+
+async fn stop_attachments_and_drain_acknowledgments(
+    manager: &Manager<SqliteStore, Registered>,
+    sink: &EventSink,
+    attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
+    attachment_controls: &mut HashMap<u64, AttachmentTaskControl>,
+    acknowledgments: &AcknowledgmentInbox,
+    projection: &mut MessageProjection,
+) {
+    abort_in_flight_attachments(manager, sink, attachment_tasks, attachment_controls).await;
+    drain_acknowledgments(manager, acknowledgments, sink, projection).await;
+}
+
 async fn handle_command(
     manager: &mut Manager<SqliteStore, Registered>,
     command: Command,
     sink: &EventSink,
-    projection: &mut MessageProjection,
     departed_groups: &DepartedGroups,
     groups_authoritative: bool,
 ) {
-    if let Command::AcknowledgeMessage { delivery_id } = command {
-        let Some(content) = projection.pending.get(&delivery_id) else {
-            return;
-        };
-        match manager
-            .store()
-            .mark_message_projected(MESSAGE_PROJECTION_CLIENT, content)
-            .await
-        {
-            Ok(()) => {
-                projection.complete(delivery_id);
-            }
-            Err(error) => {
-                projection.release(delivery_id);
-                sink.emit(Event::error(
-                    format!("Could not acknowledge a displayed Signal message: {error}"),
-                    false,
-                ));
-            }
-        }
-        return;
-    }
-
     if let Command::AcceptIdentity {
         request_id,
         recipient,
@@ -2160,9 +2264,8 @@ async fn handle_command(
             };
             (request_id, result)
         }
-        Command::SendAttachment { .. } | Command::CancelAttachment { .. } => unreachable!(),
+        Command::SendAttachment { .. } => unreachable!(),
         Command::LeaveGroup { .. } => unreachable!(),
-        Command::AcknowledgeMessage { .. } => unreachable!(),
         Command::AcceptIdentity { .. } | Command::DismissIdentity { .. } => unreachable!(),
         Command::MarkRead { .. } => unreachable!(),
     };
@@ -3291,14 +3394,15 @@ mod tests {
         };
 
         assert_eq!(request_id, 41);
-        let Err(error) = result else {
+        let AttachmentTaskResult::Finished(Err(error)) = result else {
             panic!("panicking attachment task unexpectedly succeeded");
         };
         assert_eq!(error, "Signal attachment task failed unexpectedly");
     }
 
     #[test]
-    fn cancels_an_attachment_before_deferred_replay() {
+    fn cancellation_overtakes_a_queued_attachment() {
+        let admission = AttachmentAdmission::for_test(1024, 1);
         let mut commands = VecDeque::from([
             Command::SendMessage {
                 request_id: 40,
@@ -3312,19 +3416,94 @@ mod tests {
                 content_type: "text/plain".into(),
                 data: b"attachment".to_vec(),
                 group: false,
-                permit: AttachmentAdmission::for_test(1024, 1)
-                    .try_reserve(41, b"attachment".len())
-                    .unwrap(),
+                permit: admission.try_reserve(41, b"attachment".len()).unwrap(),
             },
         ]);
 
-        assert!(cancel_deferred_attachment(&mut commands, 41));
-        assert!(!cancel_deferred_attachment(&mut commands, 41));
+        assert!(admission.cancel(41));
         assert!(matches!(
             commands.pop_front(),
             Some(Command::SendMessage { request_id: 40, .. })
         ));
-        assert!(commands.is_empty());
+        let Some(Command::SendAttachment { permit, .. }) = commands.pop_front() else {
+            panic!("queued attachment was lost");
+        };
+        assert!(permit.is_cancelled());
+        drop(permit);
+        assert_eq!(admission.usage(), (0, 0));
+    }
+
+    #[test]
+    fn cancellation_stops_an_active_attachment_task_and_releases_admission() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let admission = AttachmentAdmission::for_test(1024, 1);
+        let permit = admission.try_reserve(41, 10).unwrap();
+        let cancellation_admission = Arc::clone(&admission);
+        let (started_tx, started_rx) = oneshot::channel();
+        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let task_polls = Arc::clone(&polls);
+
+        let (completion, ()) = runtime.block_on(async {
+            tokio::join!(
+                attachment_task_result(41, permit, {
+                    let mut started_tx = Some(started_tx);
+                    futures::future::poll_fn(move |_context| {
+                        task_polls.fetch_add(1, Ordering::Relaxed);
+                        if let Some(started_tx) = started_tx.take() {
+                            let _ = started_tx.send(());
+                        }
+                        std::task::Poll::<Result<SentMessage, String>>::Pending
+                    })
+                }),
+                async move {
+                    started_rx.await.unwrap();
+                    assert!(cancellation_admission.cancel(41));
+                },
+            )
+        });
+
+        assert!(matches!(completion.result, AttachmentTaskResult::Cancelled));
+        assert_eq!(polls.load(Ordering::Relaxed), 1);
+        assert_eq!(admission.usage(), (10, 1));
+        drop(completion);
+        assert_eq!(admission.usage(), (0, 0));
+    }
+
+    #[test]
+    fn recovery_does_not_report_user_cancelled_attachments_as_interrupted() {
+        let active_admission = AttachmentAdmission::for_test(2, 1);
+        let active = active_admission.try_reserve(41, 1).unwrap();
+        assert!(interrupted_attachment_event(41, &active.control()).is_some());
+
+        let cancelled_admission = AttachmentAdmission::for_test(2, 1);
+        let cancelled = cancelled_admission.try_reserve(42, 1).unwrap();
+        assert!(cancelled_admission.cancel(42));
+        assert!(interrupted_attachment_event(42, &cancelled.control()).is_none());
+    }
+
+    #[test]
+    fn deferred_failure_does_not_report_a_cancelled_attachment() {
+        let admission = AttachmentAdmission::for_test(16, 1);
+        let permit = admission.try_reserve(41, 1).unwrap();
+        assert!(admission.cancel(41));
+
+        assert!(
+            deferred_command_failure(
+                Command::SendAttachment {
+                    request_id: 41,
+                    recipient: "recipient".into(),
+                    filename: "attachment.txt".into(),
+                    content_type: "text/plain".into(),
+                    data: vec![1],
+                    group: false,
+                    permit,
+                },
+                "recovery stopped",
+            )
+            .is_none()
+        );
     }
 
     #[test]

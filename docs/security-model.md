@@ -42,14 +42,18 @@ and message bodies are sensitive. Production code must not log them.
   no-log flag as an informational notice instead of a chat message.
 - Upstream info-level tracing is compiled out so Presage cannot emit the
   provisioning URI through its linking log statement.
-- Worker shutdown is joined before account state is freed.
+- Worker shutdown cancels admitted attachments before signaling and joining the
+  backend, and account state is freed only after that join.
 - Backend events use a bounded queue; overflow fails visibly and reconnects
   rather than allowing unbounded process memory growth.
 - Attachments are capped at 25 MiB each and 50 MiB per incoming message.
   Outgoing queued, recovery-deferred, and active attachments share a per-account
   limit of two files and 50 MiB. Admission capacity and active request identity
-  are released together on every terminal path. Binary backend events and
-  unresolved receive prompts each have separate 64 MiB ceilings; see the
+  are released together on every terminal path. Cancellation is stored on the
+  admitted request rather than submitted through the bounded work queue, so it
+  remains effective under queue pressure and before task startup. Binary
+  backend events and unresolved receive prompts each have separate 64 MiB
+  ceilings; see the
   [attachment policy](attachment-policy.md). Group images are eligible for
   inline display only when a JPEG or
   PNG MIME type agrees with its file signature, the complete payload decodes,
@@ -61,7 +65,9 @@ and message bodies are sensitive. Production code must not log them.
   filenames are reduced to a basename before Purple uses them.
 - Message projection state is stored in the same SQLCipher database. Purple
   acknowledges a message event only after its synchronous conversation write;
-  unacknowledged content is replayed after the next receive queue drain.
+  those acknowledgements use a coalescing inbox bounded by pending projection
+  IDs, retry local store failures, and drain on orderly shutdown. Unacknowledged
+  content is replayed after the next receive queue drain.
 - Read receipts are emitted only after Purple reports focus. Pending receipt
   metadata is held in process memory and is not written to Purple's plaintext
   configuration.

@@ -16,8 +16,10 @@ Outgoing admission covers commands waiting in the core, commands deferred
 during recovery, and active upload tasks. A non-cloneable permit owns both the
 payload budget and request identifier through terminal event delivery; dropping
 it on rejection, cancellation, panic, recovery failure, or shutdown restores
-capacity automatically. The two-file admission ceiling also bounds concurrent
-uploads.
+capacity automatically. Cancellation changes state directly on this permit,
+without depending on bounded command-queue capacity, and the upload task
+observes the same state before and during network work. The two-file admission
+ceiling also bounds concurrent uploads.
 
 The retained-payload limit is not a complete resident-memory bound. The C
 adapter and upstream libraries may temporarily hold additional copies while a

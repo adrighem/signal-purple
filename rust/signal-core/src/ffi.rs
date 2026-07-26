@@ -11,6 +11,7 @@ use zeroize::Zeroizing;
 
 const BACKEND_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
+use crate::acknowledgment::AcknowledgmentInbox;
 use crate::attachment::{AttachmentAdmission, AttachmentAdmissionError, MAX_ATTACHMENT_BYTES};
 use crate::backend::{self, Command, Config, WorkerContext};
 use crate::event::{ABI_VERSION, Event, OwnedEvent, SignalEvent};
@@ -45,6 +46,7 @@ pub struct SignalCoreConfig {
 
 pub struct SignalCore {
     commands: tokio_mpsc::Sender<Command>,
+    acknowledgments: Arc<AcknowledgmentInbox>,
     shutdown: watch::Sender<bool>,
     events: EventQueue,
     ready: Arc<AtomicBool>,
@@ -170,6 +172,8 @@ pub unsafe extern "C" fn signal_core_new(
         let passphrase = status_try!(unsafe { required_string(config.passphrase, 4096) });
 
         let (command_tx, command_rx) = tokio_mpsc::channel(128);
+        let acknowledgments = AcknowledgmentInbox::new();
+        let worker_acknowledgments = Arc::clone(&acknowledgments);
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let (event_sink, events) =
             status_try!(event_queue(EVENT_QUEUE_CAPACITY).map_err(|_| SignalStatus::InternalError));
@@ -189,6 +193,7 @@ pub unsafe extern "C" fn signal_core_new(
                     backend::run_worker(WorkerContext {
                         config: worker_config,
                         commands: command_rx,
+                        acknowledgments: worker_acknowledgments,
                         shutdown: shutdown_rx,
                         events: event_sink,
                         ready: worker_ready,
@@ -199,6 +204,7 @@ pub unsafe extern "C" fn signal_core_new(
 
         let core = Box::new(SignalCore {
             commands: command_tx,
+            acknowledgments,
             shutdown: shutdown_tx,
             events,
             ready,
@@ -463,7 +469,8 @@ pub unsafe extern "C" fn signal_core_cancel_attachment(
             return SignalStatus::InvalidArgument;
         }
         // SAFETY: `core` remains live and ABI calls are serialized by C.
-        queue_control_command(unsafe { &*core }, Command::CancelAttachment { request_id })
+        let _ = unsafe { &*core }.attachments.cancel(request_id);
+        SignalStatus::Ok
     })
 }
 
@@ -514,10 +521,11 @@ pub unsafe extern "C" fn signal_core_ack_message(
         }
         // SAFETY: `core` is live until `signal_core_free`, which must not race
         // any ABI call.
-        queue_control_command(
-            unsafe { &*core },
-            Command::AcknowledgeMessage { delivery_id },
-        )
+        if unsafe { &*core }.acknowledgments.submit(delivery_id) {
+            SignalStatus::Ok
+        } else {
+            SignalStatus::InternalError
+        }
     })
 }
 
@@ -678,6 +686,7 @@ pub unsafe extern "C" fn signal_core_shutdown(core: *mut SignalCore) {
     // SAFETY: caller guarantees exclusive teardown access.
     let core = unsafe { &*core };
     core.ready.store(false, Ordering::Release);
+    core.attachments.cancel_all();
     let _ = core.shutdown.send(true);
     let join = match core.join.lock() {
         Ok(mut guard) => guard.take(),
@@ -720,6 +729,7 @@ mod tests {
         let (_event_sink, events) = event_queue(1).unwrap();
         SignalCore {
             commands,
+            acknowledgments: AcknowledgmentInbox::new(),
             shutdown,
             events,
             ready: Arc::new(AtomicBool::new(ready)),
@@ -735,6 +745,7 @@ mod tests {
         (
             SignalCore {
                 commands,
+                acknowledgments: AcknowledgmentInbox::new(),
                 shutdown,
                 events,
                 ready: Arc::new(AtomicBool::new(true)),
@@ -931,18 +942,43 @@ mod tests {
 
     #[test]
     fn message_acknowledgments_are_accepted_before_ready() {
-        let (commands, mut receiver) = tokio_mpsc::channel(1);
+        let (commands, _receiver) = tokio_mpsc::channel(1);
         let (shutdown, _shutdown_receiver) = watch::channel(false);
-        let core = test_core(commands, shutdown, None, false);
+        let mut core = test_core(commands, shutdown, None, false);
+        core.acknowledgments.register(42);
 
+        // SAFETY: the core remains live and uniquely owned for this call.
         assert_eq!(
-            queue_control_command(&core, Command::AcknowledgeMessage { delivery_id: 42 }),
+            unsafe { signal_core_ack_message(&mut core, 42) },
             SignalStatus::Ok
         );
-        assert!(matches!(
-            receiver.try_recv(),
-            Ok(Command::AcknowledgeMessage { delivery_id: 42 })
-        ));
+        assert_eq!(core.acknowledgments.pending_len(), 1);
+    }
+
+    #[test]
+    fn message_acknowledgments_do_not_share_bounded_work_capacity() {
+        let (commands, _receiver) = tokio_mpsc::channel(1);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let mut core = test_core(commands, shutdown, None, true);
+        core.acknowledgments.register(42);
+
+        assert_eq!(
+            queue_command(
+                &core,
+                Command::SetTyping {
+                    request_id: 1,
+                    recipient: "aci:recipient".into(),
+                    typing: true,
+                }
+            ),
+            SignalStatus::Ok
+        );
+        // SAFETY: the core remains live and uniquely owned for this call.
+        assert_eq!(
+            unsafe { signal_core_ack_message(&mut core, 42) },
+            SignalStatus::Ok
+        );
+        assert_eq!(core.acknowledgments.pending_len(), 1);
     }
 
     #[test]
@@ -1079,6 +1115,41 @@ mod tests {
     }
 
     #[test]
+    fn attachment_cancellation_does_not_share_bounded_work_capacity() {
+        let (commands, _receiver) = tokio_mpsc::channel(1);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let mut core = test_core(commands, shutdown, None, true);
+        let value = CString::new("value").unwrap();
+        let data = [1u8];
+
+        // SAFETY: the core, strings, and data remain live for both calls.
+        assert_eq!(
+            unsafe {
+                signal_core_send_attachment(
+                    &mut core,
+                    7,
+                    value.as_ptr(),
+                    value.as_ptr(),
+                    value.as_ptr(),
+                    data.as_ptr(),
+                    data.len(),
+                )
+            },
+            SignalStatus::Ok
+        );
+        // SAFETY: the core remains live and uniquely owned for this call.
+        assert_eq!(
+            unsafe { signal_core_cancel_attachment(&mut core, 7) },
+            SignalStatus::Ok
+        );
+        // SAFETY: cancellation is idempotent while the core remains live.
+        assert_eq!(
+            unsafe { signal_core_cancel_attachment(&mut core, 7) },
+            SignalStatus::Ok
+        );
+    }
+
+    #[test]
     fn attachment_abi_checks_readiness_and_queue_space_before_admission() {
         let (commands, mut receiver) = tokio_mpsc::channel(1);
         let (shutdown, _shutdown_receiver) = watch::channel(false);
@@ -1107,7 +1178,14 @@ mod tests {
 
         core.ready.store(true, Ordering::Release);
         assert_eq!(
-            queue_control_command(&core, Command::AcknowledgeMessage { delivery_id: 1 }),
+            queue_command(
+                &core,
+                Command::SetTyping {
+                    request_id: 1,
+                    recipient: "aci:recipient".into(),
+                    typing: true,
+                },
+            ),
             SignalStatus::Ok
         );
         assert_eq!(send(&mut core, 1), SignalStatus::QueueFull);
@@ -1174,11 +1252,14 @@ mod tests {
                 worker_stopped.store(true, Ordering::Release);
             });
         });
-        let core = Box::into_raw(Box::new(test_core(commands, shutdown, Some(join), true)));
+        let core = test_core(commands, shutdown, Some(join), true);
+        let attachment = core.attachments.try_reserve(7, 1).unwrap();
+        let core = Box::into_raw(Box::new(core));
 
         // SAFETY: this test uniquely owns the core allocation until free.
         unsafe { signal_core_shutdown(core) };
         assert!(stopped.load(Ordering::Acquire));
+        assert!(attachment.is_cancelled());
         // SAFETY: shutdown is idempotent and this test uniquely owns `core`.
         unsafe { signal_core_free(core) };
     }

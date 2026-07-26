@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 #![deny(unsafe_op_in_unsafe_fn)]
 
+mod acknowledgment;
 mod attachment;
 mod backend;
 mod event;

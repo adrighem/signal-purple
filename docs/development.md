@@ -77,6 +77,9 @@ requests.
 - Keep bounded producer/consumer mechanics in `event_queue.rs`; the backend
   actor emits events and the FFI layer polls them rather than reimplementing
   notification state.
+- Keep correctness-critical control paths out of best-effort work admission:
+  projection acknowledgements coalesce by registered delivery ID and attachment
+  cancellation lives on the admission permit.
 
 ## Updating dependencies
 

@@ -29,6 +29,11 @@ destruction.
 - The event queue is bounded at 4096 entries. Overflow produces a fatal event
   and requires reconnecting so data is resynchronized instead of silently
   dropping an arbitrary message.
+- Ordinary outbound work uses a bounded command queue. Display acknowledgements
+  use a separate coalescing inbox whose registered IDs are bounded by pending
+  projections, so queue pressure cannot lose durable UI acceptance. Attachment
+  cancellation is recorded synchronously on the admitted request, independent
+  of command capacity.
 - Fallible exported operations catch panics at the FFI boundary. Teardown is
   deliberately written from non-panicking primitives so the worker is always
   joined before its allocation is freed.
@@ -36,8 +41,10 @@ destruction.
   GLib watches it and drains bounded event batches, so an idle account has no
   recurring polling timer and incoming-event latency does not depend on a
   backoff interval.
-- Teardown destroys the descriptor source, sends shutdown, joins the worker, then
-  frees the core. No worker calls into C or Purple.
+- Teardown destroys the descriptor source, cancels every admitted attachment,
+  sends shutdown, joins the worker, then frees the core. The worker aborts
+  attachment tasks before draining accepted projection acknowledgements. No
+  worker calls into C or Purple.
 
 ## Connection sequence
 
@@ -101,8 +108,9 @@ older messages from the primary phone or Signal service.
   store and written to the originating chat with the Signal sender and
   timestamp. If the UI does not retain the image, or validation fails, the
   attachment falls back to Purple's receive-file flow. Outgoing transfers use
-  Purple's direct and group send-file callbacks and a cancellable backend upload
-  task.
+  Purple's direct and group send-file callbacks. Each admitted request carries
+  cancellation state from queue admission through its backend upload task, so a
+  cancellation which overtakes a queued send still prevents the upload.
   Each file is capped at 25 MiB and each incoming message at 50 MiB. Outgoing
   admission spans queued, recovery-deferred, and active work, with at most two
   files totaling 50 MiB per account. Queued binary events and unresolved Purple
@@ -115,6 +123,8 @@ older messages from the primary phone or Signal service.
   separate encrypted projection acknowledgment only after Purple accepts the
   corresponding event. A crash anywhere between network receipt and UI
   delivery therefore leaves the message eligible for replay on reconnect.
+  Acknowledgements are coalesced by registered delivery ID, retried after local
+  store failures, and drained during orderly worker shutdown.
   Existing stored history is marked projected when this mechanism is first
   initialized, preventing an upgrade from flooding conversations.
 - Purple 2 has no robust per-message receipt update API, so received receipts

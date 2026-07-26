@@ -1,6 +1,9 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use std::collections::HashSet;
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
+
+use futures::future::{AbortHandle, AbortRegistration};
 
 pub(crate) const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_ADMITTED_OUTGOING_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
@@ -15,7 +18,73 @@ pub(crate) enum AttachmentAdmissionError {
 #[derive(Debug)]
 struct AdmissionState {
     bytes: usize,
-    request_ids: HashSet<u64>,
+    requests: HashMap<u64, AdmissionEntry>,
+}
+
+#[derive(Debug)]
+struct AdmissionEntry {
+    bytes: usize,
+    control: AttachmentControl,
+}
+
+const ATTACHMENT_ACTIVE: u8 = 0;
+const ATTACHMENT_CANCELLED: u8 = 1;
+const ATTACHMENT_TERMINAL: u8 = 2;
+
+#[derive(Debug)]
+struct AttachmentControlState {
+    lifecycle: AtomicU8,
+    cancellation: AbortHandle,
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct AttachmentControl {
+    state: Arc<AttachmentControlState>,
+}
+
+impl AttachmentControl {
+    fn new(cancellation: AbortHandle) -> Self {
+        Self {
+            state: Arc::new(AttachmentControlState {
+                lifecycle: AtomicU8::new(ATTACHMENT_ACTIVE),
+                cancellation,
+            }),
+        }
+    }
+
+    fn cancel(&self) -> bool {
+        if self
+            .state
+            .lifecycle
+            .compare_exchange(
+                ATTACHMENT_ACTIVE,
+                ATTACHMENT_CANCELLED,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return false;
+        }
+        self.state.cancellation.abort();
+        true
+    }
+
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.state.lifecycle.load(Ordering::Acquire) == ATTACHMENT_CANCELLED
+    }
+
+    pub(crate) fn claim_terminal(&self) -> bool {
+        self.state
+            .lifecycle
+            .compare_exchange(
+                ATTACHMENT_ACTIVE,
+                ATTACHMENT_TERMINAL,
+                Ordering::AcqRel,
+                Ordering::Acquire,
+            )
+            .is_ok()
+    }
 }
 
 #[derive(Debug)]
@@ -39,7 +108,7 @@ impl AttachmentAdmission {
             maximum_attachments,
             state: Mutex::new(AdmissionState {
                 bytes: 0,
-                request_ids: HashSet::new(),
+                requests: HashMap::new(),
             }),
         })
     }
@@ -54,10 +123,10 @@ impl AttachmentAdmission {
         }
 
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.request_ids.contains(&request_id) {
+        if state.requests.contains_key(&request_id) {
             return Err(AttachmentAdmissionError::Invalid);
         }
-        if state.request_ids.len() >= self.maximum_attachments
+        if state.requests.len() >= self.maximum_attachments
             || state
                 .bytes
                 .checked_add(bytes)
@@ -66,19 +135,58 @@ impl AttachmentAdmission {
             return Err(AttachmentAdmissionError::Capacity);
         }
 
+        let (cancellation, registration) = AbortHandle::new_pair();
+        let control = AttachmentControl::new(cancellation);
         state.bytes += bytes;
-        state.request_ids.insert(request_id);
+        state.requests.insert(
+            request_id,
+            AdmissionEntry {
+                bytes,
+                control: control.clone(),
+            },
+        );
         Ok(AttachmentPermit {
             admission: Arc::clone(self),
             request_id,
-            bytes,
+            control,
+            registration: Some(registration),
         })
     }
 
-    fn release(&self, request_id: u64, bytes: usize) {
+    pub(crate) fn cancel(&self, request_id: u64) -> bool {
+        let control = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .requests
+                .get(&request_id)
+                .map(|entry| entry.control.clone())
+        };
+        if let Some(control) = control {
+            let _ = control.cancel();
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn cancel_all(&self) {
+        let controls = {
+            let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            state
+                .requests
+                .values()
+                .map(|entry| entry.control.clone())
+                .collect::<Vec<_>>()
+        };
+        for control in controls {
+            let _ = control.cancel();
+        }
+    }
+
+    fn release(&self, request_id: u64) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.request_ids.remove(&request_id) {
-            state.bytes = state.bytes.saturating_sub(bytes);
+        if let Some(entry) = state.requests.remove(&request_id) {
+            state.bytes = state.bytes.saturating_sub(entry.bytes);
         }
     }
 
@@ -90,7 +198,7 @@ impl AttachmentAdmission {
     #[cfg(test)]
     pub(crate) fn usage(&self) -> (usize, usize) {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        (state.bytes, state.request_ids.len())
+        (state.bytes, state.requests.len())
     }
 }
 
@@ -98,12 +206,33 @@ impl AttachmentAdmission {
 pub(crate) struct AttachmentPermit {
     admission: Arc<AttachmentAdmission>,
     request_id: u64,
-    bytes: usize,
+    control: AttachmentControl,
+    registration: Option<AbortRegistration>,
+}
+
+impl AttachmentPermit {
+    pub(crate) fn is_cancelled(&self) -> bool {
+        self.control.is_cancelled()
+    }
+
+    pub(crate) fn control(&self) -> AttachmentControl {
+        self.control.clone()
+    }
+
+    pub(crate) fn claim_terminal(&self) -> bool {
+        self.control.claim_terminal()
+    }
+
+    pub(crate) fn take_cancellation_registration(&mut self) -> AbortRegistration {
+        self.registration
+            .take()
+            .expect("attachment cancellation registration is taken only once")
+    }
 }
 
 impl Drop for AttachmentPermit {
     fn drop(&mut self) {
-        self.admission.release(self.request_id, self.bytes);
+        self.admission.release(self.request_id);
     }
 }
 
@@ -159,5 +288,48 @@ mod tests {
 
         assert_eq!(admission.usage(), (0, 0));
         let _replacement = admission.try_reserve(7, 5).unwrap();
+    }
+
+    #[test]
+    fn cancellation_is_recorded_on_the_admitted_request() {
+        let admission = AttachmentAdmission::for_test(5, 1);
+        let permit = admission.try_reserve(7, 5).unwrap();
+
+        assert!(admission.cancel(7));
+        assert!(permit.is_cancelled());
+        assert!(admission.cancel(7));
+    }
+
+    #[test]
+    fn permit_and_admission_share_cancellation_state() {
+        let admission = AttachmentAdmission::for_test(5, 1);
+        let permit = admission.try_reserve(7, 5).unwrap();
+        let control = permit.control();
+
+        assert!(!control.is_cancelled());
+        assert!(admission.cancel(7));
+        assert!(control.is_cancelled());
+    }
+
+    #[test]
+    fn terminal_claim_and_cancellation_have_one_winner() {
+        let admission = AttachmentAdmission::for_test(5, 1);
+        let permit = admission.try_reserve(7, 5).unwrap();
+
+        assert!(permit.claim_terminal());
+        assert!(admission.cancel(7));
+        assert!(!permit.is_cancelled());
+    }
+
+    #[test]
+    fn cancelling_all_reaches_every_active_permit() {
+        let admission = AttachmentAdmission::for_test(5, 2);
+        let first = admission.try_reserve(7, 2).unwrap();
+        let second = admission.try_reserve(8, 3).unwrap();
+
+        admission.cancel_all();
+
+        assert!(first.is_cancelled());
+        assert!(second.is_cancelled());
     }
 }
