@@ -81,9 +81,10 @@ git clone https://github.com/adrighem/signal-purple.git
 cd signal-purple || exit
 
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
+  -DBUILD_TESTING=ON \
   -DCMAKE_INSTALL_PREFIX=/usr
 cmake --build build
-ctest --test-dir build --output-on-failure
+ctest --test-dir build --output-on-failure --no-tests=error
 cargo test --locked --manifest-path rust/signal-core/Cargo.toml
 ```
 

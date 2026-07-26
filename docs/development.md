@@ -45,7 +45,7 @@ scripts/check.sh rust-test
 scripts/check.sh configure
 scripts/check.sh build
 scripts/check.sh c-test
-ctest --test-dir build --output-on-failure -R contact-sync
+ctest --test-dir build --output-on-failure --no-tests=error -R contact-sync
 cargo test --locked --manifest-path rust/signal-core/Cargo.toml \
   bounds_binary_events
 ```

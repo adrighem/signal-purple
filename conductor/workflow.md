@@ -66,7 +66,7 @@ env -i HOME=/home/vincent PATH=/usr/local/bin:/usr/bin:/bin \
 
 ```sh
 env -i HOME=/home/vincent PATH=/usr/local/bin:/usr/bin:/bin \
-  ctest --test-dir build --output-on-failure
+  ctest --test-dir build --output-on-failure --no-tests=error
 ```
 
 ### Complete Gate

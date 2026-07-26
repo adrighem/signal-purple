@@ -39,6 +39,8 @@ rust_test()
 
 release_helpers()
 {
+    section "Testing the validation gate"
+    sh "$repository/tests/test_check_gate.sh"
     section "Testing deterministic source archives"
     sh "$repository/tests/test_make_source_archive.sh"
     section "Testing release artifact helpers"
@@ -50,6 +52,7 @@ configure()
     section "Configuring the C adapter and plugin"
     cmake -S "$repository" -B "$build_directory" -G Ninja \
         -DCMAKE_BUILD_TYPE=Debug \
+        -DBUILD_TESTING=ON \
         -DCMAKE_INSTALL_PREFIX="$install_prefix"
 }
 
@@ -62,7 +65,7 @@ build()
 c_test()
 {
     section "Testing the C adapter and plugin"
-    ctest --test-dir "$build_directory" --output-on-failure
+    ctest --test-dir "$build_directory" --output-on-failure --no-tests=error
 }
 
 install_probe()
