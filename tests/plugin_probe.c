@@ -1009,6 +1009,150 @@ test_group_title_tracking(PurpleAccount *account, PurpleGroup *group)
     purple_blist_remove_chat(chat);
 }
 
+static SignalConnection *
+new_transfer_connection(PurpleConnection *gc)
+{
+    SignalConnection *connection = g_new0(SignalConnection, 1);
+
+    connection->gc = gc;
+    connection->group_ids_by_key =
+        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    connection->group_keys_by_id =
+        g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
+    connection->group_titles_by_key =
+        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
+    connection->group_members_by_key = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_ptr_array_unref);
+    connection->active_group_keys =
+        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    connection->pending_group_joins =
+        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    connection->pending_group_leaves =
+        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    connection->identity_changes_seen =
+        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    connection->pending_identity_changes =
+        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
+    connection->outgoing_attachments = g_hash_table_new_full(
+        g_int64_hash, g_int64_equal, g_free, (GDestroyNotify)purple_xfer_unref);
+    connection->outgoing_attachment_contexts =
+        g_hash_table_new(g_direct_hash, g_direct_equal);
+    connection->pending_reads = g_ptr_array_new();
+    connection->group_leave_requests = g_ptr_array_new();
+    signal_contact_sync_init(&connection->contact_sync);
+    signal_contact_sync_init(&connection->group_sync);
+    connection->next_group_id = 1;
+    connection->next_request_id = 1;
+    purple_connection_set_protocol_data(gc, connection);
+    return connection;
+}
+
+static void
+test_pending_transfer_disconnect(PurplePluginProtocolInfo *protocol,
+                                 const char *user_dir)
+{
+    enum TransferCallback {
+        CANCEL_TRANSFER,
+        DENY_TRANSFER,
+        ACCEPT_TRANSFER,
+    };
+    const struct {
+        enum TransferCallback callback;
+        gboolean disconnect_first;
+    } cases[] = {
+        {CANCEL_TRANSFER, FALSE},
+        {DENY_TRANSFER, FALSE},
+        {CANCEL_TRANSFER, TRUE},
+        {DENY_TRANSFER, TRUE},
+        {ACCEPT_TRANSFER, TRUE},
+    };
+    g_autofree char *filename =
+        g_build_filename(user_dir, "pending-transfer.txt", NULL);
+
+    g_assert_true(g_file_set_contents(filename, "content", -1, NULL));
+    for (guint index = 0; index < G_N_ELEMENTS(cases); index++) {
+        g_autofree char *username =
+            g_strdup_printf("transfer-lifetime-%u", index);
+        PurpleAccount *account = purple_account_new(username, SIGNAL_PLUGIN_ID);
+        PurpleConnection gc = {
+            .state = PURPLE_CONNECTED,
+            .account = account,
+        };
+        SignalConnection *connection;
+        SignalOutgoingAttachment *attachment;
+        PurpleXfer *xfer;
+
+        purple_account_set_connection(account, &gc);
+        connection = new_transfer_connection(&gc);
+        xfer = protocol->new_xfer(&gc, "aci:transfer-recipient");
+        g_assert_nonnull(xfer);
+        attachment = xfer->data;
+        g_assert_nonnull(attachment);
+        g_assert_true(g_hash_table_contains(
+            connection->outgoing_attachment_contexts, attachment));
+
+        if (cases[index].disconnect_first) {
+            protocol->close(&gc);
+            g_assert_null(xfer->data);
+        }
+
+        switch (cases[index].callback) {
+        case CANCEL_TRANSFER:
+            purple_xfer_cancel_local(xfer);
+            break;
+        case DENY_TRANSFER:
+            purple_xfer_request_denied(xfer);
+            break;
+        case ACCEPT_TRANSFER:
+            purple_xfer_ref(xfer);
+            purple_xfer_request_accepted(xfer, filename);
+            g_assert_true(purple_xfer_is_canceled(xfer));
+            purple_xfer_unref(xfer);
+            break;
+        }
+        if (!cases[index].disconnect_first) {
+            g_assert_cmpuint(
+                g_hash_table_size(connection->outgoing_attachment_contexts),
+                ==, 0);
+            protocol->close(&gc);
+        }
+        purple_account_set_connection(account, NULL);
+        purple_account_destroy(account);
+    }
+}
+
+static void
+test_vanished_transfer_cleanup(PurplePluginProtocolInfo *protocol,
+                               const char *user_dir)
+{
+    g_autofree char *filename =
+        g_build_filename(user_dir, "vanished-transfer.txt", NULL);
+    PurpleAccount *account =
+        purple_account_new("vanished-transfer", SIGNAL_PLUGIN_ID);
+    PurpleConnection gc = {
+        .state = PURPLE_CONNECTED,
+        .account = account,
+    };
+    SignalConnection *connection;
+    SignalOutgoingAttachment *attachment;
+    PurpleXfer *xfer;
+
+    (void)g_remove(filename);
+    purple_account_set_connection(account, &gc);
+    connection = new_transfer_connection(&gc);
+    xfer = protocol->new_xfer(&gc, "aci:transfer-recipient");
+    g_assert_nonnull(xfer);
+    attachment = xfer->data;
+
+    purple_xfer_request_accepted(xfer, filename);
+    g_assert_true(g_hash_table_contains(
+        connection->outgoing_attachment_contexts, attachment));
+
+    protocol->close(&gc);
+    purple_account_set_connection(account, NULL);
+    purple_account_destroy(account);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -1079,6 +1223,8 @@ main(int argc, char **argv)
     g_assert_nonnull(protocol->chat_send_file);
     g_assert_nonnull(protocol->find_blist_chat);
     g_assert_nonnull(protocol->get_cb_alias);
+    test_pending_transfer_disconnect(protocol, user_dir);
+    test_vanished_transfer_cleanup(protocol, user_dir);
 
     chat_info = protocol->chat_info(NULL);
     g_assert_cmpuint(g_list_length(chat_info), ==, 1);

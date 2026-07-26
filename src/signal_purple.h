@@ -18,7 +18,16 @@ typedef SignalStatus (*SignalSendGroupMessageFunc)(
     SignalCore *core, uint64_t request_id, const char *group_key,
     const char *message);
 
+typedef struct _SignalConnection SignalConnection;
+
 typedef struct {
+    SignalConnection *connection;
+    char *recipient;
+    guint64 request_id;
+    gboolean group;
+} SignalOutgoingAttachment;
+
+struct _SignalConnection {
     PurpleConnection *gc;
     SignalCore *core;
     SignalSendGroupMessageFunc send_group_message;
@@ -33,6 +42,7 @@ typedef struct {
     GHashTable *identity_changes_seen;
     GHashTable *pending_identity_changes;
     GHashTable *outgoing_attachments;
+    GHashTable *outgoing_attachment_contexts;
     GPtrArray *pending_reads;
     GPtrArray *group_leave_requests;
     SignalContactSync contact_sync;
@@ -51,7 +61,7 @@ typedef struct {
     guint64 next_request_id;
     gboolean group_snapshot_complete;
     gboolean closing;
-} SignalConnection;
+};
 
 void signal_login(PurpleAccount *account);
 void signal_close(PurpleConnection *gc);

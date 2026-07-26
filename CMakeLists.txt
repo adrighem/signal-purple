@@ -98,6 +98,7 @@ set_target_properties(signal-core PROPERTIES IMPORTED_LOCATION
 add_dependencies(signal-core signal-core-build)
 
 add_library(signal-purple MODULE
+    src/attachment_file.c
     src/blist_sync.c
     src/contact_sync.c
     src/connection.c
@@ -135,6 +136,19 @@ foreach(size IN ITEMS 16 22 48)
 endforeach()
 
 if(BUILD_TESTING)
+    add_executable(test-attachment-file
+        tests/test_attachment_file.c
+        src/attachment_file.c)
+    target_compile_features(test-attachment-file PRIVATE c_std_11)
+    target_compile_options(test-attachment-file PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wformat=2 -Wshadow)
+    target_include_directories(test-attachment-file PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include"
+        "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(test-attachment-file PRIVATE PkgConfig::GLIB)
+    add_test(NAME attachment-file COMMAND test-attachment-file)
+    set_tests_properties(attachment-file PROPERTIES TIMEOUT 5)
+
     add_executable(test-util tests/test_util.c src/util.c)
     target_compile_features(test-util PRIVATE c_std_11)
     target_compile_options(test-util PRIVATE -Wall -Wextra -Wpedantic)

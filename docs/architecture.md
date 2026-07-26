@@ -111,6 +111,12 @@ older messages from the primary phone or Signal service.
   Purple's direct and group send-file callbacks. Each admitted request carries
   cancellation state from queue admission through its backend upload task, so a
   cancellation which overtakes a queued send still prevents the upload.
+  The C adapter registers every outgoing transfer when it is created and
+  severs every live transfer from its context before freeing the connection,
+  including transfers still waiting in a file chooser. A late acceptance is
+  cancelled locally. Local files are opened once with `O_NONBLOCK` to avoid
+  special-file open stalls, inspected through that descriptor, restricted to
+  regular files, and read only up to the configured limit plus one byte.
   Each file is capped at 25 MiB and each incoming message at 50 MiB. Outgoing
   admission spans queued, recovery-deferred, and active work, with at most two
   files totaling 50 MiB per account. Queued binary events and unresolved Purple

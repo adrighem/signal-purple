@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-3.0-or-later */
-#include "signal_purple.h"
+#include "attachment_file.h"
 #include "inline_image.h"
+#include "signal_purple.h"
 
 #include <errno.h>
 #include <glib-unix.h>
@@ -26,13 +27,6 @@ typedef struct {
     GBytes *bytes;
     gsize size;
 } SignalAttachment;
-
-typedef struct {
-    SignalConnection *connection;
-    char *recipient;
-    guint64 request_id;
-    gboolean group;
-} SignalOutgoingAttachment;
 
 typedef struct {
     SignalConnection *connection;
@@ -63,6 +57,29 @@ signal_queue_final_group_read(SignalConnection *connection,
 }
 
 static void
+signal_outgoing_attachment_destroy(SignalOutgoingAttachment *attachment)
+{
+    g_free(attachment->recipient);
+    g_free(attachment);
+}
+
+static void
+signal_outgoing_attachment_detach(SignalOutgoingAttachment *attachment)
+{
+    for (GList *node = purple_xfers_get_all(); node != NULL;
+         node = node->next) {
+        PurpleXfer *xfer = node->data;
+
+        if (xfer->data == attachment) {
+            xfer->data = NULL;
+            break;
+        }
+    }
+    attachment->connection = NULL;
+    signal_outgoing_attachment_destroy(attachment);
+}
+
+static void
 signal_outgoing_attachment_free(PurpleXfer *xfer)
 {
     SignalOutgoingAttachment *attachment;
@@ -71,11 +88,14 @@ signal_outgoing_attachment_free(PurpleXfer *xfer)
         return;
     attachment = xfer->data;
     xfer->data = NULL;
-    if (attachment->connection != NULL && attachment->request_id != 0)
-        g_hash_table_remove(attachment->connection->outgoing_attachments,
-                            &attachment->request_id);
-    g_free(attachment->recipient);
-    g_free(attachment);
+    if (attachment->connection != NULL) {
+        g_hash_table_remove(
+            attachment->connection->outgoing_attachment_contexts, attachment);
+        if (attachment->request_id != 0)
+            g_hash_table_remove(attachment->connection->outgoing_attachments,
+                                &attachment->request_id);
+    }
+    signal_outgoing_attachment_destroy(attachment);
 }
 
 static void
@@ -94,19 +114,22 @@ static void
 signal_outgoing_attachment_init(PurpleXfer *xfer)
 {
     SignalOutgoingAttachment *attachment = xfer->data;
-    g_autofree char *contents = NULL;
+    g_autoptr(GBytes) contents = NULL;
     g_autofree char *filename = NULL;
     g_autofree char *content_type = NULL;
     g_autofree char *mime_type = NULL;
     g_autoptr(GError) error = NULL;
+    gconstpointer contents_data;
     gsize size = 0;
     gboolean uncertain = FALSE;
     SignalStatus status;
     guint64 *key;
 
     if (attachment == NULL || attachment->connection == NULL ||
-        attachment->connection->closing)
+        attachment->connection->closing) {
+        purple_xfer_cancel_local(xfer);
         return;
+    }
     if (attachment->group &&
         !signal_group_can_send(attachment->connection,
                                attachment->recipient)) {
@@ -116,23 +139,26 @@ signal_outgoing_attachment_init(PurpleXfer *xfer)
         purple_xfer_cancel_local(xfer);
         return;
     }
-    if (!g_file_get_contents(purple_xfer_get_local_filename(xfer), &contents,
-                             &size, &error)) {
+    contents = signal_read_bounded_file(
+        purple_xfer_get_local_filename(xfer), SIGNAL_MAX_ATTACHMENT_BYTES,
+        &error);
+    if (contents == NULL) {
+        const char *message = error->message;
+
+        if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA) ||
+            g_error_matches(error, G_IO_ERROR,
+                            G_IO_ERROR_MESSAGE_TOO_LARGE))
+            message = "Signal attachments must be between 1 byte and 25 MiB";
         purple_xfer_error(PURPLE_XFER_SEND, purple_xfer_get_account(xfer),
-                          purple_xfer_get_remote_user(xfer), error->message);
+                          purple_xfer_get_remote_user(xfer), message);
         purple_xfer_cancel_local(xfer);
         return;
     }
-    if (size == 0 || size > SIGNAL_MAX_ATTACHMENT_BYTES) {
-        purple_xfer_error(PURPLE_XFER_SEND, purple_xfer_get_account(xfer),
-                          purple_xfer_get_remote_user(xfer),
-                          "Signal attachments must be between 1 byte and 25 MiB");
-        purple_xfer_cancel_local(xfer);
-        return;
-    }
+    contents_data = g_bytes_get_data(contents, &size);
+    purple_xfer_set_size(xfer, size);
 
     filename = g_path_get_basename(purple_xfer_get_local_filename(xfer));
-    content_type = g_content_type_guess(filename, (const guchar *)contents,
+    content_type = g_content_type_guess(filename, contents_data,
                                         MIN(size, (gsize)512), &uncertain);
     (void)uncertain;
     if (content_type != NULL)
@@ -148,12 +174,12 @@ signal_outgoing_attachment_init(PurpleXfer *xfer)
         status = signal_core_send_group_attachment(
             attachment->connection->core, attachment->request_id,
             attachment->recipient, filename, mime_type,
-            (const guint8 *)contents, size);
+            contents_data, size);
     } else {
         status = signal_core_send_attachment(
             attachment->connection->core, attachment->request_id,
             attachment->recipient, filename, mime_type,
-            (const guint8 *)contents, size);
+            contents_data, size);
     }
     if (status != SIGNAL_STATUS_OK) {
         attachment->request_id = 0;
@@ -1401,6 +1427,8 @@ signal_login(PurpleAccount *account)
         g_str_hash, g_str_equal, g_free, NULL);
     connection->outgoing_attachments = g_hash_table_new_full(
         g_int64_hash, g_int64_equal, g_free, (GDestroyNotify)purple_xfer_unref);
+    connection->outgoing_attachment_contexts =
+        g_hash_table_new(g_direct_hash, g_direct_equal);
     connection->pending_reads = g_ptr_array_new_with_free_func(
         signal_pending_read_free);
     connection->group_leave_requests = g_ptr_array_new_with_free_func(
@@ -1437,6 +1465,7 @@ signal_login(PurpleAccount *account)
         g_hash_table_unref(connection->identity_changes_seen);
         g_hash_table_unref(connection->pending_identity_changes);
         g_hash_table_unref(connection->outgoing_attachments);
+        g_hash_table_unref(connection->outgoing_attachment_contexts);
         g_ptr_array_unref(connection->pending_reads);
         g_ptr_array_unref(connection->group_leave_requests);
         signal_contact_sync_clear(&connection->contact_sync);
@@ -1494,14 +1523,15 @@ signal_close(PurpleConnection *gc)
     }
 
     GHashTableIter attachment_iter;
-    gpointer attachment_value;
+    gpointer attachment_context;
     g_hash_table_iter_init(&attachment_iter,
-                           connection->outgoing_attachments);
-    while (g_hash_table_iter_next(&attachment_iter, NULL, &attachment_value)) {
-        PurpleXfer *xfer = attachment_value;
-        SignalOutgoingAttachment *attachment = xfer->data;
-        if (attachment != NULL)
-            attachment->connection = NULL;
+                           connection->outgoing_attachment_contexts);
+    while (g_hash_table_iter_next(&attachment_iter, &attachment_context,
+                                  NULL)) {
+        SignalOutgoingAttachment *attachment = attachment_context;
+
+        g_hash_table_iter_remove(&attachment_iter);
+        signal_outgoing_attachment_detach(attachment);
     }
     g_hash_table_remove_all(connection->outgoing_attachments);
 
@@ -1523,6 +1553,7 @@ signal_close(PurpleConnection *gc)
     g_hash_table_unref(connection->identity_changes_seen);
     g_hash_table_unref(connection->pending_identity_changes);
     g_hash_table_unref(connection->outgoing_attachments);
+    g_hash_table_unref(connection->outgoing_attachment_contexts);
     g_ptr_array_unref(connection->pending_reads);
     g_ptr_array_unref(connection->group_leave_requests);
     signal_contact_sync_clear(&connection->contact_sync);
@@ -1824,6 +1855,7 @@ signal_new_attachment_xfer(SignalConnection *connection,
                                        signal_outgoing_attachment_free);
     purple_xfer_set_cancel_send_fnc(xfer,
                                     signal_outgoing_attachment_cancel);
+    g_hash_table_add(connection->outgoing_attachment_contexts, attachment);
     return xfer;
 }
 

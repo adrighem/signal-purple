@@ -63,6 +63,10 @@ requests.
 - Define `PURPLE_PLUGINS` for all plugin translation units.
 - Call Purple only on the GLib main thread.
 - Track and destroy every source/request before freeing connection state.
+- Register outgoing transfers at creation and detach their contexts before
+  freeing connection state, including transfers still awaiting file selection.
+- Admit local attachment bytes through the bounded, single-open regular-file
+  reader rather than an unbounded path-based convenience API.
 - Treat Rust events as immutable and call `signal_event_free` exactly once.
 - Strip outgoing markup and escape incoming remote text.
 

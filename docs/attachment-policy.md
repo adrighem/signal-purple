@@ -22,6 +22,9 @@ observes the same state before and during network work. The two-file admission
 ceiling also bounds concurrent uploads.
 
 The retained-payload limit is not a complete resident-memory bound. The C
-adapter and upstream libraries may temporarily hold additional copies while a
-file crosses their APIs. Attachments are not stored in the durable text-message
-outbox and must be sent again after a failed upload or restart.
+adapter holds one bounded local-file copy while it crosses the FFI, and upstream
+libraries may temporarily hold additional copies. The adapter opens the path
+once, rejects non-regular and known-oversized inputs before allocating their
+contents, and still stops after the limit plus one byte if the file grows.
+Attachments are not stored in the durable text-message outbox and must be sent
+again after a failed upload or restart.

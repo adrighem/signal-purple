@@ -47,6 +47,11 @@ and message bodies are sensitive. Production code must not log them.
 - Backend events use a bounded queue; overflow fails visibly and reconnects
   rather than allowing unbounded process memory growth.
 - Attachments are capped at 25 MiB each and 50 MiB per incoming message.
+  The C adapter rejects non-regular and known-oversized outgoing files before
+  allocating their contents, rejects empty files, and enforces the same limit
+  while reading from the already inspected descriptor. Every outgoing Purple
+  transfer is registered from creation and detached before its connection state
+  is freed.
   Outgoing queued, recovery-deferred, and active attachments share a per-account
   limit of two files and 50 MiB. Admission capacity and active request identity
   are released together on every terminal path. Cancellation is stored on the
@@ -90,6 +95,9 @@ and message bodies are sensitive. Production code must not log them.
 - Outgoing attachments are cancellable while their upload is active, but are not
   restart-persistent like text messages. A crash or disconnect may require the
   user to send the file again.
+- The bounded local-file read is synchronous on Purple's main thread.
+  `O_NONBLOCK` prevents special-file open hangs but does not make regular-file
+  I/O asynchronous, so a slow local or network-mounted file can pause the UI.
 - Pidgin/libpurple 2 is a legacy in-process plugin environment. A memory-safety
   flaw in the UI or another plugin can access this process.
 - Signal does not support third-party clients or promise protocol stability.
