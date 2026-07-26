@@ -42,14 +42,16 @@ teardown can wait on uncancelled network work.
 ## Acceptance Criteria
 
 - More acknowledgements than the work-channel capacity can be queued without
-  `QUEUE_FULL`.
-- An accepted cancellation cannot later start or continue its upload task.
+  `QUEUE_FULL`, and accepted acknowledgements are eventually persisted.
+- An accepted cancellation cannot later start or continue its upload task,
+  including when it overtakes a queued send.
 - Closing a connection nulls every pending outgoing transfer's connection
   pointer.
 - A sparse file larger than 25 MiB is rejected without reading its contents.
-- Repeated and concurrent timestamp allocation produces unique increasing
-  values.
-- A pending future selected through the shutdown boundary terminates promptly.
+- Repeated and concurrent timestamp allocation, including simulated wall-clock
+  rollback, produces unique increasing values.
+- Synchronization, replay, outbox, and attachment-download waits selected
+  through the shutdown boundary terminate promptly.
 - Constructor and worker code never hold the passphrase in a plain `String`
   after validation and do not retain it for the session lifetime.
 - Focused suites and `scripts/check.sh full` pass.
@@ -64,5 +66,6 @@ teardown can wait on uncancelled network work.
 ## Dependencies
 
 - Existing libpurple, GLib, Tokio, and pinned Presage APIs.
-- Manual end-to-end verification requires an isolated non-production Signal
-  profile and remains a phase-completion step.
+- Phase-completion verification is offline and uses deterministic test
+  fixtures. Live Signal service validation requires separate authorization and
+  remains out of scope.

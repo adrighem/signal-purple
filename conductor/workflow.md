@@ -36,8 +36,9 @@ Each phase ends with the required manual-verification task:
 1. Determine the phase diff and verify every changed code path has focused
    tests.
 2. Announce and run `scripts/check.sh full` under the sanitized environment.
-3. Present manual steps and expected outcomes based on `product.md`,
-   `product-guidelines.md`, and the track plan.
+3. Present offline manual inspection steps and expected outcomes based on
+   `product.md`, `product-guidelines.md`, and the track plan. Do not link or use
+   a live Signal account.
 4. Pause for explicit user confirmation.
 5. Create a checkpoint commit and attach a Git note containing the automated
    command, manual steps, and user confirmation.
