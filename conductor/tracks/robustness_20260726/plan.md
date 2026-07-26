@@ -7,10 +7,10 @@
   - [x] Sub-task: Add a coalescing acknowledgement inbox with shutdown draining
   - [x] Sub-task: Put cancellation state directly in attachment admission permits
   - [x] Sub-task: Document the reliable control-path invariants
-- [~] Task: Make the C validation gate fail closed
-  - [ ] Sub-task: Enable C tests explicitly in the canonical build
-  - [ ] Sub-task: Make CTest fail when no tests are discovered
-- [ ] Task: Close outgoing transfer lifetime and local file-admission gaps
+- [x] Task: Make the C validation gate fail closed c7c7bc8
+  - [x] Sub-task: Enable C tests explicitly in the canonical build
+  - [x] Sub-task: Make CTest fail when no tests are discovered
+- [~] Task: Close outgoing transfer lifetime and local file-admission gaps
   - [ ] Sub-task: Add pending-transfer disconnect coverage
   - [ ] Sub-task: Track every outgoing transfer from creation
   - [ ] Sub-task: Add and use a bounded single-open regular-file reader
