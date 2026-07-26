@@ -20,7 +20,7 @@
   - [x] Sub-task: Route signal-purple-owned message timestamps through one allocator
   - [x] Sub-task: Keep wall-clock retry deadlines separate from protocol timestamps
   - [x] Sub-task: Document the monotonic timestamp invariant
-- [x] Task: Make blocking backend phases cancellable ce0de33
+- [x] Task: Make blocking backend waits shutdown-interruptible ce0de33
   - [x] Sub-task: Inventory synchronization, replay, outbox, and download waits
   - [x] Sub-task: Add bounded worker-shutdown regression tests
   - [x] Sub-task: Apply the shutdown boundary to every inventoried wait
@@ -33,7 +33,12 @@
   - [x] Sub-task: Move the passphrase immediately into zeroizing ownership
   - [x] Sub-task: Drop the passphrase immediately after store opening
   - [x] Sub-task: Document the credential ownership boundary
-- [~] Task: Audit architecture and security documentation for consistency
-  - [ ] Sub-task: Check ABI and status-value documentation against regression coverage
-  - [ ] Sub-task: Check ownership, cancellation, timestamp, shutdown, and credential docs
+- [x] Task: Close final teardown findings 45171d0
+  - [x] Sub-task: Keep Linux backend code resident for late dependency workers
+  - [x] Sub-task: Bound Tokio runtime and recovery cleanup
+  - [x] Sub-task: Make outgoing Purple transfer start and disconnect safe
+- [x] Task: Lock ABI and audit architecture documentation 4824d6e
+  - [x] Sub-task: Lock ABI status, event, and flag values in C and Rust tests
+  - [x] Sub-task: Check ABI and status-value documentation against regression coverage
+  - [x] Sub-task: Check ownership, cancellation, timestamp, shutdown, and credential docs
 - [ ] Task: Conductor - User Manual Verification 'Reliability and lifecycle hardening' (Protocol in workflow.md)
