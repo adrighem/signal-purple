@@ -1,0 +1,1 @@
+Refined the robustness track after rereading and red-team review. Split unrelated timestamp, shutdown, credential, and validation work; strengthened acknowledgement, cancellation, shutdown, and offline verification criteria.
