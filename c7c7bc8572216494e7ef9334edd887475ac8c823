@@ -1,0 +1,5 @@
+Task: make the C validation gate fail closed.
+
+The canonical configure step now forces BUILD_TESTING=ON even for a reused cache, and CTest exits unsuccessfully when no tests are discovered. A shell regression check locks both arguments into scripts/check.sh; contributor commands were updated.
+
+TDD evidence: tests/test_check_gate.sh initially failed on the missing BUILD_TESTING argument. The focused check then passed, and sanitized configure, build, and CTest completed with all 4 C tests passing.
