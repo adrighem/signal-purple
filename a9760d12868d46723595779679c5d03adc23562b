@@ -1,0 +1,5 @@
+Task: minimize credential lifetime.
+
+Added a non-cloneable, non-debuggable StorePassphrase wrapper which immediately takes the FFI allocation under zeroizing ownership. The store-opening boundary consumes and wipes that owner before registration or session startup on success, shutdown, and error. Presage and SQLx still retain a separate dependency-owned connection-option copy for pool reconnects; this upstream limitation is documented.
+
+TDD evidence: the new tests initially failed to compile because StorePassphrase, required_store_passphrase, and open_encrypted_store did not exist. Final sanitized validation passed all 80 Rust unit tests plus doc tests, cargo fmt, and all-target cargo check. Independent secret-lifetime review found no remaining blocker.
