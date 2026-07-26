@@ -4,5 +4,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-## [~] Track: Harden lifecycle, control-plane, and resource invariants
+## [x] Track: Harden lifecycle, control-plane, and resource invariants
 *Link: [./conductor/tracks/robustness_20260726/](./conductor/tracks/robustness_20260726/)*

@@ -1,6 +1,6 @@
 # Track Plan
 
-## Phase 1: Reliability and lifecycle hardening
+## Phase 1: Reliability and lifecycle hardening [checkpoint: 55e5039]
 
 - [x] Task: Make display acknowledgements and attachment cancellation reliable 374a92a
   - [x] Sub-task: Add queue-pressure and cancellation-state regression tests
@@ -45,4 +45,4 @@
   - [x] Sub-task: Reproduce the unsafe multi-connection pool with a deterministic regression
   - [x] Sub-task: Serialize concurrent store writes at the SQLx pool boundary
   - [x] Sub-task: Pin the regression-covered Presage revision in signal-purple
-- [ ] Task: Conductor - User Manual Verification 'Reliability and lifecycle hardening' (Protocol in workflow.md)
+- [x] Task: Conductor - User Manual Verification 'Reliability and lifecycle hardening' (Protocol in workflow.md) 55e5039
