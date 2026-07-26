@@ -1,0 +1,5 @@
+Task: audit architecture and security documentation for consistency.
+
+Locked C and Rust ABI version, status, event, reserved value, and flag contracts; documented input-copy and returned-event ownership in the public header; and reconciled shutdown, credential, diagnostic, logging, and transfer-lifetime claims with the implementation.
+
+Validation evidence: matching Clippy passed, all 86 Rust tests and all 5 C/plugin tests passed, and independent code-truth and documentation reviews reported no remaining blocker.
