@@ -30,6 +30,13 @@ test -r "$plugin"
 test -r "$backend"
 test -x "$probe"
 
+if [ "$(uname -s)" = Linux ]; then
+    if ! readelf -d "$backend" | grep -Fq NODELETE; then
+        printf 'installed backend is unloadable: %s\n' "$backend" >&2
+        exit 1
+    fi
+fi
+
 ldd "$plugin"
 resolved_backend=$(ldd "$plugin" \
     | sed -n 's/^[[:space:]]*libsignal_core\.so => \(.*\) (0x[0-9a-fA-F]*)$/\1/p')

@@ -156,5 +156,7 @@ file signature agree, the complete image decodes, and it is no larger than 8192
 pixels per edge or 16 megapixels total. Direct images, other image formats,
 ordinary files, invalid or oversized images, and content with mismatched
 metadata still use a receive prompt. If an eligible group JPEG or PNG still
-opens as a direct transfer after upgrading, fully quit and restart Pidgin so the
-old plugin module is unloaded before testing again.
+opens as a direct transfer after upgrading, fully quit and restart Pidgin. The
+Linux Rust backend is deliberately process-resident for safe dependency-thread
+shutdown, so only process exit guarantees that an older backend mapping is
+discarded.

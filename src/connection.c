@@ -167,9 +167,13 @@ signal_outgoing_attachment_init(PurpleXfer *xfer)
         mime_type = g_strdup("application/octet-stream");
 
     attachment->request_id = attachment->connection->next_request_id++;
-    purple_xfer_start(xfer, -1, NULL, 0);
-    if (xfer->data == NULL)
+    purple_xfer_ref(xfer);
+    attachment->connection->start_xfer(xfer, -1, NULL, 0);
+    if (xfer->data == NULL) {
+        purple_xfer_unref(xfer);
         return;
+    }
+    attachment = xfer->data;
     if (attachment->group) {
         status = signal_core_send_group_attachment(
             attachment->connection->core, attachment->request_id,
@@ -187,6 +191,7 @@ signal_outgoing_attachment_init(PurpleXfer *xfer)
                           purple_xfer_get_remote_user(xfer),
                           "The Signal attachment could not be queued");
         purple_xfer_cancel_local(xfer);
+        purple_xfer_unref(xfer);
         return;
     }
 
@@ -195,6 +200,7 @@ signal_outgoing_attachment_init(PurpleXfer *xfer)
     purple_xfer_ref(xfer);
     g_hash_table_insert(attachment->connection->outgoing_attachments, key,
                         xfer);
+    purple_xfer_unref(xfer);
 }
 
 static gboolean
@@ -1404,6 +1410,7 @@ signal_login(PurpleAccount *account)
     connection = g_new0(SignalConnection, 1);
     connection->gc = gc;
     connection->send_group_message = signal_core_send_group_message;
+    connection->start_xfer = purple_xfer_start;
     connection->store_path = g_strdup(store_path);
     connection->group_ids_by_key = g_hash_table_new_full(
         g_str_hash, g_str_equal, g_free, NULL);
@@ -1511,6 +1518,7 @@ signal_close(PurpleConnection *gc)
     purple_signals_disconnect_by_handle(connection);
     purple_request_close_with_handle(&connection->link_qr);
     purple_request_close_with_handle(connection);
+    purple_notify_close_with_handle(connection);
 
     for (guint index = 0; index < connection->group_leave_requests->len;
          index++) {
@@ -1519,6 +1527,26 @@ signal_close(PurpleConnection *gc)
 
         request->connection = NULL;
     }
+
+    GPtrArray *active_transfers = g_ptr_array_new_with_free_func(
+        (GDestroyNotify)purple_xfer_unref);
+    GHashTableIter active_transfer_iter;
+    gpointer active_transfer;
+    g_hash_table_iter_init(&active_transfer_iter,
+                           connection->outgoing_attachments);
+    while (g_hash_table_iter_next(&active_transfer_iter, NULL,
+                                  &active_transfer)) {
+        purple_xfer_ref(active_transfer);
+        g_ptr_array_add(active_transfers, active_transfer);
+    }
+    for (guint index = 0; index < active_transfers->len; index++) {
+        PurpleXfer *xfer = g_ptr_array_index(active_transfers, index);
+
+        if (!purple_xfer_is_canceled(xfer) &&
+            !purple_xfer_is_completed(xfer))
+            purple_xfer_cancel_local(xfer);
+    }
+    g_ptr_array_unref(active_transfers);
 
     GHashTableIter attachment_iter;
     gpointer attachment_context;

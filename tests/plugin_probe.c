@@ -1015,6 +1015,7 @@ new_transfer_connection(PurpleConnection *gc)
     SignalConnection *connection = g_new0(SignalConnection, 1);
 
     connection->gc = gc;
+    connection->start_xfer = purple_xfer_start;
     connection->group_ids_by_key =
         g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
     connection->group_keys_by_id =
@@ -1225,6 +1226,97 @@ test_pending_transfer_disconnect(PurplePluginProtocolInfo *protocol,
     }
 }
 
+static guint start_reference_floor;
+static gboolean start_had_temporary_reference;
+
+static void
+cancel_transfer_during_start(PurpleXfer *xfer, int fd, const char *ip,
+                             unsigned int port)
+{
+    (void)fd;
+    (void)ip;
+    (void)port;
+    start_had_temporary_reference = xfer->ref >= start_reference_floor;
+    purple_xfer_cancel_local(xfer);
+}
+
+static void
+test_synchronous_start_failure(PurplePluginProtocolInfo *protocol,
+                               const char *user_dir)
+{
+    g_autofree char *filename =
+        g_build_filename(user_dir, "start-failure-transfer.txt", NULL);
+    PurpleAccount *account =
+        purple_account_new("start-failure-transfer", SIGNAL_PLUGIN_ID);
+    PurpleConnection gc = {
+        .state = PURPLE_CONNECTED,
+        .account = account,
+    };
+    SignalConnection *connection;
+    PurpleXfer *xfer;
+
+    g_assert_true(g_file_set_contents(filename, "content", -1, NULL));
+    purple_account_set_connection(account, &gc);
+    connection = new_transfer_connection(&gc);
+    connection->start_xfer = cancel_transfer_during_start;
+    xfer = protocol->new_xfer(&gc, "aci:transfer-recipient");
+    g_assert_nonnull(xfer);
+    purple_xfer_ref(xfer);
+    start_reference_floor = xfer->ref + 1;
+    start_had_temporary_reference = FALSE;
+
+    purple_xfer_request_accepted(xfer, filename);
+
+    g_assert_true(start_had_temporary_reference);
+    g_assert_true(purple_xfer_is_canceled(xfer));
+    g_assert_null(xfer->data);
+    g_assert_cmpuint(
+        g_hash_table_size(connection->outgoing_attachment_contexts),
+        ==, 0);
+    purple_xfer_unref(xfer);
+    protocol->close(&gc);
+    purple_account_set_connection(account, NULL);
+    purple_account_destroy(account);
+}
+
+static void
+test_started_transfer_disconnect(PurplePluginProtocolInfo *protocol)
+{
+    PurpleAccount *account =
+        purple_account_new("started-transfer", SIGNAL_PLUGIN_ID);
+    PurpleConnection gc = {
+        .state = PURPLE_CONNECTED,
+        .account = account,
+    };
+    SignalConnection *connection;
+    SignalOutgoingAttachment *attachment;
+    PurpleXfer *xfer;
+    guint64 *key;
+
+    purple_account_set_connection(account, &gc);
+    connection = new_transfer_connection(&gc);
+    xfer = protocol->new_xfer(&gc, "aci:transfer-recipient");
+    g_assert_nonnull(xfer);
+    purple_xfer_ref(xfer);
+
+    attachment = xfer->data;
+    g_assert_nonnull(attachment);
+    attachment->request_id = 42;
+    xfer->status = PURPLE_XFER_STATUS_STARTED;
+    key = g_new(guint64, 1);
+    *key = attachment->request_id;
+    purple_xfer_ref(xfer);
+    g_hash_table_insert(connection->outgoing_attachments, key, xfer);
+
+    protocol->close(&gc);
+
+    g_assert_true(purple_xfer_is_canceled(xfer));
+    g_assert_null(xfer->data);
+    purple_xfer_unref(xfer);
+    purple_account_set_connection(account, NULL);
+    purple_account_destroy(account);
+}
+
 static void
 test_vanished_transfer_cleanup(PurplePluginProtocolInfo *protocol,
                                const char *user_dir)
@@ -1329,6 +1421,8 @@ main(int argc, char **argv)
     g_assert_nonnull(protocol->get_cb_alias);
     test_standard_conversation_logging(plugin, protocol);
     test_pending_transfer_disconnect(protocol, user_dir);
+    test_synchronous_start_failure(protocol, user_dir);
+    test_started_transfer_disconnect(protocol);
     test_vanished_transfer_cleanup(protocol, user_dir);
 
     chat_info = protocol->chat_info(NULL);

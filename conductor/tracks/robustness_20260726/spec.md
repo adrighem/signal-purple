@@ -32,6 +32,9 @@ teardown can wait on uncancelled network work.
   sequence.
 - Worker teardown must be able to interrupt synchronization, replay, outbox,
   and attachment-download waits.
+- Logical teardown must have bounded cleanup and Tokio runtime budgets. On
+  Linux, backend code must remain mapped until process exit because SQLx does
+  not expose handles for joining SQLite worker threads after a timed-out wait.
 - After FFI validation, signal-purple's owned SQLCipher passphrase allocation
   must immediately enter zeroizing ownership and be wiped on every store-open
   outcome before session startup. Dependency-owned connection-key copies are
@@ -64,6 +67,9 @@ teardown can wait on uncancelled network work.
   through the shutdown boundary terminate promptly. Shutdown cleanup has a
   bounded budget; undrained projection state remains eligible for durable
   replay.
+- Started Purple transfers are cancelled on disconnect, and synchronous
+  transfer-start failure cannot invalidate a borrowed transfer pointer.
+- Staged Linux builds prove that the Rust backend has the ELF `NODELETE` flag.
 - After FFI validation, signal-purple's owned passphrase allocation remains
   under zeroizing ownership and is wiped on every store-open outcome before
   session startup. Dependency-owned SQLCipher connection-key copies are

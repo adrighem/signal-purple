@@ -26,6 +26,9 @@ test -r "$plugin"
 test -r "$backend"
 test "$(ldd "$plugin" \
     | awk '$1 == "libsignal_core.so" { print $3; exit }')" = "$backend"
+if [ "$(uname -s)" = Linux ]; then
+    readelf -d "$backend" | grep -F NODELETE
+fi
 readelf -d "$plugin" \
     | grep -F "Library runpath: [\$ORIGIN/signal-purple]"
 G_DEBUG=fatal-warnings "$probe" "$plugin"

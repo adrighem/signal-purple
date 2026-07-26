@@ -612,16 +612,22 @@ pub(crate) fn run_worker(context: WorkerContext) {
             .build()
             .map_err(|error| error.to_string())?;
         let local = tokio::task::LocalSet::new();
-        let result = runtime.block_on(local.run_until(run(
-            config,
-            commands,
-            worker_acknowledgments,
-            shutdown,
-            sink.clone(),
-            Arc::clone(&ready),
-        )));
-        drop(local);
-        result
+        match run_local_future(
+            runtime,
+            local,
+            run(
+                config,
+                commands,
+                worker_acknowledgments,
+                shutdown,
+                sink.clone(),
+                Arc::clone(&ready),
+            ),
+            SHUTDOWN_CLEANUP_TIMEOUT,
+        ) {
+            Ok(result) => result,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
     }));
 
     acknowledgments.close();
@@ -724,6 +730,27 @@ where
     F: Future<Output = ()>,
 {
     tokio::time::timeout(timeout, future).await.is_ok()
+}
+
+fn shutdown_runtime(runtime: tokio::runtime::Runtime, timeout: Duration) {
+    runtime.shutdown_timeout(timeout);
+}
+
+fn run_local_future<F>(
+    runtime: tokio::runtime::Runtime,
+    local: tokio::task::LocalSet,
+    future: F,
+    shutdown_timeout: Duration,
+) -> std::thread::Result<F::Output>
+where
+    F: Future,
+{
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        runtime.block_on(local.run_until(future))
+    }));
+    drop(local);
+    shutdown_runtime(runtime, shutdown_timeout);
+    result
 }
 
 pub(crate) fn ensure_store_parent(store_path: &str) -> Result<(), String> {
@@ -1246,11 +1273,13 @@ async fn receive_and_command_loop(
                                     permit,
                                     upload_and_send_attachment(
                                         &mut attachment_manager,
-                                        &recipient,
-                                        filename,
-                                        content_type,
-                                        data,
-                                        group,
+                                        OutgoingAttachment {
+                                            recipient,
+                                            filename,
+                                            content_type,
+                                            data,
+                                            group,
+                                        },
                                         &attachment_departed_groups,
                                         &attachment_timestamps,
                                     ),
@@ -1363,13 +1392,13 @@ async fn receive_and_command_loop(
             });
         }
         recovering = true;
-        contact_sync.abort();
-        let _ = contact_sync.await;
-        abort_in_flight_attachments(
+        stop_receive_tasks(
+            &mut contact_sync,
             &manager,
             &sink,
             &mut attachment_tasks,
             &mut attachment_aborts,
+            std::future::ready(()),
         )
         .await;
         let error = "Signal's message stream ended unexpectedly".to_owned();
@@ -1425,29 +1454,41 @@ async fn handle_attachment_completion(
     attachment_aborts: &mut HashMap<u64, AttachmentTaskControl>,
     completed: Result<AttachmentCompletion, tokio::task::JoinError>,
 ) {
+    if let Some(sent) = finish_attachment_completion(sink, attachment_aborts, completed) {
+        mark_sent_message_projected_or_report(manager, &sent, sink).await;
+    }
+}
+
+fn finish_attachment_completion(
+    sink: &EventSink,
+    attachment_aborts: &mut HashMap<u64, AttachmentTaskControl>,
+    completed: Result<AttachmentCompletion, tokio::task::JoinError>,
+) -> Option<SentMessage> {
     let Ok(AttachmentCompletion {
         request_id,
         result,
         permit: _permit,
     }) = completed
     else {
-        return;
+        return None;
     };
-    attachment_aborts.remove(&request_id);
-    match result {
+    let sent = match result {
         AttachmentTaskResult::Finished(Ok(sent)) => {
-            mark_sent_message_projected_or_report(manager, &sent, sink).await;
             sink.emit(Event {
                 kind: EVENT_ATTACHMENT_SENT,
                 request_id,
                 ..Event::default()
             });
+            Some(sent)
         }
         AttachmentTaskResult::Finished(Err(error)) => {
             sink.emit(Event::request_error(request_id, error));
+            None
         }
-        AttachmentTaskResult::Cancelled => {}
-    }
+        AttachmentTaskResult::Cancelled => None,
+    };
+    attachment_aborts.remove(&request_id);
+    sent
 }
 
 enum AttachmentTaskResult {
@@ -1503,23 +1544,50 @@ async fn abort_in_flight_attachments(
         attachment_aborts.values().map(|control| &control.task),
     )
     .await;
+    let mut sent_messages = Vec::new();
     for completed in completions {
-        handle_attachment_completion(manager, sink, attachment_aborts, completed).await;
+        if let Some(sent) = finish_attachment_completion(sink, attachment_aborts, completed) {
+            sent_messages.push(sent);
+        }
     }
-    for (request_id, control) in attachment_aborts.drain() {
+    for sent in sent_messages {
+        mark_sent_message_projected_or_report(manager, &sent, sink).await;
+    }
+    interrupt_remaining_attachments(sink, attachment_aborts);
+}
+
+fn interrupt_remaining_attachments(
+    sink: &EventSink,
+    attachment_controls: &mut HashMap<u64, AttachmentTaskControl>,
+) {
+    for (request_id, control) in attachment_controls.drain() {
         if let Some(event) = interrupted_attachment_event(request_id, &control.control) {
             sink.emit(event);
         }
     }
 }
 
+fn abandon_timed_out_attachments(
+    sink: &EventSink,
+    attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
+    attachment_controls: &mut HashMap<u64, AttachmentTaskControl>,
+) {
+    let mut abandoned_tasks = std::mem::replace(attachment_tasks, tokio::task::JoinSet::new());
+    abandoned_tasks.abort_all();
+    drop(abandoned_tasks);
+    interrupt_remaining_attachments(sink, attachment_controls);
+}
+
 fn interrupted_attachment_event(request_id: u64, control: &AttachmentControl) -> Option<Event> {
-    control.claim_terminal().then(|| {
-        Event::request_error(
+    if control.is_cancelled() {
+        None
+    } else {
+        let _ = control.claim_terminal();
+        Some(Event::request_error(
             request_id,
             "Signal connection was interrupted before the attachment completed",
-        )
-    })
+        ))
+    }
 }
 
 async fn abort_and_drain_tasks<T: Send + 'static>(
@@ -1969,22 +2037,33 @@ async fn enqueue_and_send(
     result.map(|_| ()).map_err(|error| error.to_string())
 }
 
-async fn upload_and_send_attachment(
-    manager: &mut Manager<SqliteStore, Registered>,
-    recipient: &str,
+struct OutgoingAttachment {
+    recipient: String,
     filename: String,
     content_type: String,
     data: Vec<u8>,
     group: bool,
+}
+
+async fn upload_and_send_attachment(
+    manager: &mut Manager<SqliteStore, Registered>,
+    attachment: OutgoingAttachment,
     departed_groups: &DepartedGroups,
     timestamps: &MessageTimestampAllocator,
 ) -> Result<SentMessage, String> {
+    let OutgoingAttachment {
+        recipient,
+        filename,
+        content_type,
+        data,
+        group,
+    } = attachment;
     if data.is_empty() || data.len() > MAX_ATTACHMENT_BYTES {
         return Err("Attachment size is outside the supported range".into());
     }
     let group_target = if group {
         Some(
-            resolve_active_group(manager, recipient, departed_groups)
+            resolve_active_group(manager, &recipient, departed_groups)
                 .await?
                 .ok_or_else(|| {
                     "Signal group is unavailable or this account is no longer a member".to_owned()
@@ -2043,7 +2122,7 @@ async fn upload_and_send_attachment(
             timestamp,
         })
     } else {
-        let recipient = parse_recipient(recipient)
+        let recipient = parse_recipient(&recipient)
             .ok_or_else(|| "Recipient is not a canonical Signal service identifier".to_owned())?;
         manager
             .send_message(
@@ -2251,8 +2330,28 @@ async fn stop_attachments_and_drain_acknowledgments(
         drain_acknowledgments(manager, acknowledgments, sink, projection).await;
     };
     if !finish_shutdown_cleanup(cleanup, SHUTDOWN_CLEANUP_TIMEOUT).await {
-        attachment_tasks.abort_all();
-        attachment_controls.clear();
+        abandon_timed_out_attachments(sink, attachment_tasks, attachment_controls);
+    }
+}
+
+async fn stop_receive_tasks<F>(
+    contact_sync: &mut tokio::task::JoinHandle<()>,
+    manager: &Manager<SqliteStore, Registered>,
+    sink: &EventSink,
+    attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
+    attachment_controls: &mut HashMap<u64, AttachmentTaskControl>,
+    final_cleanup: F,
+) where
+    F: Future<Output = ()>,
+{
+    contact_sync.abort();
+    let cleanup = async {
+        let _ = contact_sync.await;
+        abort_in_flight_attachments(manager, sink, attachment_tasks, attachment_controls).await;
+        final_cleanup.await;
+    };
+    if !finish_shutdown_cleanup(cleanup, SHUTDOWN_CLEANUP_TIMEOUT).await {
+        abandon_timed_out_attachments(sink, attachment_tasks, attachment_controls);
     }
 }
 
@@ -2266,16 +2365,15 @@ async fn stop_active_receive_loop(
     projection: &mut MessageProjection,
 ) {
     acknowledgments.close();
-    contact_sync.abort();
-    let cleanup = async {
-        let _ = contact_sync.await;
-        abort_in_flight_attachments(manager, sink, attachment_tasks, attachment_controls).await;
-        drain_acknowledgments(manager, acknowledgments, sink, projection).await;
-    };
-    if !finish_shutdown_cleanup(cleanup, SHUTDOWN_CLEANUP_TIMEOUT).await {
-        attachment_tasks.abort_all();
-        attachment_controls.clear();
-    }
+    stop_receive_tasks(
+        contact_sync,
+        manager,
+        sink,
+        attachment_tasks,
+        attachment_controls,
+        drain_acknowledgments(manager, acknowledgments, sink, projection),
+    )
+    .await;
 }
 
 async fn handle_command(
@@ -3295,6 +3393,63 @@ mod tests {
     }
 
     #[test]
+    fn runtime_shutdown_stops_waiting_for_blocking_work_after_its_deadline() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        runtime.block_on(async {
+            let task = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                finished_tx.send(()).unwrap();
+            });
+            started_rx.recv().unwrap();
+            drop(task);
+        });
+
+        let started = std::time::Instant::now();
+        shutdown_runtime(runtime, Duration::from_millis(10));
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        release_tx.send(()).unwrap();
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
+    fn runtime_shutdown_is_bounded_after_worker_panic() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let future = async move {
+            let task = tokio::task::spawn_blocking(move || {
+                started_tx.send(()).unwrap();
+                release_rx.recv().unwrap();
+                finished_tx.send(()).unwrap();
+            });
+            started_rx.recv().unwrap();
+            drop(task);
+            panic!("test worker panic");
+        };
+
+        let started = std::time::Instant::now();
+        let result = run_local_future(runtime, local, future, Duration::from_millis(10));
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+
+        release_tx.send(()).unwrap();
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    }
+
+    #[test]
     fn encrypted_store_open_drops_passphrase_before_returning() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3973,7 +4128,7 @@ mod tests {
     }
 
     #[test]
-    fn recovery_does_not_report_user_cancelled_attachments_as_interrupted() {
+    fn recovery_reports_every_non_cancelled_unreported_attachment() {
         let active_admission = AttachmentAdmission::for_test(2, 1);
         let active = active_admission.try_reserve(41, 1).unwrap();
         assert!(interrupted_attachment_event(41, &active.control()).is_some());
@@ -3982,6 +4137,93 @@ mod tests {
         let cancelled = cancelled_admission.try_reserve(42, 1).unwrap();
         assert!(cancelled_admission.cancel(42));
         assert!(interrupted_attachment_event(42, &cancelled.control()).is_none());
+
+        let terminal_admission = AttachmentAdmission::for_test(2, 1);
+        let terminal = terminal_admission.try_reserve(43, 1).unwrap();
+        assert!(terminal.claim_terminal());
+        assert!(interrupted_attachment_event(43, &terminal.control()).is_some());
+    }
+
+    #[test]
+    fn completed_attachment_reports_terminal_event_before_projection() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let admission = AttachmentAdmission::for_test(2, 1);
+            let permit = admission.try_reserve(41, 1).unwrap();
+            let control = permit.control();
+            assert!(permit.claim_terminal());
+            let mut tasks = tokio::task::JoinSet::new();
+            let task = tasks.spawn(std::future::pending::<()>());
+            let mut controls = HashMap::from([(41, AttachmentTaskControl { task, control })]);
+            let (sink, queue) = crate::event_queue::event_queue(1).unwrap();
+            let sent = finish_attachment_completion(
+                &sink,
+                &mut controls,
+                Ok(AttachmentCompletion {
+                    request_id: 41,
+                    result: AttachmentTaskResult::Finished(Ok(SentMessage {
+                        thread: Thread::Group([0; 32]),
+                        timestamp: 1,
+                    })),
+                    permit,
+                }),
+            );
+
+            assert!(sent.is_some());
+            assert!(controls.is_empty());
+            let crate::event_queue::EventPoll::Event(event) = queue.poll() else {
+                panic!("expected an attachment terminal event");
+            };
+            assert_eq!(event.kind, EVENT_ATTACHMENT_SENT);
+            assert_eq!(event.request_id, 41);
+
+            tasks.abort_all();
+            while tasks.join_next().await.is_some() {}
+        });
+    }
+
+    #[test]
+    fn timed_out_cleanup_discards_ready_terminal_completions() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let admission = AttachmentAdmission::for_test(2, 1);
+            let permit = admission.try_reserve(41, 1).unwrap();
+            let control = permit.control();
+            assert!(permit.claim_terminal());
+            let (ready_tx, ready_rx) = oneshot::channel();
+            let mut tasks = tokio::task::JoinSet::new();
+            let task = tasks.spawn(async move {
+                let _ = ready_tx.send(());
+                AttachmentCompletion {
+                    request_id: 41,
+                    result: AttachmentTaskResult::Finished(Ok(SentMessage {
+                        thread: Thread::Group([0; 32]),
+                        timestamp: 1,
+                    })),
+                    permit,
+                }
+            });
+            let mut controls = HashMap::from([(41, AttachmentTaskControl { task, control })]);
+            let (sink, queue) = crate::event_queue::event_queue(2).unwrap();
+            ready_rx.await.unwrap();
+            tokio::task::yield_now().await;
+
+            abandon_timed_out_attachments(&sink, &mut tasks, &mut controls);
+
+            assert!(tasks.is_empty());
+            assert!(controls.is_empty());
+            let crate::event_queue::EventPoll::Event(event) = queue.poll() else {
+                panic!("expected one attachment interruption event");
+            };
+            assert_eq!(event.kind, crate::event::EVENT_ERROR);
+            assert_eq!(event.request_id, 41);
+            assert!(matches!(queue.poll(), crate::event_queue::EventPoll::Empty));
+            assert!(tasks.join_next().await.is_none());
+        });
     }
 
     #[test]

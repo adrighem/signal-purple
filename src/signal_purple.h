@@ -17,6 +17,8 @@
 typedef SignalStatus (*SignalSendGroupMessageFunc)(
     SignalCore *core, uint64_t request_id, const char *group_key,
     const char *message);
+typedef void (*SignalStartXferFunc)(PurpleXfer *xfer, int fd, const char *ip,
+                                    unsigned int port);
 
 typedef struct _SignalConnection SignalConnection;
 
@@ -31,6 +33,7 @@ struct _SignalConnection {
     PurpleConnection *gc;
     SignalCore *core;
     SignalSendGroupMessageFunc send_group_message;
+    SignalStartXferFunc start_xfer;
     GSource *poll_source;
     GHashTable *group_ids_by_key;
     GHashTable *group_keys_by_id;

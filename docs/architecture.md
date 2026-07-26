@@ -48,13 +48,18 @@ destruction.
   replay, outbox retry, and live message projection all race the authoritative
   shutdown signal, as do store registration and schema initialization. Parent
   directory setup completes synchronously before the worker is created, so no
-  filesystem operation can outlive the joined worker and unloadable plugin.
-  Cleanup gets a two-second budget so a stalled local store operation is
-  cancelled before the synchronous worker join continues. Cancelling projection,
-  including an attachment download or an acknowledgement left after the cleanup
-  budget, leaves the content eligible for replay. Cancelling an outbox retry
-  leaves its encrypted row available for the next connection. No worker calls
-  into C or Purple.
+  plugin-owned filesystem operation can outlive the joined actor. Cleanup gets
+  a two-second budget, and Tokio runtime shutdown gets a separate two-second
+  budget, so synchronous core teardown does not wait forever for dependency
+  work. Dropping a timed-out future stops the actor from polling it, but an
+  already dispatched SQLx SQLite operation can finish on its dependency-owned
+  thread afterward. Linux builds therefore mark `libsignal_core.so` with ELF
+  `NODELETE`, verified by staged-install and release probes, so dependency code
+  remains mapped until process exit. Those threads never call C or Purple.
+  Cancelling projection, including an attachment download or an
+  acknowledgement left after the cleanup budget, leaves the content eligible
+  for replay. Cancelling an outbox retry leaves its encrypted row available for
+  the next connection.
 
 ## Connection sequence
 
@@ -131,11 +136,13 @@ older messages from the primary phone or Signal service.
   cancellation state from queue admission through its backend upload task, so a
   cancellation which overtakes a queued send still prevents the upload.
   The C adapter registers every outgoing transfer when it is created and
-  severs every live transfer from its context before freeing the connection,
-  including transfers still waiting in a file chooser. A late acceptance is
-  cancelled locally. Local files are opened once with `O_NONBLOCK` to avoid
-  special-file open stalls, inspected through that descriptor, restricted to
-  regular files, and read only up to the configured limit plus one byte.
+  holds a temporary reference across synchronous Purple start callbacks. On
+  disconnect it cancels started transfers, then severs every remaining live
+  transfer from its context before freeing the connection, including transfers
+  still waiting in a file chooser. A late acceptance is cancelled locally.
+  Local files are opened once with `O_NONBLOCK` to avoid special-file open
+  stalls, inspected through that descriptor, restricted to regular files, and
+  read only up to the configured limit plus one byte.
   Each file is capped at 25 MiB and each incoming message at 50 MiB. Outgoing
   admission spans queued, recovery-deferred, and active work, with at most two
   files totaling 50 MiB per account. Queued binary events and unresolved Purple

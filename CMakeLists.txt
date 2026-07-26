@@ -75,6 +75,7 @@ add_custom_target(signal-core-build ALL
     BYPRODUCTS "${SIGNAL_CORE_LIBRARY}"
     DEPENDS
         "${SIGNAL_CORE_MANIFEST}"
+        "${CMAKE_CURRENT_SOURCE_DIR}/rust/signal-core/build.rs"
         "${CMAKE_CURRENT_SOURCE_DIR}/rust/signal-core/Cargo.lock"
         "${CMAKE_CURRENT_SOURCE_DIR}/rust-toolchain.toml"
     WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
