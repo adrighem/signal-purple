@@ -1,0 +1,5 @@
+Task: make blocking backend phases cancellable.
+
+Added deterministic shutdown races around store registration and initialization, profile and snapshot work, synchronization, replay, outbox retry, acknowledgements, attachment completion, and live projection downloads. Cleanup has a two-second budget; unfinished projection state remains durable and replayable. Filesystem preparation now completes before worker creation so no detached code can outlive plugin teardown.
+
+TDD evidence: helper tests were initially missing and failed to compile. Final sanitized validation passed all 76 Rust unit tests plus doc tests, cargo fmt, and all-target cargo check. Independent re-review found no remaining commit blocker.
