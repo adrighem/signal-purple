@@ -15,12 +15,12 @@
   - [x] Sub-task: Track every outgoing transfer from creation
   - [x] Sub-task: Add and use a bounded single-open regular-file reader
   - [x] Sub-task: Document transfer ownership and local file admission
-- [~] Task: Centralize locally generated message timestamps
-  - [ ] Sub-task: Add concurrent and clock-rollback timestamp tests
-  - [ ] Sub-task: Route locally generated message timestamps through one allocator
-  - [ ] Sub-task: Keep wall-clock retry deadlines separate from protocol timestamps
-  - [ ] Sub-task: Document the monotonic timestamp invariant
-- [ ] Task: Make blocking backend phases cancellable
+- [x] Task: Centralize signal-purple-owned message timestamps 2dbae8c
+  - [x] Sub-task: Add concurrent and clock-rollback timestamp tests
+  - [x] Sub-task: Route signal-purple-owned message timestamps through one allocator
+  - [x] Sub-task: Keep wall-clock retry deadlines separate from protocol timestamps
+  - [x] Sub-task: Document the monotonic timestamp invariant
+- [~] Task: Make blocking backend phases cancellable
   - [ ] Sub-task: Inventory synchronization, replay, outbox, and download waits
   - [ ] Sub-task: Add bounded worker-shutdown regression tests
   - [ ] Sub-task: Apply the shutdown boundary to every inventoried wait

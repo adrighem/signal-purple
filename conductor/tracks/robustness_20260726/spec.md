@@ -23,8 +23,13 @@ teardown can wait on uncancelled network work.
   freed.
 - Oversized or non-regular outgoing files must be rejected before full
   allocation.
-- Locally generated Signal message timestamps must be strictly increasing
-  within a core, including concurrent attachment tasks.
+- Text, attachment, typing, delivery-receipt, and read-receipt timestamps
+  allocated by signal-purple must share one per-core sequence. Every new
+  allocation must be unique and greater than the preceding allocation,
+  including under concurrent attachment work and wall-clock rollback. Durable
+  retries reuse the logical message's original timestamp. Presage-owned
+  contact-sync requests and group-leave peer notifications are outside this
+  sequence.
 - Worker teardown must be able to interrupt synchronization, replay, outbox,
   and attachment-download waits.
 - The SQLCipher passphrase must enter zeroizing ownership immediately and be
@@ -48,8 +53,9 @@ teardown can wait on uncancelled network work.
 - Closing a connection severs every live pending transfer from its plugin
   context before freeing connection state, so late callbacks are safe.
 - A sparse file larger than 25 MiB is rejected without reading its contents.
-- Repeated and concurrent timestamp allocation, including simulated wall-clock
-  rollback, produces unique increasing values.
+- Repeated and concurrent allocation through the signal-purple timestamp
+  allocator, including simulated wall-clock rollback, produces unique, strictly
+  increasing values. Durable retries preserve their original timestamp.
 - Synchronization, replay, outbox, and attachment-download waits selected
   through the shutdown boundary terminate promptly.
 - Constructor and worker code never hold the passphrase in a plain `String`
