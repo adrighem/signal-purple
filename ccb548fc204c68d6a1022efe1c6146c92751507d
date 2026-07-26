@@ -1,0 +1,5 @@
+Task: close outgoing transfer lifetime and local file-admission gaps.
+
+Every outgoing Purple transfer is registered from creation. Disconnect severs live xfer data, reclaims stale contexts, and makes late acceptance cancel locally. A single-open reader rejects non-regular, empty, and oversized inputs while enforcing the 25 MiB boundary during the read.
+
+TDD evidence: the lifecycle probe first failed because pending transfers were not registered; detached acceptance then failed because it remained non-terminal; the reader test first failed with an undefined implementation. Final sanitized CTest passed all 5 tests, and the plugin lifecycle probe passed under AddressSanitizer with leak detection disabled for libpurple process-global allocations.
