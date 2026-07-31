@@ -58,12 +58,15 @@ cargo test --locked --manifest-path rust/signal-core/Cargo.toml \
 The C tests include a headless libpurple core that probes and loads the actual
 plugin module plus focused ABI values, conversation logging, outgoing-transfer
 lifetime, bounded file admission, markup, inline-image ownership and routing,
-and contact-snapshot reconciliation. The Rust tests cover ABI values and owned
-payloads, FFI error outputs, acknowledgement and cancellation pressure,
-timestamp allocation, bounded shutdown, credential lifetime, event overflow,
-QR PNG generation, group-key validation, group-image projection, and optional
-bounded Signal GIF-style conversion. The staged-install probe also verifies the
-Linux backend's ELF `NODELETE` contract.
+and contact-snapshot reconciliation. A relocation check proves that helpers
+compiled into the export-dynamic probe executable cannot preempt the loaded
+module's own implementations, and every direct probe invocation has a hard
+timeout. The Rust tests cover ABI values and owned payloads, FFI error outputs,
+acknowledgement and cancellation pressure, timestamp allocation, bounded
+shutdown, credential lifetime, event overflow, QR PNG generation, group-key
+validation, group-image projection, and optional bounded Signal GIF-style
+conversion. The staged-install probe also verifies the Linux backend's ELF
+`NODELETE` contract.
 Live compatibility tests require dedicated non-production Signal accounts and
 are not run for untrusted pull requests.
 

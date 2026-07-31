@@ -540,3 +540,23 @@ schema.
   UUID-only buddy now has a nonempty local/effective alias despite an empty
   server alias, with no open conversation retaining a stale title. No personal
   identifier or alias text is recorded in repository memory.
+
+## 2026-07-31 - Loaded-module probe symbol isolation
+
+- The headless plugin probe links buddy-list, contact-sync, and group-sync
+  helpers into an export-dynamic executable while loading a module containing
+  the same global symbols. The module's dynamic helper relocations therefore
+  allowed the executable copies to preempt the packaged implementations,
+  weakening callback coverage despite a successful module load.
+- The plugin now binds its internal function references locally. A new CTest
+  relocation gate fails if any duplicated sync helper remains dynamically
+  interposable, while the existing helper-focused tests and loaded-module probe
+  remain intact. Direct, staged-install, and release-package probes now have
+  hard execution timeouts.
+- Matched Rust 1.95 formatting and warning-as-error Clippy, all 95 Rust tests,
+  release-helper checks, the warning-as-error C build, all six C/Purple tests,
+  and the staged install/plugin-load probe pass locally.
+- The first staged probe exhausted the shared `/tmp` tmpfs while copying the
+  debug backend. Three confirmed unused signal-purple build/review directories
+  from this maintenance work were removed, reclaiming 2.6 GiB; the unchanged
+  probe then passed. No repository or live Pidgin state was removed.

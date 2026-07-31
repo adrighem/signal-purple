@@ -144,3 +144,14 @@
 - Abort and join the receive driver with contact sync and attachment work at
   every active-generation shutdown boundary. Keep startup failures integrated
   with the existing bounded connection-recovery policy.
+
+## 2026-07-31 - Bind plugin-internal helpers locally
+
+- Keep the headless probe's focused helper coverage, but prevent its
+  export-dynamic executable symbols from preempting the same implementations in
+  the loaded plugin module.
+- Link the Debian-targeted module with local function binding and fail the test
+  gate if any buddy-list, contact-sync, or group-sync helper remains in its
+  dynamic relocation table.
+- Bound direct, staged-install, and release-package probe execution so a loader
+  or teardown regression fails promptly instead of consuming an entire CI job.
