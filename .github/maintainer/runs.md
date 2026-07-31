@@ -485,3 +485,24 @@ schema.
   checks, the warning-as-error C build, all five C/Purple tests, and the staged
   install/plugin-load probe. Live receipt of a newly flagged Signal GIF remains
   pending.
+
+## 2026-07-31 - Startup contact-sync pool timeout
+
+- A live restart reported that the explicit contact-sync request timed out
+  waiting for Presage's SQLite pool. The pinned store intentionally permits one
+  connection, while the receive stream performs registration and pre-key work
+  before its first `QueueEmpty`; starting contact sync at stream creation let
+  those phases overlap on the sole connection.
+- Contact sync now waits behind an explicit gate until the first drained-queue
+  path has completed its local projections and declared the account ready. Its
+  existing bounded retries and shutdown abort remain unchanged, and the pool is
+  not widened.
+- Added a regression test proving the gated operation is not polled early.
+  Documented Purple's curated `signal-purple` debug surface and the deliberate
+  exclusion of raw Presage tracing, which can contain private metadata.
+- Matched Rust 1.95 formatting and warning-as-error Clippy, all 94 Rust tests,
+  release-helper checks, the warning-as-error C build, all five C/Purple tests,
+  and the staged install/plugin-load probe pass. One initial full run reported
+  all 94 tests successful and then aborted in glibc allocator teardown; the same
+  binary passed one direct rerun, ten consecutive stress reruns, and the clean
+  full rerun. Live restart validation of the scheduling fix remains pending.

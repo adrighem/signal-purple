@@ -31,20 +31,32 @@ same build. Fully quit every Pidgin process after replacing either library, then
 run Pidgin with `--debug` and look for loader errors. Build against the same
 libpurple family used at runtime.
 
+## Debug logging
+
+Run Pidgin with `--debug` to see signal-purple's Purple debug category. The
+plugin reports curated lifecycle milestones, transient retry status, and
+identifier-free contact/group snapshot counts there. The Rust dependency
+stack's raw tracing output is intentionally not forwarded to Purple because it
+can contain private Signal metadata. Even curated errors can contain dependency
+detail, so never publish an entire Pidgin log; extract and sanitize only the
+relevant `signal-purple` lines.
+
 ## The database key cannot be loaded
 
 The plugin requires a Secret Service provider. Unlock the desktop keyring and
 confirm libsecret applications can store a secret. It intentionally refuses to
 open a plaintext store when the service is unavailable.
 
-## The database is locked
+## The database is locked or the pool times out
 
-Current builds serialize SQLite work within each Signal core. A remaining
-`database is locked` error can mean a rapid reconnect overlapped a prior core's
-database worker, or another Pidgin process or account is using the same
-configured store path. Fully quit every Pidgin process, then start one instance
-with only one account assigned to that store. Do not delete the database, its
-`-wal` file, or its `-shm` file while diagnosing the owner.
+Current builds serialize SQLite work within each Signal core and defer their
+explicit contact-sync request until Presage has drained its startup queue. A
+remaining `database is locked` or `pool timed out while waiting for an open
+connection` error can mean a rapid reconnect overlapped a prior core's database
+worker, or another Pidgin process or account is using the same configured store
+path. Fully quit every Pidgin process, then start one instance with only one
+account assigned to that store. Do not delete the database, its `-wal` file, or
+its `-shm` file while diagnosing the owner.
 
 ## Linking fails or the QR expires
 

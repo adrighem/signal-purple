@@ -120,3 +120,15 @@
   for every unavailable, failed, contended, invalid, or over-budget conversion.
 - Recommend the runtime helpers rather than linking libav, keeping dependency
   ABI churn and media-decoder failures outside the plugin process.
+
+## 2026-07-31 - Gate contact sync behind the startup queue drain
+
+- Preserve Presage's intentional one-connection SQLx pool instead of increasing
+  database concurrency or hiding acquisition timeouts.
+- Keep the explicit contact-sync future unpolled until the receive stream has
+  completed its startup registration work, drained pending messages, and
+  reported `QueueEmpty`. Release the request only after initial projections and
+  readiness have completed, while retaining bounded retry and shutdown aborts.
+- Keep Purple's curated `signal-purple` diagnostics as the supported debug
+  surface. Do not forward raw Presage tracing, which can carry private Signal
+  metadata.

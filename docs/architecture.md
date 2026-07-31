@@ -69,13 +69,15 @@ destruction.
 3. The Rust FFI copies the passphrase directly into a non-debuggable,
    zeroizing owner. The worker consumes that owner while opening SQLCipher and
    wipes it before checking registration or starting the session.
-4. Presage serializes the SQLx pool through one SQLite connection. Startup
-   registration refresh, contact sync, replay, receipts, acknowledgements, and
-   outbox work can still progress concurrently at the actor level, but their
-   database operations do not race each other into `SQLITE_BUSY` within one
-   live pool. This avoids retrying a whole Signal send after its remote side
-   effect may already have happened. Rapid reconnect and a separate core or
-   process using the same store remain outside this serialization boundary.
+4. Presage serializes the SQLx pool through one SQLite connection. The backend
+   keeps its explicit contact-sync request gated until the receive stream has
+   completed its startup registration refresh and reported an empty queue.
+   Replay, receipts, acknowledgements, and outbox work can still progress
+   concurrently at the actor level, but their database operations do not race
+   each other into `SQLITE_BUSY` within one live pool. This avoids retrying a
+   whole Signal send after its remote side effect may already have happened.
+   Rapid reconnect and a separate core or process using the same store remain
+   outside this serialization boundary.
 5. An existing linked device loads immediately. A fresh store starts Presage's
    secondary-device provisioning and emits a QR PNG.
 6. The backend starts the receive stream and processes queued sync/session data.
@@ -86,8 +88,10 @@ destruction.
    definitive inaccessible/deleted response or decrypted nonmembership permits
    pruning. Network, authentication, decoding, completeness, or database errors
    leave the entire prior set intact rather than applying a partial update.
-8. The core emits the contact snapshot and, after a successful refresh, the
-   authoritative group snapshot before becoming ready. If group refresh fails,
+8. The core emits the stored contact snapshot and, after a successful refresh,
+   the authoritative group snapshot before becoming ready. It then releases the
+   explicit contact-sync request; Presage's synchronized-contact event emits the
+   refreshed snapshot when the primary device responds. If group refresh fails,
    the account still connects for direct messaging, but group operations stay
    unavailable while an in-session retry runs on a bounded interval.
 
@@ -102,11 +106,12 @@ older messages from the primary phone or Signal service.
 - Canonical Signal service identifiers are Purple buddy names. Synced profile
   names are server aliases only. Explicit snapshot boundaries let Purple apply
   contact creates and updates before removing stale managed entries. User-made
-  buddies without the managed marker are never swept. The backend explicitly
-  requests a contact sync after opening the receive stream, then refreshes the
-  projection when Presage reports synchronized contacts. Because Signal does
-  not expose presence, contacts are marked reachable while the linked account
-  is connected so Purple's default offline filter does not hide them.
+  buddies without the managed marker are never swept. After Presage drains the
+  initial receive queue, the backend explicitly requests a contact sync and
+  refreshes the projection when Presage reports synchronized contacts. Because
+  Signal does not expose presence, contacts are marked reachable while the
+  linked account is connected so Purple's default offline filter does not hide
+  them.
 - Group master keys remain private 32-byte values in the encrypted backend
   store. Purple receives a domain-separated SHA-256 identifier for persistence,
   joining, and its internal conversation name. The Signal group title is
