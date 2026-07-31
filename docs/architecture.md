@@ -60,6 +60,13 @@ destruction.
   acknowledgement left after the cleanup budget, leaves the content eligible
   for replay. Cancelling an outbox retry leaves its encrypted row available for
   the next connection.
+- One adapter constructor owns every `SignalConnection` container and helper;
+  one finalizer releases the notifier, Rust core, containers, sync state, and
+  strings. Purple close still marks the owner closing, clears protocol data,
+  disconnects signals, closes request and notification handles, nulls pending
+  callback back-references, and cancels or detaches transfers before invoking
+  that finalizer. The loaded-module probe constructs through the production
+  owner and observes this callback-detachment boundary.
 
 ## Connection sequence
 

@@ -77,3 +77,7 @@
   booleans, replace them with a small tested transition model. Invalid state
   combinations then become unrepresentable and later module boundaries can
   consume named readiness and authority predicates.
+- Make integration probes construct state through the production owner instead
+  of copying its initializer. Keep framework callback detachment as an explicit
+  phase before the shared finalizer, and observe that ordering from a callback
+  which runs during teardown.
