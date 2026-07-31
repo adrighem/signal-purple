@@ -4,6 +4,13 @@ All notable changes will be documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 semantic versioning after the first stable release.
 
+## [0.4.2](https://github.com/adrighem/signal-purple/compare/v0.4.1...v0.4.2) (2026-07-31)
+
+
+### Bug Fixes
+
+* **sync:** keep receive stream independently polled ([f7b2d1e](https://github.com/adrighem/signal-purple/commit/f7b2d1e21d1bdcb82d4fc134952141e05012b29e))
+
 ## [0.4.1](https://github.com/adrighem/signal-purple/compare/v0.4.0...v0.4.1) (2026-07-31)
 
 
