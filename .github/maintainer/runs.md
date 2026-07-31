@@ -506,3 +506,28 @@ schema.
   all 94 tests successful and then aborted in glibc allocator teardown; the same
   binary passed one direct rerun, ten consecutive stress reruns, and the clean
   full rerun. Live restart validation of the scheduling fix remains pending.
+
+## 2026-07-31 - Receive-stream store starvation
+
+- Live validation of v0.4.1 started normally, then reported pool-acquisition
+  timeouts while reading the encrypted outbox and acknowledging displayed
+  messages. No second signal-purple process remained during investigation.
+- The actor polled Presage's long-lived `unfold` receive stream directly in the
+  same `select!` as acknowledgements, commands, and retry timers. If another
+  branch won while the stream retained a pending future that owned the sole
+  SQLite connection, the actor awaited that connection without continuing to
+  poll the future which could release it.
+- The receive stream now runs in an independently scheduled task on the same
+  `LocalSet` and forwards ordered values through a bounded 16-item channel. The
+  actor still owns all projection and command state. Receive, contact-sync, and
+  attachment tasks are aborted and joined together at active-generation
+  shutdown boundaries.
+- A regression test models the receive future retaining an exclusive store
+  slot while the actor waits and proves the independent forwarder releases it.
+  Matched Rust 1.95 formatting and warning-as-error Clippy, all 95 Rust tests,
+  release-helper checks, the warning-as-error C build, all five C/Purple tests,
+  and the staged install/plugin-load probe pass.
+- An initial unlocked focused Cargo invocation normalized away the
+  release-please marker comment in `Cargo.lock`; the tracked marker was restored
+  with no dependency change, and the clean locked full gate passed. Live
+  restart validation of the receive-driver fix remains pending.

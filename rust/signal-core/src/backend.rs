@@ -59,6 +59,7 @@ const SIGNAL_GIF_FFMPEG: &str = "/usr/bin/ffmpeg";
 const SIGNAL_GIF_PRLIMIT: &str = "/usr/bin/prlimit";
 const GROUP_SYNC_RETRY_SECS: u64 = 30;
 const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
+const RECEIVE_EVENT_QUEUE_CAPACITY: usize = 16;
 const RECENT_PROJECTION_IDENTITY_LIMIT: usize = 4096;
 const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const SNAPSHOT_YIELD_INTERVAL: usize = 64;
@@ -218,6 +219,16 @@ struct ProjectionIdentities {
 #[derive(Default)]
 struct RecoveryBackoff {
     next_delay: usize,
+}
+
+struct ReceiveStartError {
+    message: String,
+    transient: bool,
+}
+
+struct ActiveReceiveTasks {
+    receive: tokio::task::JoinHandle<()>,
+    contact_sync: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1011,51 +1022,47 @@ async fn receive_and_command_loop(
             }
         }
 
-        let messages = {
-            let mut receive_manager = manager.clone();
-            let mut receive = Box::pin(receive_manager.receive_messages());
-            loop {
-                tokio::select! {
-                    result = &mut receive => break result,
-                    command = commands.recv(), if recovering => {
-                        let Some(command) = command else {
-                            stop_attachments_and_drain_acknowledgments(
-                                &manager,
-                                &sink,
-                                &mut attachment_tasks,
-                                &mut attachment_aborts,
-                                &acknowledgments,
-                                &mut projection,
-                            ).await;
-                            return Ok(());
-                        };
-                        handle_recovery_command(command, &mut deferred_commands);
-                    }
-                    _ = acknowledgments.wait() => {
-                        await_recovery_phase_or_stop!(process_acknowledgments(
+        // Keep Presage's stream scheduled independently. Its retained unfold
+        // future can own the sole SQLite connection while pending, so parking
+        // it while the actor awaits other store work would self-starve.
+        let (receive_started, mut messages, mut receive_task) =
+            spawn_receive_driver(manager.clone());
+        let mut receive_started = Box::pin(receive_started);
+
+        macro_rules! await_receive_start_phase_or_stop {
+            ($phase:expr) => {
+                match await_or_shutdown($phase, &mut shutdown).await {
+                    Some(output) => output,
+                    None => {
+                        stop_receive_driver(&mut receive_task).await;
+                        stop_attachments_and_drain_acknowledgments(
                             &manager,
-                            &acknowledgments,
                             &sink,
+                            &mut attachment_tasks,
+                            &mut attachment_aborts,
+                            &acknowledgments,
                             &mut projection,
-                            true,
-                        ));
+                        )
+                        .await;
+                        return Ok(());
                     }
-                    _ = acknowledgment_retry_tick.tick() => {
-                        acknowledgments.activate_retries();
-                    }
-                    completed = attachment_tasks.join_next(),
-                        if recovering && !attachment_tasks.is_empty() =>
-                    {
-                        if let Some(completed) = completed {
-                            await_recovery_phase_or_stop!(handle_attachment_completion(
-                                &manager,
-                                &sink,
-                                &mut attachment_aborts,
-                                completed,
-                            ));
-                        }
-                    }
-                    _ = wait_for_shutdown(&mut shutdown) => {
+                }
+            };
+        }
+
+        let receive_started = loop {
+            tokio::select! {
+                result = &mut receive_started => {
+                    break result.unwrap_or_else(|_| {
+                        Err(ReceiveStartError {
+                            message: "Signal message reception stopped during startup".to_owned(),
+                            transient: true,
+                        })
+                    });
+                }
+                command = commands.recv(), if recovering => {
+                    let Some(command) = command else {
+                        stop_receive_driver(&mut receive_task).await;
                         stop_attachments_and_drain_acknowledgments(
                             &manager,
                             &sink,
@@ -1065,22 +1072,35 @@ async fn receive_and_command_loop(
                             &mut projection,
                         ).await;
                         return Ok(());
-                    },
+                    };
+                    handle_recovery_command(command, &mut deferred_commands);
                 }
-            }
-        };
-        let messages = match messages {
-            Ok(messages) => messages,
-            Err(error) => {
-                let transient = receive_error_is_transient(&error);
-                let error = format!("Could not start Signal message reception: {error}");
-                ready.store(false, Ordering::Release);
-                if !transient {
-                    fail_deferred_commands(
+                _ = acknowledgments.wait() => {
+                    await_receive_start_phase_or_stop!(process_acknowledgments(
+                        &manager,
+                        &acknowledgments,
                         &sink,
-                        &mut deferred_commands,
-                        "Signal connection recovery stopped before the request could be sent",
-                    );
+                        &mut projection,
+                        true,
+                    ));
+                }
+                _ = acknowledgment_retry_tick.tick() => {
+                    acknowledgments.activate_retries();
+                }
+                completed = attachment_tasks.join_next(),
+                    if recovering && !attachment_tasks.is_empty() =>
+                {
+                    if let Some(completed) = completed {
+                        await_receive_start_phase_or_stop!(handle_attachment_completion(
+                            &manager,
+                            &sink,
+                            &mut attachment_aborts,
+                            completed,
+                        ));
+                    }
+                }
+                _ = wait_for_shutdown(&mut shutdown) => {
+                    stop_receive_driver(&mut receive_task).await;
                     stop_attachments_and_drain_acknowledgments(
                         &manager,
                         &sink,
@@ -1088,40 +1108,63 @@ async fn receive_and_command_loop(
                         &mut attachment_aborts,
                         &acknowledgments,
                         &mut projection,
-                    )
-                    .await;
-                    return Err(error);
-                }
-                if !recovering {
-                    sink.emit(Event {
-                        kind: EVENT_RECOVERING,
-                        ..Event::default()
-                    });
-                }
-                let status = if recovery_backoff.has_remaining() {
-                    "retrying automatically"
-                } else {
-                    "automatic retries exhausted"
-                };
-                sink.emit(Event::transient_error(format!("{error}; {status}")));
-                last_recovery_error = Some(error);
-                recovering = true;
-                continue;
+                    ).await;
+                    return Ok(());
+                },
             }
         };
-        pin_mut!(messages);
+        if let Err(ReceiveStartError { message, transient }) = receive_started {
+            stop_receive_driver(&mut receive_task).await;
+            let error = message;
+            ready.store(false, Ordering::Release);
+            if !transient {
+                fail_deferred_commands(
+                    &sink,
+                    &mut deferred_commands,
+                    "Signal connection recovery stopped before the request could be sent",
+                );
+                stop_attachments_and_drain_acknowledgments(
+                    &manager,
+                    &sink,
+                    &mut attachment_tasks,
+                    &mut attachment_aborts,
+                    &acknowledgments,
+                    &mut projection,
+                )
+                .await;
+                return Err(error);
+            }
+            if !recovering {
+                sink.emit(Event {
+                    kind: EVENT_RECOVERING,
+                    ..Event::default()
+                });
+            }
+            let status = if recovery_backoff.has_remaining() {
+                "retrying automatically"
+            } else {
+                "automatic retries exhausted"
+            };
+            sink.emit(Event::transient_error(format!("{error}; {status}")));
+            last_recovery_error = Some(error);
+            recovering = true;
+            continue;
+        }
 
-        // Presage's receive startup and this send share one serialized SQLite
-        // connection. Keep the contact request completely unpolled until the
-        // first QueueEmpty path has finished its startup store work.
+        // Keep the contact request completely unpolled until the first
+        // QueueEmpty path has finished its startup store work.
         let (contact_sync_start, contact_sync_wait) = oneshot::channel();
         let mut contact_sync_start = Some(contact_sync_start);
-        let mut contact_sync = tokio::task::spawn_local(request_contacts_after_queue_drain(
+        let contact_sync = tokio::task::spawn_local(request_contacts_after_queue_drain(
             contact_sync_wait,
             manager.clone(),
             shutdown.clone(),
             sink.clone(),
         ));
+        let mut receive_tasks = ActiveReceiveTasks {
+            receive: receive_task,
+            contact_sync,
+        };
         let mut synchronized = false;
         let mut groups_dirty = false;
         let mut groups_authoritative = false;
@@ -1132,7 +1175,7 @@ async fn receive_and_command_loop(
                     Some(output) => output,
                     None => {
                         stop_active_receive_loop(
-                            &mut contact_sync,
+                            &mut receive_tasks,
                             &manager,
                             &sink,
                             &mut attachment_tasks,
@@ -1158,7 +1201,7 @@ async fn receive_and_command_loop(
                         true,
                     ));
                 }
-                received = messages.next() => {
+                received = messages.recv() => {
                     match received {
                         Some(Received::QueueEmpty) => {
                             if !synchronized {
@@ -1252,7 +1295,7 @@ async fn receive_and_command_loop(
                 } => {
                     let Some(command) = command else {
                         stop_active_receive_loop(
-                            &mut contact_sync,
+                            &mut receive_tasks,
                             &manager,
                             &sink,
                             &mut attachment_tasks,
@@ -1332,7 +1375,7 @@ async fn receive_and_command_loop(
                                 &timestamps,
                             ).await {
                                 stop_active_receive_loop(
-                                    &mut contact_sync,
+                                    &mut receive_tasks,
                                     &manager,
                                     &sink,
                                     &mut attachment_tasks,
@@ -1396,7 +1439,7 @@ async fn receive_and_command_loop(
                 }
                 _ = wait_for_shutdown(&mut shutdown) => {
                     stop_active_receive_loop(
-                        &mut contact_sync,
+                        &mut receive_tasks,
                         &manager,
                         &sink,
                         &mut attachment_tasks,
@@ -1418,7 +1461,7 @@ async fn receive_and_command_loop(
         }
         recovering = true;
         stop_receive_tasks(
-            &mut contact_sync,
+            &mut receive_tasks,
             &manager,
             &sink,
             &mut attachment_tasks,
@@ -1432,6 +1475,52 @@ async fn receive_and_command_loop(
             "{error}; reconnecting automatically"
         )));
     }
+}
+
+fn spawn_receive_driver(
+    mut manager: Manager<SqliteStore, Registered>,
+) -> (
+    oneshot::Receiver<Result<(), ReceiveStartError>>,
+    tokio_mpsc::Receiver<Received>,
+    tokio::task::JoinHandle<()>,
+) {
+    let (started_tx, started_rx) = oneshot::channel();
+    let (messages_tx, messages_rx) = tokio_mpsc::channel(RECEIVE_EVENT_QUEUE_CAPACITY);
+    let task = tokio::task::spawn_local(async move {
+        let messages = match manager.receive_messages().await {
+            Ok(messages) => messages,
+            Err(error) => {
+                let transient = receive_error_is_transient(&error);
+                let _ = started_tx.send(Err(ReceiveStartError {
+                    message: format!("Could not start Signal message reception: {error}"),
+                    transient,
+                }));
+                return;
+            }
+        };
+        if started_tx.send(Ok(())).is_err() {
+            return;
+        }
+        forward_stream_to_channel(messages, messages_tx).await;
+    });
+    (started_rx, messages_rx, task)
+}
+
+async fn forward_stream_to_channel<S, T>(stream: S, sender: tokio_mpsc::Sender<T>)
+where
+    S: futures::Stream<Item = T>,
+{
+    pin_mut!(stream);
+    while let Some(item) = stream.next().await {
+        if sender.send(item).await.is_err() {
+            return;
+        }
+    }
+}
+
+async fn stop_receive_driver(task: &mut tokio::task::JoinHandle<()>) {
+    task.abort();
+    let _ = task.await;
 }
 
 async fn run_after_start_signal<F>(start: oneshot::Receiver<()>, operation: F)
@@ -2382,7 +2471,7 @@ async fn stop_attachments_and_drain_acknowledgments(
 }
 
 async fn stop_receive_tasks<F>(
-    contact_sync: &mut tokio::task::JoinHandle<()>,
+    tasks: &mut ActiveReceiveTasks,
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
     attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
@@ -2391,9 +2480,11 @@ async fn stop_receive_tasks<F>(
 ) where
     F: Future<Output = ()>,
 {
-    contact_sync.abort();
+    tasks.receive.abort();
+    tasks.contact_sync.abort();
     let cleanup = async {
-        let _ = contact_sync.await;
+        let _ = (&mut tasks.receive).await;
+        let _ = (&mut tasks.contact_sync).await;
         abort_in_flight_attachments(manager, sink, attachment_tasks, attachment_controls).await;
         final_cleanup.await;
     };
@@ -2403,7 +2494,7 @@ async fn stop_receive_tasks<F>(
 }
 
 async fn stop_active_receive_loop(
-    contact_sync: &mut tokio::task::JoinHandle<()>,
+    tasks: &mut ActiveReceiveTasks,
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
     attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
@@ -2413,7 +2504,7 @@ async fn stop_active_receive_loop(
 ) {
     acknowledgments.close();
     stop_receive_tasks(
-        contact_sync,
+        tasks,
         manager,
         sink,
         attachment_tasks,
@@ -3858,6 +3949,46 @@ mod tests {
                 .expect("contact sync gate did not open");
             assert!(polled.load(Ordering::Acquire));
         });
+    }
+
+    #[test]
+    fn receive_forwarder_keeps_store_owner_scheduled_while_actor_waits() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
+            let store_slot = Arc::new(tokio::sync::Semaphore::new(1));
+            let stream_store_slot = Arc::clone(&store_slot);
+            let (stream_started_tx, stream_started_rx) = oneshot::channel();
+            let (release_stream_tx, release_stream_rx) = oneshot::channel();
+            let stream = futures::stream::once(async move {
+                let permit = stream_store_slot.acquire_owned().await.unwrap();
+                stream_started_tx.send(()).unwrap();
+                release_stream_rx.await.unwrap();
+                drop(permit);
+                42
+            });
+            let (messages_tx, mut messages_rx) = tokio_mpsc::channel(1);
+            let forwarder =
+                tokio::task::spawn_local(forward_stream_to_channel(stream, messages_tx));
+
+            stream_started_rx.await.unwrap();
+            let release = tokio::task::spawn_local(async move {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                release_stream_tx.send(()).unwrap();
+            });
+            let actor_permit = tokio::time::timeout(Duration::from_secs(1), store_slot.acquire())
+                .await
+                .expect("the independently polled receive stream retained the store slot")
+                .unwrap();
+            drop(actor_permit);
+
+            assert_eq!(messages_rx.recv().await, Some(42));
+            release.await.unwrap();
+            forwarder.await.unwrap();
+        }));
     }
 
     #[test]

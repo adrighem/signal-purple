@@ -49,14 +49,15 @@ open a plaintext store when the service is unavailable.
 
 ## The database is locked or the pool times out
 
-Current builds serialize SQLite work within each Signal core and defer their
-explicit contact-sync request until Presage has drained its startup queue. A
-remaining `database is locked` or `pool timed out while waiting for an open
-connection` error can mean a rapid reconnect overlapped a prior core's database
-worker, or another Pidgin process or account is using the same configured store
-path. Fully quit every Pidgin process, then start one instance with only one
-account assigned to that store. Do not delete the database, its `-wal` file, or
-its `-shm` file while diagnosing the owner.
+Current builds serialize SQLite work within each Signal core, drive Presage's
+receive stream independently so it cannot strand the sole pool connection, and
+defer their explicit contact-sync request until Presage has drained its startup
+queue. A remaining `database is locked` or `pool timed out while waiting for an
+open connection` error can mean a rapid reconnect overlapped a prior core's
+database worker, or another Pidgin process or account is using the same
+configured store path. Fully quit every Pidgin process, then start one instance
+with only one account assigned to that store. Do not delete the database, its
+`-wal` file, or its `-shm` file while diagnosing the owner.
 
 ## Linking fails or the QR expires
 

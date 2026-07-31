@@ -69,18 +69,21 @@ destruction.
 3. The Rust FFI copies the passphrase directly into a non-debuggable,
    zeroizing owner. The worker consumes that owner while opening SQLCipher and
    wipes it before checking registration or starting the session.
-4. Presage serializes the SQLx pool through one SQLite connection. The backend
-   keeps its explicit contact-sync request gated until the receive stream has
-   completed its startup registration refresh and reported an empty queue.
-   Replay, receipts, acknowledgements, and outbox work can still progress
-   concurrently at the actor level, but their database operations do not race
-   each other into `SQLITE_BUSY` within one live pool. This avoids retrying a
+4. Presage serializes the SQLx pool through one SQLite connection. A dedicated
+   task on the backend's local runtime continuously drives the receive stream
+   and forwards its ordered output through a bounded channel to the actor. If
+   the actor selects outbox, acknowledgement, or other store work while the
+   receive future owns the connection, that future remains scheduled and can
+   release it. The explicit contact-sync request also stays gated until the
+   receive stream has completed its startup registration refresh and reported
+   an empty queue. This preserves database serialization without retrying a
    whole Signal send after its remote side effect may already have happened.
    Rapid reconnect and a separate core or process using the same store remain
    outside this serialization boundary.
 5. An existing linked device loads immediately. A fresh store starts Presage's
    secondary-device provisioning and emits a QR PNG.
-6. The backend starts the receive stream and processes queued sync/session data.
+6. The backend starts the independently driven receive stream and processes its
+   bounded queue of sync/session data in order.
 7. At the first `QueueEmpty`, the backend reads the account's Storage Service
    manifest, verifies the exact returned record-key set, and refreshes the union
    of manifest-discovered and cached groups from current GroupsV2 state. A group
