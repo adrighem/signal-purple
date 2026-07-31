@@ -17,6 +17,9 @@ typedef struct {
 
 typedef gboolean (*SignalHandleEventFunc)(SignalConnection *connection,
                                           const SignalEvent *event);
+typedef gboolean (*SignalDispatchEventFunc)(SignalConnection *connection,
+                                            const SignalEvent *event,
+                                            gboolean *accepted);
 
 static gboolean
 input_dispatch(GIOChannel *channel, GIOCondition condition, gpointer data)
@@ -1059,12 +1062,12 @@ test_standard_conversation_logging(PurplePlugin *plugin,
         purple_prefs_get_bool("/purple/logging/log_chats");
     union {
         gpointer pointer;
-        SignalHandleEventFunc function;
-    } handle_event = {0};
+        SignalDispatchEventFunc function;
+    } dispatch_event = {0};
 
     g_assert_true(g_module_symbol((GModule *)plugin->handle,
-                                  "signal_handle_event",
-                                  &handle_event.pointer));
+                                  "signal_dispatch_event",
+                                  &dispatch_event.pointer));
 
     for (guint index = 0; index < G_N_ELEMENTS(configured_states); index++) {
         const gboolean configured = configured_states[index];
@@ -1097,6 +1100,17 @@ test_standard_conversation_logging(PurplePlugin *plugin,
             .title = "Logging group",
             .text = "group logging probe",
         };
+        SignalEvent malformed_direct = direct_event;
+        SignalEvent malformed_group = group_event;
+        SignalEvent malformed_attachment = {
+            .abi_version = SIGNAL_CORE_ABI_VERSION,
+            .struct_size = sizeof(SignalEvent),
+            .kind = SIGNAL_EVENT_ATTACHMENT,
+            .request_id = 103,
+            .peer_id = direct_event.peer_id,
+            .data_len = 1,
+        };
+        gboolean accepted = TRUE;
 
         purple_prefs_set_bool("/purple/logging/log_ims", configured);
         purple_prefs_set_bool("/purple/logging/log_chats", configured);
@@ -1104,8 +1118,35 @@ test_standard_conversation_logging(PurplePlugin *plugin,
         connection = new_transfer_connection(&gc);
         connection->group_snapshot_complete = TRUE;
 
-        g_assert_true(handle_event.function(connection, &direct_event));
-        g_assert_true(handle_event.function(connection, &group_event));
+        malformed_direct.request_id = 101;
+        malformed_direct.peer_id = "";
+        g_assert_true(dispatch_event.function(connection, &malformed_direct,
+                                              &accepted));
+        g_assert_false(accepted);
+        malformed_group.request_id = 102;
+        malformed_group.chat_id = "";
+        accepted = TRUE;
+        g_assert_true(dispatch_event.function(connection, &malformed_group,
+                                              &accepted));
+        g_assert_false(accepted);
+        accepted = TRUE;
+        g_assert_true(dispatch_event.function(
+            connection, &malformed_attachment, &accepted));
+        g_assert_false(accepted);
+        g_assert_null(purple_find_conversation_with_account(
+            PURPLE_CONV_TYPE_IM, direct_event.peer_id, account));
+        g_assert_null(signal_group_sync_lookup_conversation(
+            account, group_event.chat_id));
+        g_assert_false(g_hash_table_contains(connection->active_group_keys,
+                                             group_event.chat_id));
+
+        g_assert_true(dispatch_event.function(connection, &direct_event,
+                                              &accepted));
+        g_assert_true(accepted);
+        accepted = FALSE;
+        g_assert_true(dispatch_event.function(connection, &group_event,
+                                              &accepted));
+        g_assert_true(accepted);
         direct = purple_find_conversation_with_account(
             PURPLE_CONV_TYPE_IM, direct_event.peer_id, account);
         group = signal_group_sync_lookup_conversation(account,
@@ -1119,8 +1160,13 @@ test_standard_conversation_logging(PurplePlugin *plugin,
 
         purple_conversation_set_logging(direct, !configured);
         purple_conversation_set_logging(group, !configured);
-        g_assert_true(handle_event.function(connection, &direct_event));
-        g_assert_true(handle_event.function(connection, &group_event));
+        g_assert_true(dispatch_event.function(connection, &direct_event,
+                                              &accepted));
+        g_assert_true(accepted);
+        accepted = FALSE;
+        g_assert_true(dispatch_event.function(connection, &group_event,
+                                              &accepted));
+        g_assert_true(accepted);
         g_assert_cmpint(purple_conversation_is_logging(direct), ==,
                         !configured);
         g_assert_cmpint(purple_conversation_is_logging(group), ==,

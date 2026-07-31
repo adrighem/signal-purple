@@ -560,3 +560,26 @@ schema.
   debug backend. Three confirmed unused signal-purple build/review directories
   from this maintenance work were removed, reclaiming 2.6 GiB; the unchanged
   probe then passed. No repository or live Pidgin state was removed.
+
+## 2026-07-31 - Projection acceptance controls acknowledgement
+
+- The C event dispatcher previously returned only whether its GLib source
+  should continue. The poller treated that result as proof that every direct,
+  group, or attachment projection was accepted, so a handler which rejected
+  malformed required fields could still release the durable encrypted message.
+- Dispatch now reports projection acceptance separately. Missing or empty
+  routing identifiers, absent message text, inconsistent attachment routing,
+  and absent attachment bytes keep the event source alive but leave the
+  projection unacknowledged for replay. Explicit size, resource, and
+  presentation-policy rejections remain terminal after user notification.
+- The loaded-module probe exercises malformed direct, group, and attachment
+  events plus valid direct and group controls. Matched Rust 1.95 formatting and
+  warning-as-error Clippy, all 95 Rust tests, release-helper checks, the
+  warning-as-error C build, all six C/Purple tests, and the staged
+  install/plugin-load probe pass.
+- A C-only GCC AddressSanitizer/UndefinedBehaviorSanitizer build also passed all
+  six tests with LeakSanitizer disabled for libpurple's process-global
+  registries. Clang's sanitizer runtime was not installed; an initial GCC run
+  exported sanitizer `CFLAGS` into Cargo and was discarded after restoring the
+  normal Rust target. Passing sanitizer flags through CMake kept the final run
+  scoped to C as intended.

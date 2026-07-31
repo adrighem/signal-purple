@@ -70,3 +70,6 @@
   executable can silently interpose those helpers over the loaded module's own
   copies. Bind internal module calls locally and inspect dynamic relocations so
   the test proves which implementation it exercises.
+- A handler's event-loop continuation result is not evidence that a payload was
+  accepted. Track projection acceptance separately so malformed durable input
+  can remain replayable without tearing down an otherwise healthy event source.

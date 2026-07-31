@@ -101,10 +101,12 @@ user-facing local storage, not diagnostic output.
   or rejected; the plugin creates no plaintext attachment cache. Remote
   filenames are reduced to a basename before Purple uses them.
 - Message projection state is stored in the same SQLCipher database. Purple
-  acknowledges a message event only after its synchronous conversation write;
-  those acknowledgements use a coalescing inbox bounded by pending projection
-  IDs, retry local store failures, and drain on orderly shutdown. Unacknowledged
-  content is replayed after the next receive queue drain.
+  acknowledges a message event only after the adapter validates its required
+  routing and payload fields and accepts its synchronous presentation or
+  terminal policy rejection. Malformed or interrupted content remains
+  unacknowledged and is replayed after the next receive queue drain. Accepted
+  acknowledgements use a coalescing inbox bounded by pending projection IDs,
+  retry local store failures, and drain on orderly shutdown.
 - Read receipts are emitted only after Purple reports focus. Pending receipt
   metadata is held in process memory and is not written to Purple's plaintext
   configuration.

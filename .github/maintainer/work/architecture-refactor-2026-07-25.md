@@ -38,8 +38,9 @@ from the extraction above:
   actor before splitting contact, group, projection, and outbox modules.
 - Centralize `SignalConnection` construction and teardown while preserving
   Purple callback-detachment order.
-- Prevent malformed direct or group events from being projection-acknowledged
-  unless the adapter accepted them.
+- ~~Prevent malformed direct, group, or attachment events from being
+  projection-acknowledged unless the adapter accepted them.~~ Completed by
+  separating projection acceptance from the event source's keep-running result.
 - Add compiled C/Rust ABI constant, layout, and public-limit conformance tests.
 - Split installation lifecycle guidance from maintainer release automation and
   add a pinned C formatting gate.
