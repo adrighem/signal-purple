@@ -187,3 +187,12 @@
 - Keep Purple detachment visibly ahead of finalization: mark closing, clear
   protocol data, disconnect signals and request handles, null callback
   back-references, and detach transfers before releasing owned resources.
+
+## 2026-07-31 - Verify the compiled C/Rust contract
+
+- Keep `signal_core.h` as the single declaration of public FFI input limits.
+- Export one side-effect-free diagnostic query from the production Rust library
+  for constants, fixed-width status values, public struct layouts, and limits.
+- Link the existing C utility test to the real Rust library and compare its
+  independently compiled values. Separate language-local assertions remain
+  useful for readable stability failures but do not prove conformance.

@@ -140,7 +140,7 @@ signal_outgoing_attachment_init(PurpleXfer *xfer)
         return;
     }
     contents = signal_read_bounded_file(
-        purple_xfer_get_local_filename(xfer), SIGNAL_MAX_ATTACHMENT_BYTES,
+        purple_xfer_get_local_filename(xfer), SIGNAL_CORE_MAX_ATTACHMENT_BYTES,
         &error);
     if (contents == NULL) {
         const char *message = error->message;
@@ -316,7 +316,7 @@ signal_deliver_attachment(SignalConnection *connection,
         conversation = signal_open_group(connection, event->chat_id, NULL);
     }
 
-    if (event->data_len > SIGNAL_MAX_ATTACHMENT_BYTES) {
+    if (event->data_len > SIGNAL_CORE_MAX_ATTACHMENT_BYTES) {
         purple_notify_error(
             connection, "Signal attachment rejected",
             "The Signal attachment exceeds the 25 MiB size limit",
@@ -1857,7 +1857,7 @@ signal_send_im(PurpleConnection *gc, const char *who, const char *message,
     plain = signal_plaintext_from_markup(message);
     if (plain == NULL)
         return -EINVAL;
-    if (strlen(plain) > SIGNAL_MAX_MESSAGE_BYTES)
+    if (strlen(plain) > SIGNAL_CORE_MAX_MESSAGE_BYTES)
         return -E2BIG;
 
     account = purple_connection_get_account(gc);
@@ -2049,7 +2049,7 @@ signal_chat_send(PurpleConnection *gc, int id, const char *message,
     plain = signal_plaintext_from_markup(message);
     if (plain == NULL)
         return -EINVAL;
-    if (strlen(plain) > SIGNAL_MAX_MESSAGE_BYTES)
+    if (strlen(plain) > SIGNAL_CORE_MAX_MESSAGE_BYTES)
         return -E2BIG;
 
     send_group_message = connection->send_group_message;

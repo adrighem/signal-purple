@@ -45,7 +45,10 @@ from the extraction above:
 - ~~Prevent malformed direct, group, or attachment events from being
   projection-acknowledged unless the adapter accepted them.~~ Completed by
   separating projection acceptance from the event source's keep-running result.
-- Add compiled C/Rust ABI constant, layout, and public-limit conformance tests.
+- ~~Add compiled C/Rust ABI constant, layout, and public-limit conformance
+  tests.~~ Completed with a linked C test which queries the production Rust
+  library for all contract values, both public struct layouts, and every
+  declared FFI input limit.
 - Split installation lifecycle guidance from maintainer release automation and
   add a pinned C formatting gate.
 

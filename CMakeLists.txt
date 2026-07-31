@@ -161,7 +161,7 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/include"
         "${CMAKE_CURRENT_SOURCE_DIR}/src")
     target_link_libraries(test-util PRIVATE
-        PkgConfig::PURPLE PkgConfig::GLIB PkgConfig::LIBSECRET)
+        PkgConfig::PURPLE PkgConfig::GLIB PkgConfig::LIBSECRET signal-core)
     add_test(NAME util COMMAND test-util)
 
     add_executable(test-contact-sync

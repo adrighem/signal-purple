@@ -625,3 +625,21 @@ schema.
   and the staged install/plugin-load probe pass locally. A C-only GCC
   AddressSanitizer/UndefinedBehaviorSanitizer run also passed all six tests with
   LeakSanitizer disabled for libpurple's process-global registries.
+- PR #41 merged as `1e8256b`; its post-merge CI, Debian 13 installation job,
+  CodeQL aggregate, and Release Please run passed. The refactor correctly
+  produced no release, and its isolated build artifacts were removed.
+
+## 2026-07-31 - Compiled ABI conformance
+
+- The existing C-only and Rust-only ABI assertions locked readable values but
+  could not detect disagreement between the two independently maintained
+  declarations.
+- The public header now declares all FFI input bounds and an indexed diagnostic
+  contract. The production Rust library reports 64 compiled values covering
+  ABI version, statuses, events, flags, both public struct sizes, alignments and
+  field offsets, and nine input limits.
+- The existing C utility test links the real backend and compares every value
+  against its independently compiled header representation, including the
+  out-of-range sentinel. Matched Rust 1.95 formatting and warning-as-error
+  Clippy, all 96 Rust tests, release-helper checks, the warning-as-error C build,
+  all six C/Purple tests, and the staged install/plugin-load probe pass locally.
