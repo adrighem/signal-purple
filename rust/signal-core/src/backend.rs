@@ -18,8 +18,8 @@ use presage::model::groups::Group;
 use presage::model::identity::OnNewIdentity;
 use presage::model::messages::Received;
 use presage::proto::{
-    AttachmentPointer, EditMessage, ReceiptMessage, SyncMessage, TypingMessage, receipt_message,
-    typing_message,
+    AttachmentPointer, EditMessage, ReceiptMessage, SyncMessage, TypingMessage, attachment_pointer,
+    receipt_message, typing_message,
 };
 use presage::store::{ContentsStore, StateStore, Thread};
 use presage::{Manager, manager::Registered};
@@ -2780,6 +2780,9 @@ fn inline_group_image_matches(content_type: Option<&str>, data: &[u8]) -> bool {
         Some(content_type) if content_type.eq_ignore_ascii_case("image/png") => {
             data.starts_with(b"\x89PNG\r\n\x1a\n")
         }
+        Some(content_type) if content_type.eq_ignore_ascii_case("image/gif") => {
+            data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a")
+        }
         _ => false,
     }
 }
@@ -2840,6 +2843,36 @@ fn projected_data_message_text<'a>(
         text.push_str(&format!("[Attachment: {}]", name.unwrap_or("attachment")));
     }
     (!text.is_empty()).then_some(text)
+}
+
+fn attachment_display_name(attachment: &AttachmentPointer) -> &str {
+    if let Some(file_name) = attachment
+        .file_name
+        .as_deref()
+        .filter(|file_name| !file_name.is_empty())
+    {
+        return file_name;
+    }
+
+    let content_type = attachment.content_type.as_deref();
+    let is_gif = attachment.flags.unwrap_or_default() & attachment_pointer::Flags::Gif as u32 != 0;
+    if is_gif {
+        if content_type.is_some_and(|value| value.eq_ignore_ascii_case("image/gif")) {
+            return "signal-animation.gif";
+        }
+        if content_type.is_some_and(|value| value.eq_ignore_ascii_case("video/mp4")) {
+            return "signal-animation.mp4";
+        }
+        return "signal-animation";
+    }
+
+    match content_type {
+        Some(value) if value.eq_ignore_ascii_case("image/jpeg") => "signal-image.jpg",
+        Some(value) if value.eq_ignore_ascii_case("image/png") => "signal-image.png",
+        Some(value) if value.eq_ignore_ascii_case("image/gif") => "signal-animation.gif",
+        Some(value) if value.eq_ignore_ascii_case("video/mp4") => "signal-video.mp4",
+        _ => "signal-attachment",
+    }
 }
 
 async fn emit_data_message(
@@ -2954,7 +2987,7 @@ async fn emit_data_message(
             .enumerate()
             .map(|(attachment_index, attachment)| {
                 (
-                    attachment.file_name.as_deref(),
+                    Some(attachment_display_name(attachment)),
                     inline_attachment_indexes.contains(&attachment_index),
                 )
             }),
@@ -3006,10 +3039,7 @@ async fn emit_data_message(
             },
             peer_id: Some(peer.to_owned()),
             chat_id: group_key.map(|key| group_identifier(&key)),
-            title: attachment
-                .file_name
-                .clone()
-                .or_else(|| Some("Signal attachment".into())),
+            title: Some(attachment_display_name(attachment).to_owned()),
             text: attachment.content_type.clone(),
             data,
             timestamp_ms: timestamp,
@@ -3896,19 +3926,23 @@ mod tests {
     }
 
     #[test]
-    fn recognizes_only_declared_jpeg_and_png_payloads_for_inline_display() {
+    fn recognizes_only_declared_image_payloads_for_inline_display() {
         let jpeg = [0xff, 0xd8, 0xff, 0xe0];
         let png = b"\x89PNG\r\n\x1a\nrest";
+        let gif87a = b"GIF87arest";
+        let gif89a = b"GIF89arest";
 
         assert!(inline_group_image_matches(Some("image/jpeg"), &jpeg));
         assert!(inline_group_image_matches(Some("IMAGE/JPEG"), &jpeg));
         assert!(inline_group_image_matches(Some("image/png"), png));
         assert!(inline_group_image_matches(Some("IMAGE/PNG"), png));
+        assert!(inline_group_image_matches(Some("image/gif"), gif87a));
+        assert!(inline_group_image_matches(Some("IMAGE/GIF"), gif89a));
 
         assert!(!inline_group_image_matches(Some("image/png"), &jpeg));
         assert!(!inline_group_image_matches(Some("image/jpeg"), png));
         assert!(!inline_group_image_matches(Some("image/png"), b"\x89PNG"));
-        assert!(!inline_group_image_matches(Some("image/gif"), b"GIF89a"));
+        assert!(!inline_group_image_matches(Some("image/gif"), b"GIF89"));
         assert!(!inline_group_image_matches(
             Some("image/jpeg; charset=binary"),
             &jpeg
@@ -3969,6 +4003,33 @@ mod tests {
         assert_eq!(
             projected_data_message_text(String::new(), [(Some("inline.png"), true), (None, false)]),
             Some("[Attachment: attachment]".to_owned())
+        );
+    }
+
+    #[test]
+    fn supplies_useful_names_for_unnamed_media_attachments() {
+        let video = AttachmentPointer {
+            content_type: Some("video/mp4".into()),
+            ..AttachmentPointer::default()
+        };
+        let animation = AttachmentPointer {
+            content_type: Some("video/mp4".into()),
+            flags: Some(attachment_pointer::Flags::Gif as u32),
+            ..AttachmentPointer::default()
+        };
+        let named = AttachmentPointer {
+            file_name: Some("shared clip".into()),
+            content_type: Some("video/mp4".into()),
+            flags: Some(attachment_pointer::Flags::Gif as u32),
+            ..AttachmentPointer::default()
+        };
+
+        assert_eq!(attachment_display_name(&video), "signal-video.mp4");
+        assert_eq!(attachment_display_name(&animation), "signal-animation.mp4");
+        assert_eq!(attachment_display_name(&named), "shared clip");
+        assert_eq!(
+            attachment_display_name(&AttachmentPointer::default()),
+            "signal-attachment"
         );
     }
 

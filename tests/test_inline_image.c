@@ -133,6 +133,50 @@ encoded_image(const char *format, int width, int height, gsize *size)
 }
 
 static void
+append_gif_u16(GByteArray *bytes, guint16 value)
+{
+    guint8 encoded[] = {(guint8)(value & 0xffu),
+                        (guint8)((value >> 8) & 0xffu)};
+
+    g_byte_array_append(bytes, encoded, sizeof(encoded));
+}
+
+static GBytes *
+encoded_gif(guint16 width, guint16 height, guint frames)
+{
+    static const guint8 header[] = {'G', 'I', 'F', '8', '9', 'a'};
+    static const guint8 screen_tail[] = {0x80, 0x00, 0x00};
+    static const guint8 colors[] = {0x00, 0x00, 0x00,
+                                    0xff, 0xff, 0xff};
+    static const guint8 image_data[] = {0x02, 0x02, 0x44, 0x01, 0x00};
+    GByteArray *bytes = g_byte_array_new();
+
+    g_byte_array_append(bytes, header, sizeof(header));
+    append_gif_u16(bytes, width);
+    append_gif_u16(bytes, height);
+    g_byte_array_append(bytes, screen_tail, sizeof(screen_tail));
+    g_byte_array_append(bytes, colors, sizeof(colors));
+    for (guint frame = 0; frame < frames; frame++) {
+        const guint8 image_separator = 0x2c;
+        const guint8 image_packed = 0x00;
+
+        g_byte_array_append(bytes, &image_separator, 1);
+        append_gif_u16(bytes, 0);
+        append_gif_u16(bytes, 0);
+        append_gif_u16(bytes, width);
+        append_gif_u16(bytes, height);
+        g_byte_array_append(bytes, &image_packed, 1);
+        g_byte_array_append(bytes, image_data, sizeof(image_data));
+    }
+    {
+        const guint8 trailer = 0x3b;
+
+        g_byte_array_append(bytes, &trailer, 1);
+    }
+    return g_byte_array_free_to_bytes(bytes);
+}
+
+static void
 capture_image(PurpleConnection *gc, int chat_id, const char *sender,
               PurpleMessageFlags flags, const char *message,
               time_t timestamp)
@@ -187,17 +231,28 @@ test_supported_formats(void)
     static const guint8 corrupt_jpeg[] = {0xff, 0xd8, 0xff, 0xe0};
     static const guint8 corrupt_png[] = {0x89, 0x50, 0x4e, 0x47, 0x0d,
                                          0x0a, 0x1a, 0x0a, 0x00};
-    static const guint8 gif[] = {'G', 'I', 'F', '8', '9', 'a'};
+    static const guint8 corrupt_gif[] = {'G', 'I', 'F', '8', '9', 'a'};
     g_autofree guint8 *jpeg = NULL;
     g_autofree guint8 *png = NULL;
     g_autofree guint8 *oversized_png = NULL;
+    g_autoptr(GBytes) gif = NULL;
+    g_autoptr(GBytes) excessive_gif = NULL;
+    gconstpointer gif_data;
+    gconstpointer excessive_gif_data;
     gsize jpeg_size = 0;
     gsize png_size = 0;
     gsize oversized_png_size = 0;
+    gsize gif_size = 0;
+    gsize excessive_gif_size = 0;
 
     jpeg = encoded_image("jpeg", 2, 2, &jpeg_size);
     png = encoded_image("png", 2, 2, &png_size);
     oversized_png = encoded_image("png", 8193, 1, &oversized_png_size);
+    gif = encoded_gif(1, 1, 2);
+    excessive_gif = encoded_gif(1000, 1000, 9);
+    gif_data = g_bytes_get_data(gif, &gif_size);
+    excessive_gif_data =
+        g_bytes_get_data(excessive_gif, &excessive_gif_size);
 
     g_assert_true(
         signal_inline_image_is_supported("image/jpeg", jpeg, jpeg_size));
@@ -213,8 +268,16 @@ test_supported_formats(void)
         "image/jpeg", corrupt_jpeg, sizeof(corrupt_jpeg)));
     g_assert_false(signal_inline_image_is_supported(
         "image/png", corrupt_png, sizeof(corrupt_png)));
-    g_assert_false(signal_inline_image_is_supported("image/gif", gif,
-                                                     sizeof(gif)));
+    g_assert_true(
+        signal_inline_image_is_supported("image/gif", gif_data, gif_size));
+    g_assert_true(
+        signal_inline_image_is_supported("IMAGE/GIF", gif_data, gif_size));
+    g_assert_false(signal_inline_image_is_supported(
+        "image/gif", corrupt_gif, sizeof(corrupt_gif)));
+    g_assert_false(signal_inline_image_is_supported(
+        "image/png", gif_data, gif_size));
+    g_assert_false(signal_inline_image_is_supported(
+        "image/gif", excessive_gif_data, excessive_gif_size));
     g_assert_false(
         signal_inline_image_is_supported("text/plain", png, png_size));
     g_assert_false(signal_inline_image_is_supported(NULL, png, png_size));
@@ -283,6 +346,43 @@ test_group_delivery(void)
     reset_received();
 }
 
+static void
+test_group_gif_delivery(void)
+{
+    PurpleConnection connection = {0};
+    PurpleStoredImage *stored;
+    g_autoptr(GBytes) gif = NULL;
+    gconstpointer gif_data;
+    gsize gif_size = 0;
+    const int chat_id = 74;
+    const time_t timestamp = (time_t)1721400001;
+
+    gif = encoded_gif(1, 1, 2);
+    gif_data = g_bytes_get_data(gif, &gif_size);
+    g_assert_true(signal_inline_image_deliver_with_writer(
+        &connection, chat_id, "Peter", "shared-animation.gif", "image/gif",
+        gif_data, gif_size, timestamp, capture_image));
+
+    g_assert_cmpuint(received.calls, ==, 1);
+    g_assert_cmpint(received.chat_id, ==, chat_id);
+    g_assert_cmpstr(received.sender, ==, "Peter");
+    g_assert_cmpint(received.timestamp, ==, timestamp);
+    g_assert_cmpuint(received.flags, ==,
+                     PURPLE_MESSAGE_RECV | PURPLE_MESSAGE_IMAGES);
+
+    stored = purple_imgstore_find_by_id(received.image_id);
+    g_assert_true(stored == received.image);
+    g_assert_cmpuint(purple_imgstore_get_size(stored), ==, gif_size);
+    g_assert_cmpmem(purple_imgstore_get_data(stored),
+                    purple_imgstore_get_size(stored), gif_data, gif_size);
+    g_assert_cmpstr(purple_imgstore_get_filename(stored), ==,
+                    "shared-animation.gif");
+
+    purple_imgstore_unref(g_steal_pointer(&received.image));
+    g_assert_null(purple_imgstore_find_by_id(received.image_id));
+    reset_received();
+}
+
 int
 main(void)
 {
@@ -298,6 +398,7 @@ main(void)
     g_assert_true(purple_core_init("signal-purple-inline-image-tests"));
     test_supported_formats();
     test_group_delivery();
+    test_group_gif_delivery();
     purple_core_quit();
     remove_tree(user_dir);
     return 0;

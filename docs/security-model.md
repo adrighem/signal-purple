@@ -84,11 +84,13 @@ user-facing local storage, not diagnostic output.
   backend events and unresolved receive prompts each have separate 64 MiB
   ceilings; see the
   [attachment policy](attachment-policy.md). Group images are eligible for
-  inline display only when a JPEG or
-  PNG MIME type agrees with its file signature, the complete payload decodes,
-  and its dimensions are no larger than 8192 pixels per edge or 16 megapixels
-  total. Decoder validation is chunked, and rejected dimensions are scaled down
-  before allocation. Other data falls back to a receive prompt. Decrypted
+  inline display only when a JPEG, PNG, or GIF MIME type agrees with its file
+  signature and the complete payload decodes. JPEG and PNG dimensions are no
+  larger than 8192 pixels per edge or 16 megapixels total. GIFs are limited to
+  8 MiB and 8 million cumulative canvas pixel-frames; their block structure is
+  checked before decoder allocation. Decoder validation is chunked, and
+  rejected dimensions are scaled down before allocation. Video and other data
+  fall back to a receive prompt. Decrypted
   incoming bytes remain in memory until the displayed image is released, saved,
   or rejected; the plugin creates no plaintext attachment cache. Remote
   filenames are reduced to a basename before Purple uses them.

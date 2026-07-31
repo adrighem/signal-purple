@@ -201,9 +201,12 @@ not implemented.
 ### Attachments
 
 Valid, within-limit incoming and outgoing files use Purple's transfer UI. An
-incoming group JPEG or PNG renders inline only when its MIME type, signature,
-complete decode, and bounded dimensions agree; other valid attachments fall
-back to a transfer prompt. Empty, over-limit, or resource-exhausting content is
+incoming group JPEG, PNG, or genuine GIF renders inline only when its MIME type,
+signature, complete decode, and bounded dimensions agree. Animated GIFs also
+have compressed-size and cumulative decoded-frame limits. Video, including
+Signal GIFs transported as MP4, falls back to a transfer prompt because Purple
+2 has no inline video representation. Unnamed common media receives a usable
+type-specific filename. Empty, over-limit, or resource-exhausting content is
 rejected visibly. Each file is limited to 25 MiB and one incoming message to
 50 MiB. At most two outgoing files totaling 50 MiB are admitted per account;
 retry after another transfer finishes or is cancelled when that queue is full.

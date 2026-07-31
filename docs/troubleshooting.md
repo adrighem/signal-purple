@@ -160,11 +160,13 @@ active per account; wait for or cancel a transfer before retrying when that
 limit is reached. Outgoing uploads are not kept in the persistent text-message
 outbox, so send the file again after a restart or failed upload.
 
-Incoming group JPEG and PNG images are shown inline when their MIME type and
-file signature agree, the complete image decodes, and it is no larger than 8192
-pixels per edge or 16 megapixels total. Direct images, other image formats,
-ordinary files, invalid or oversized images, and content with mismatched
-metadata still use a receive prompt. If an eligible group JPEG or PNG still
+Incoming group JPEG, PNG, and genuine GIF images are shown inline when their
+MIME type and file signature agree and the complete image passes its
+format-specific resource limits. Signal can transport GIF-style
+animations as MP4 video; Purple 2 cannot render those inline, so they still use
+a receive prompt with an `.mp4` fallback name. Direct images, other image
+formats, ordinary files, invalid or oversized images, and content with
+mismatched metadata also use a receive prompt. If an eligible group image still
 opens as a direct transfer after upgrading, fully quit and restart Pidgin. The
 Linux Rust backend is deliberately process-resident for safe dependency-thread
 shutdown, so only process exit guarantees that an older backend mapping is

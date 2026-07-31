@@ -133,12 +133,14 @@ older messages from the primary phone or Signal service.
   their original timestamp, while retry deadlines continue to use the wall
   clock directly.
 - Incoming direct and group attachments are downloaded on the backend thread
-  and copied across the owned ABI. An incoming group JPEG or PNG whose declared
-  MIME type matches its file signature, passes decoder validation, and remains
-  within an 8192-pixel edge and 16-megapixel limit is copied into Purple's image
+  and copied across the owned ABI. An incoming group JPEG, PNG, or GIF whose
+  declared MIME type matches its file signature, passes decoder validation, and
+  remains within the format-specific pixel limits is copied into Purple's image
   store and written to the originating chat with the Signal sender and
-  timestamp. If the UI does not retain the image, or validation fails, the
-  attachment falls back to Purple's receive-file flow. Outgoing transfers use
+  timestamp. GIF structure is parsed before decoding to bound frame count by
+  cumulative canvas area. Video, including Signal GIFs transported as MP4, and
+  any image the UI does not retain fall back to Purple's receive-file flow.
+  Outgoing transfers use
   Purple's direct and group send-file callbacks. Each admitted request carries
   cancellation state from queue admission through its backend upload task, so a
   cancellation which overtakes a queued send still prevents the upload.
