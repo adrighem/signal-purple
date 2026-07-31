@@ -4,6 +4,13 @@ All notable changes will be documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 semantic versioning after the first stable release.
 
+## [0.4.4](https://github.com/adrighem/signal-purple/compare/v0.4.3...v0.4.4) (2026-07-31)
+
+
+### Bug Fixes
+
+* **projection:** retain rejected events for replay ([2de2563](https://github.com/adrighem/signal-purple/commit/2de2563f85e655cabb53181d150c9f258a8d0781))
+
 ## [0.4.3](https://github.com/adrighem/signal-purple/compare/v0.4.2...v0.4.3) (2026-07-31)
 
 
