@@ -530,4 +530,13 @@ schema.
 - An initial unlocked focused Cargo invocation normalized away the
   release-please marker comment in `Cargo.lock`; the tracked marker was restored
   with no dependency change, and the clean locked full gate passed. Live
-  restart validation of the receive-driver fix remains pending.
+  restart validation of the receive-driver fix remained pending at merge time.
+- The immutable `v0.4.2` package was subsequently installed and started against
+  the existing encrypted store. Continued use reproduced none of the prior
+  contact-sync, outbox-read, or displayed-message acknowledgement pool
+  timeouts. This closes the focused live validation gap, but is not a
+  multi-account or long-duration soak test.
+- A scoped read-only Purple query also confirmed that the previously reported
+  UUID-only buddy now has a nonempty local/effective alias despite an empty
+  server alias, with no open conversation retaining a stale title. No personal
+  identifier or alias text is recorded in repository memory.
