@@ -4,6 +4,25 @@ Live Signal compatibility is recorded per repository revision and test date.
 A partial pass does not establish complete compatibility with the production
 service.
 
+## 2026-07-31 0.4.2 receive-store scheduling validation
+
+The immutable `v0.4.2` Debian package was installed over `v0.4.1` and Pidgin
+was started normally against the existing encrypted store. The preceding build
+had reported SQLite pool-acquisition timeouts during startup contact sync,
+encrypted-outbox reads, and displayed-message acknowledgement. After the
+receive stream was moved to an independently scheduled task, subsequent use of
+`v0.4.2` reproduced none of those errors. This is focused evidence for the
+reported single-account starvation paths, not a multi-account or long-duration
+soak test.
+
+A read-only query of the running Purple state also revisited the previously
+reported UUID-only buddy. Its server alias remained empty, but its local and
+effective contact aliases were nonempty, and no existing direct conversation
+was caching the old UUID title. This confirms that Purple now has a usable
+local display fallback without establishing that the Signal profile itself has
+a nonempty display name. Personal identifiers and alias text are intentionally
+not recorded here.
+
 ## 2026-07-21 0.2.0 pre-release validation
 
 The signed 0.2.0 pre-release commit is
