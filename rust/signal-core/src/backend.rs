@@ -53,6 +53,10 @@ const RECENT_PROJECTION_IDENTITY_LIMIT: usize = 4096;
 const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const SNAPSHOT_YIELD_INTERVAL: usize = 64;
 
+fn incoming_attachment_download_limit(downloaded_bytes: usize) -> usize {
+    MAX_ATTACHMENT_BYTES.min(MAX_MESSAGE_ATTACHMENT_BYTES.saturating_sub(downloaded_bytes))
+}
+
 #[derive(Clone, Default)]
 struct MessageTimestampAllocator {
     latest: Arc<AtomicU64>,
@@ -2890,19 +2894,23 @@ async fn emit_data_message(
     if !outgoing {
         for (attachment_index, attachment) in attachments.iter().enumerate() {
             let declared_size = attachment.size.unwrap_or_default() as usize;
+            let remaining_message_bytes =
+                MAX_MESSAGE_ATTACHMENT_BYTES.saturating_sub(downloaded_bytes);
+            let attachment_limit = incoming_attachment_download_limit(downloaded_bytes);
             if declared_size > MAX_ATTACHMENT_BYTES
-                || downloaded_bytes.saturating_add(declared_size) > MAX_MESSAGE_ATTACHMENT_BYTES
+                || declared_size > remaining_message_bytes
+                || attachment_limit == 0
             {
                 sink.emit(Event::error(
-                    format!(
-                        "Rejected Signal attachment larger than the configured {} MiB limit",
-                        MAX_ATTACHMENT_BYTES / (1024 * 1024)
-                    ),
+                    "Rejected a Signal attachment which exceeded its per-attachment or per-message size limit",
                     false,
                 ));
                 continue;
             }
-            match manager.get_attachment(attachment).await {
+            match manager
+                .get_attachment_with_size_limit(attachment, attachment_limit)
+                .await
+            {
                 Ok(data) if data.is_empty() => sink.emit(Event::error(
                     "Could not download a Signal attachment: decrypted attachment was empty",
                     false,
@@ -3295,6 +3303,31 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn incoming_attachment_limit_respects_per_file_and_message_budgets() {
+        assert_eq!(incoming_attachment_download_limit(0), MAX_ATTACHMENT_BYTES);
+        assert_eq!(
+            incoming_attachment_download_limit(MAX_ATTACHMENT_BYTES),
+            MAX_ATTACHMENT_BYTES
+        );
+        assert_eq!(
+            incoming_attachment_download_limit(MAX_ATTACHMENT_BYTES + 1),
+            MAX_ATTACHMENT_BYTES - 1
+        );
+        assert_eq!(
+            incoming_attachment_download_limit(MAX_MESSAGE_ATTACHMENT_BYTES - 1),
+            1
+        );
+        assert_eq!(
+            incoming_attachment_download_limit(MAX_MESSAGE_ATTACHMENT_BYTES),
+            0
+        );
+        assert_eq!(
+            incoming_attachment_download_limit(MAX_MESSAGE_ATTACHMENT_BYTES + 1),
+            0
+        );
     }
 
     #[test]
