@@ -93,3 +93,15 @@
 - Track the remaining attachment-admission, recovery-state, connection
   lifecycle, acknowledgment, and ABI-conformance work in
   `work/architecture-refactor-2026-07-25.md`.
+
+## 2026-07-31 — Keep attached video out of the image path
+
+- Render genuine GIF payloads through Purple's existing image store only after
+  MIME, signature, full-decode, compressed-size, dimension, and cumulative
+  frame-area validation.
+- Keep MP4 payloads, including Signal GIF-style animations transported as MP4,
+  in Purple's bounded receive-file flow. Do not pass video bytes to the image
+  store, invoke an automatic external transcoder, or create a plugin-managed
+  plaintext media cache.
+- Give unnamed common media deterministic type-specific filenames so the
+  fallback transfer remains usable. Preserve any sender-provided filename.

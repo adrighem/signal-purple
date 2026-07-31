@@ -10,7 +10,8 @@ different ownership stages independently and may change without a C ABI bump.
 | Admitted outgoing files | 2 files and 50 MiB total per account | Rust core | Retryable queue-full result |
 | Queued binary events | 64 MiB | Rust event queue | Visible overflow and reconnect |
 | Unresolved receive prompts | 64 MiB | C adapter | Ask the user to resolve existing prompts |
-| Inline group images | 8192 pixels per edge and 16 megapixels | C image decoder | Fall back to a file prompt |
+| Inline group JPEG/PNG | 8192 pixels per edge and 16 megapixels | C image decoder | Fall back to a file prompt |
+| Inline group GIF | 8 MiB and 8 million cumulative canvas pixel-frames | C GIF parser and image decoder | Fall back to a file prompt |
 
 Incoming downloads use the smaller of the per-file limit and the message's
 remaining byte budget. Presage stops the encrypted stream after the bounded

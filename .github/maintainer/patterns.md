@@ -49,3 +49,7 @@
 - Optional profile enrichment must not delay message delivery or outlive the
   receive queue boundary. Coalesce it per contact, bound network waits, and
   serialize the final merge with synchronized contact writes.
+- Purple's image store can animate decoder-supported image formats but cannot
+  represent attached video. Signal may flag an MP4 as GIF-style media; keep
+  that payload in the bounded file-transfer path unless a separately reviewed
+  UI or transcoding design can preserve resource and plaintext-cache policy.

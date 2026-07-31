@@ -436,10 +436,31 @@ unchanged rather than inferring its schema.
   serialize final merges with contact sync, and drain before Presage reports an
   empty receive queue. The local signal-purple branch pins that commit and uses
   the remaining per-message byte budget as the download limit.
-- Approved repository-setting changes were applied and verified. No issue,
-  pull request, comment, release edit, or code push was made; both code branches
-  remain local pending review and approval.
+- Approved repository-setting changes were applied and verified. After separate
+  publication approval, the Presage dependency branch was pushed at `82c215e`
+  and PR:26 merged the reviewed signal-purple branch as `a8f383a`. No issue,
+  comment, or release edit was made.
 
 The installed maintainer package still lacks its referenced triage script and
 reference files. `state.json` remains unchanged rather than inferring its
 schema.
+
+## 2026-07-31 — Incoming animation presentation
+
+- A newly received group attachment with no remote filename was confirmed as a
+  short, square H.264 MP4 without audio. This is compatible with a Signal GIF
+  attachment, but the stored file alone cannot prove its Signal attachment
+  flag.
+- Pidgin 2.14.14's conversation image path animates GdkPixbuf-supported image
+  data but has no inline representation for MP4 video. Automatic transcoding
+  would add an untrusted-media decoder, CPU and memory pressure, and a new
+  runtime dependency; a Pidgin-specific video widget would break the protocol
+  plugin's Purple UI boundary.
+- Prepared genuine GIF inline routing with pre-decode structure, compressed
+  size, dimension, and cumulative frame-area validation. Unnamed JPEG, PNG,
+  GIF, and MP4 attachments receive usable fallback filenames, including the
+  Signal GIF flag when present.
+- Rust formatting, matched-toolchain Clippy, all 88 Rust tests, release-helper
+  tests, the warning-as-error C build, all five C/Purple tests, and the staged
+  installation probe pass locally. Live validation remains required for a real
+  GIF payload and the inferred MP4 filename.
