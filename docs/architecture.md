@@ -104,6 +104,15 @@ linked device, including messages Signal still has queued after it was offline.
 It is not a general conversation-history API and cannot retrieve arbitrary
 older messages from the primary phone or Signal service.
 
+The actor represents this lifecycle as explicit `Initializing`, `Recovering`,
+and `Ready` session phases plus `Pending`, `Authoritative`, and `Dirty` group
+snapshot states. Only a fully processed first `QueueEmpty` transitions the
+session to ready and resets recovery backoff. A receive-start failure or ended
+stream enters or continues recovery and revokes group authority until a new
+snapshot succeeds. Group content dirties only an authoritative snapshot;
+snapshot failure returns it to pending so group operations stay gated while
+direct messaging remains available.
+
 ## Message mapping
 
 - Canonical Signal service identifiers are Purple buddy names. Synced profile

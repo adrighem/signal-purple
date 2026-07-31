@@ -221,6 +221,36 @@ struct RecoveryBackoff {
     next_delay: usize,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum SessionPhase {
+    #[default]
+    Initializing,
+    Recovering,
+    Ready,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum GroupSnapshotState {
+    #[default]
+    Pending,
+    Authoritative,
+    Dirty,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RecoveryTransition {
+    Entered,
+    Continued,
+}
+
+#[derive(Default)]
+struct SessionState {
+    phase: SessionPhase,
+    groups: GroupSnapshotState,
+    recovery_backoff: RecoveryBackoff,
+    last_recovery_error: Option<String>,
+}
+
 struct ReceiveStartError {
     message: String,
     transient: bool,
@@ -551,6 +581,72 @@ impl RecoveryBackoff {
 
     fn has_remaining(&self) -> bool {
         self.next_delay < RECOVERY_RETRY_DELAYS_SECS.len()
+    }
+}
+
+impl SessionState {
+    fn is_recovering(&self) -> bool {
+        self.phase == SessionPhase::Recovering
+    }
+
+    fn is_ready(&self) -> bool {
+        self.phase == SessionPhase::Ready
+    }
+
+    fn groups_authoritative(&self) -> bool {
+        matches!(
+            self.groups,
+            GroupSnapshotState::Authoritative | GroupSnapshotState::Dirty
+        )
+    }
+
+    fn groups_dirty(&self) -> bool {
+        self.groups == GroupSnapshotState::Dirty
+    }
+
+    fn note_group_content(&mut self, has_group_context: bool) {
+        if has_group_context && self.groups == GroupSnapshotState::Authoritative {
+            self.groups = GroupSnapshotState::Dirty;
+        }
+    }
+
+    fn mark_groups_authoritative(&mut self) {
+        self.groups = GroupSnapshotState::Authoritative;
+    }
+
+    fn mark_groups_pending(&mut self) {
+        self.groups = GroupSnapshotState::Pending;
+    }
+
+    fn mark_ready(&mut self) {
+        debug_assert!(!self.is_ready());
+        self.phase = SessionPhase::Ready;
+        self.recovery_backoff.reset();
+    }
+
+    fn enter_recovery(&mut self, error: String) -> RecoveryTransition {
+        let transition = if self.is_recovering() {
+            RecoveryTransition::Continued
+        } else {
+            RecoveryTransition::Entered
+        };
+        self.phase = SessionPhase::Recovering;
+        self.groups = GroupSnapshotState::Pending;
+        self.last_recovery_error = Some(error);
+        transition
+    }
+
+    fn next_recovery_delay(&mut self) -> Option<Duration> {
+        debug_assert!(self.is_recovering());
+        self.recovery_backoff.next_delay()
+    }
+
+    fn recovery_has_remaining(&self) -> bool {
+        self.recovery_backoff.has_remaining()
+    }
+
+    fn last_recovery_error(&self) -> Option<&str> {
+        self.last_recovery_error.as_deref()
     }
 }
 
@@ -900,9 +996,7 @@ async fn receive_and_command_loop(
         tokio::time::interval(std::time::Duration::from_secs(GROUP_SYNC_RETRY_SECS));
     group_sync_retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     group_sync_retry_tick.reset();
-    let mut recovery_backoff = RecoveryBackoff::default();
-    let mut recovering = false;
-    let mut last_recovery_error = None;
+    let mut session = SessionState::default();
 
     macro_rules! await_recovery_phase_or_stop {
         ($phase:expr) => {
@@ -925,7 +1019,7 @@ async fn receive_and_command_loop(
     }
 
     loop {
-        if recovering {
+        if session.is_recovering() {
             if drain_recovery_commands(&mut commands, &mut deferred_commands) {
                 stop_attachments_and_drain_acknowledgments(
                     &manager,
@@ -938,9 +1032,11 @@ async fn receive_and_command_loop(
                 .await;
                 return Ok(());
             }
-            let Some(delay) = recovery_backoff.next_delay() else {
-                let error = last_recovery_error
-                    .unwrap_or_else(|| "Signal message reception did not recover".into());
+            let Some(delay) = session.next_recovery_delay() else {
+                let error = session
+                    .last_recovery_error()
+                    .unwrap_or("Signal message reception did not recover")
+                    .to_owned();
                 fail_deferred_commands(
                     &sink,
                     &mut deferred_commands,
@@ -1060,7 +1156,7 @@ async fn receive_and_command_loop(
                         })
                     });
                 }
-                command = commands.recv(), if recovering => {
+                command = commands.recv(), if session.is_recovering() => {
                     let Some(command) = command else {
                         stop_receive_driver(&mut receive_task).await;
                         stop_attachments_and_drain_acknowledgments(
@@ -1088,7 +1184,7 @@ async fn receive_and_command_loop(
                     acknowledgments.activate_retries();
                 }
                 completed = attachment_tasks.join_next(),
-                    if recovering && !attachment_tasks.is_empty() =>
+                    if session.is_recovering() && !attachment_tasks.is_empty() =>
                 {
                     if let Some(completed) = completed {
                         await_receive_start_phase_or_stop!(handle_attachment_completion(
@@ -1134,20 +1230,19 @@ async fn receive_and_command_loop(
                 .await;
                 return Err(error);
             }
-            if !recovering {
+            let transition = session.enter_recovery(error.clone());
+            if transition == RecoveryTransition::Entered {
                 sink.emit(Event {
                     kind: EVENT_RECOVERING,
                     ..Event::default()
                 });
             }
-            let status = if recovery_backoff.has_remaining() {
+            let status = if session.recovery_has_remaining() {
                 "retrying automatically"
             } else {
                 "automatic retries exhausted"
             };
             sink.emit(Event::transient_error(format!("{error}; {status}")));
-            last_recovery_error = Some(error);
-            recovering = true;
             continue;
         }
 
@@ -1165,9 +1260,6 @@ async fn receive_and_command_loop(
             receive: receive_task,
             contact_sync,
         };
-        let mut synchronized = false;
-        let mut groups_dirty = false;
-        let mut groups_authoritative = false;
 
         macro_rules! await_phase_or_stop {
             ($phase:expr) => {
@@ -1191,6 +1283,9 @@ async fn receive_and_command_loop(
         }
 
         loop {
+            let session_ready = session.is_ready();
+            let groups_authoritative = session.groups_authoritative();
+            let groups_dirty = session.groups_dirty();
             tokio::select! {
                 _ = acknowledgments.wait() => {
                     await_phase_or_stop!(process_acknowledgments(
@@ -1204,32 +1299,31 @@ async fn receive_and_command_loop(
                 received = messages.recv() => {
                     match received {
                         Some(Received::QueueEmpty) => {
-                            if !synchronized {
+                            if !session_ready {
                                 await_phase_or_stop!(
                                     emit_account_identity(&mut manager, &sink)
                                 );
                                 await_phase_or_stop!(emit_contact_snapshot(&manager, &sink));
-                                groups_authoritative =
-                                    match await_phase_or_stop!(
-                                        synchronize_and_emit_group_snapshot(
-                                            &mut manager,
-                                            &sink,
-                                            &departed_groups,
-                                        )
-                                    ) {
-                                        Ok(()) => true,
-                                        Err(error) => {
-                                            sink.emit(Event::transient_error(error));
-                                            group_sync_retry_tick.reset();
-                                            false
-                                        }
-                                    };
+                                match await_phase_or_stop!(
+                                    synchronize_and_emit_group_snapshot(
+                                        &mut manager,
+                                        &sink,
+                                        &departed_groups,
+                                    )
+                                ) {
+                                    Ok(()) => session.mark_groups_authoritative(),
+                                    Err(error) => {
+                                        session.mark_groups_pending();
+                                        sink.emit(Event::transient_error(error));
+                                        group_sync_retry_tick.reset();
+                                    }
+                                }
                                 await_phase_or_stop!(replay_unprojected_messages(
                                     &mut manager,
                                     &sink,
                                     &mut projection,
                                     &departed_groups,
-                                    groups_authoritative,
+                                    session.groups_authoritative(),
                                     &timestamps,
                                 ));
                                 await_phase_or_stop!(emit_identity_changes(&manager, &sink));
@@ -1237,26 +1331,23 @@ async fn receive_and_command_loop(
                                     &mut manager,
                                     &sink,
                                     &departed_groups,
-                                    groups_authoritative,
+                                    session.groups_authoritative(),
                                 ));
-                                groups_dirty = false;
-                                synchronized = true;
-                                recovering = false;
-                                recovery_backoff.reset();
+                                session.mark_ready();
                                 ready.store(true, Ordering::Release);
                                 sink.emit(Event { kind: EVENT_READY, ..Event::default() });
                                 if let Some(start) = contact_sync_start.take() {
                                     let _ = start.send(());
                                 }
-                            } else if groups_dirty && groups_authoritative {
+                            } else if groups_dirty {
                                 match await_phase_or_stop!(emit_group_snapshot(
                                     &manager,
                                     &sink,
                                     &departed_groups,
                                 )) {
-                                    Ok(()) => groups_dirty = false,
+                                    Ok(()) => session.mark_groups_authoritative(),
                                     Err(error) => {
-                                        groups_authoritative = false;
+                                        session.mark_groups_pending();
                                         group_sync_retry_tick.reset();
                                         sink.emit(Event::transient_error(error));
                                     }
@@ -1267,8 +1358,8 @@ async fn receive_and_command_loop(
                             await_phase_or_stop!(emit_contact_snapshot(&manager, &sink));
                         }
                         Some(Received::Content(content)) => {
-                            groups_dirty |= content_has_group_context(&content.body);
-                            if synchronized {
+                            session.note_group_content(content_has_group_context(&content.body));
+                            if session_ready {
                                 await_phase_or_stop!(project_content(
                                     &mut manager,
                                     *content,
@@ -1285,7 +1376,7 @@ async fn receive_and_command_loop(
                     }
                 }
                 command = async {
-                    if synchronized
+                    if session_ready
                         && let Some(command) = deferred_commands.pop_front()
                     {
                         Some(command)
@@ -1305,7 +1396,7 @@ async fn receive_and_command_loop(
                         ).await;
                         return Ok(());
                     };
-                    if !synchronized {
+                    if !session_ready {
                         handle_recovery_command(command, &mut deferred_commands);
                         continue;
                     }
@@ -1399,7 +1490,7 @@ async fn receive_and_command_loop(
                         ));
                     }
                 }
-                _ = retry_tick.tick(), if synchronized => {
+                _ = retry_tick.tick(), if session_ready => {
                     await_phase_or_stop!(retry_outbox(
                         &mut manager,
                         &sink,
@@ -1410,15 +1501,14 @@ async fn receive_and_command_loop(
                 _ = acknowledgment_retry_tick.tick() => {
                     acknowledgments.activate_retries();
                 }
-                _ = group_sync_retry_tick.tick(), if synchronized && !groups_authoritative => {
+                _ = group_sync_retry_tick.tick(), if session_ready && !groups_authoritative => {
                     match await_phase_or_stop!(synchronize_and_emit_group_snapshot(
                         &mut manager,
                         &sink,
                         &departed_groups,
                     )) {
                         Ok(()) => {
-                            groups_authoritative = true;
-                            groups_dirty = false;
+                            session.mark_groups_authoritative();
                             await_phase_or_stop!(replay_unprojected_messages(
                                 &mut manager,
                                 &sink,
@@ -1434,7 +1524,10 @@ async fn receive_and_command_loop(
                                 true,
                             ));
                         }
-                        Err(error) => sink.emit(Event::transient_error(error)),
+                        Err(error) => {
+                            session.mark_groups_pending();
+                            sink.emit(Event::transient_error(error));
+                        }
                     }
                 }
                 _ = wait_for_shutdown(&mut shutdown) => {
@@ -1453,13 +1546,14 @@ async fn receive_and_command_loop(
         }
 
         ready.store(false, Ordering::Release);
-        if !recovering {
+        let error = "Signal's message stream ended unexpectedly".to_owned();
+        let transition = session.enter_recovery(error.clone());
+        if transition == RecoveryTransition::Entered {
             sink.emit(Event {
                 kind: EVENT_RECOVERING,
                 ..Event::default()
             });
         }
-        recovering = true;
         stop_receive_tasks(
             &mut receive_tasks,
             &manager,
@@ -1469,8 +1563,6 @@ async fn receive_and_command_loop(
             std::future::ready(()),
         )
         .await;
-        let error = "Signal's message stream ended unexpectedly".to_owned();
-        last_recovery_error = Some(error.clone());
         sink.emit(Event::transient_error(format!(
             "{error}; reconnecting automatically"
         )));
@@ -4843,6 +4935,59 @@ mod tests {
         assert!(backoff.has_remaining());
         assert_eq!(backoff.next_delay(), Some(Duration::ZERO));
         assert_eq!(backoff.next_delay(), Some(Duration::from_secs(1)));
+    }
+
+    #[test]
+    fn models_session_and_group_transitions_deterministically() {
+        let mut session = SessionState::default();
+
+        assert_eq!(session.phase, SessionPhase::Initializing);
+        assert!(!session.is_ready());
+        assert!(!session.is_recovering());
+        assert!(!session.groups_authoritative());
+        assert!(!session.groups_dirty());
+
+        session.note_group_content(true);
+        assert_eq!(session.groups, GroupSnapshotState::Pending);
+        session.mark_groups_authoritative();
+        assert!(session.groups_authoritative());
+        assert!(!session.groups_dirty());
+        session.note_group_content(true);
+        assert_eq!(session.groups, GroupSnapshotState::Dirty);
+        session.mark_groups_pending();
+        assert_eq!(session.groups, GroupSnapshotState::Pending);
+
+        session.mark_groups_authoritative();
+        session.mark_ready();
+        assert_eq!(session.phase, SessionPhase::Ready);
+        assert!(session.is_ready());
+        assert!(session.groups_authoritative());
+
+        assert_eq!(
+            session.enter_recovery("stream ended".to_owned()),
+            RecoveryTransition::Entered
+        );
+        assert!(session.is_recovering());
+        assert!(!session.is_ready());
+        assert!(!session.groups_authoritative());
+        assert_eq!(session.last_recovery_error(), Some("stream ended"));
+        assert_eq!(session.next_recovery_delay(), Some(Duration::ZERO));
+
+        assert_eq!(
+            session.enter_recovery("still unavailable".to_owned()),
+            RecoveryTransition::Continued
+        );
+        assert_eq!(session.last_recovery_error(), Some("still unavailable"));
+        assert_eq!(session.next_recovery_delay(), Some(Duration::from_secs(1)));
+
+        session.mark_groups_authoritative();
+        session.mark_ready();
+        assert!(session.is_ready());
+        assert_eq!(
+            session.enter_recovery("stream ended again".to_owned()),
+            RecoveryTransition::Entered
+        );
+        assert_eq!(session.next_recovery_delay(), Some(Duration::ZERO));
     }
 
     #[test]

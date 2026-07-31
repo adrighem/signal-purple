@@ -583,3 +583,25 @@ schema.
   exported sanitizer `CFLAGS` into Cargo and was discarded after restoring the
   normal Rust target. Passing sanitizer flags through CMake kept the final run
   scoped to C as intended.
+- PR #38 and its six-file Release Please follow-up merged as immutable
+  prerelease `v0.4.4`. The exact tag, five asset digests, four-subject SLSA
+  provenance, and commit-plus-assets release attestation were verified before
+  installing `signal-purple 0.4.4-1`; `dpkg --verify` passed. No Pidgin process
+  was restarted for installation.
+
+## 2026-07-31 - Deterministic session transition model
+
+- The backend actor independently mutated recovery, synchronization,
+  group-authority, and group-dirtiness booleans. Their valid combinations were
+  implicit across nested receive-start and active-session loops, making later
+  module extraction likely to change gates accidentally.
+- A single session model now owns `Initializing`, `Recovering`, and `Ready`
+  phases, bounded recovery state, and `Pending`, `Authoritative`, or `Dirty`
+  group snapshots. Receive failure revokes group authority, successful initial
+  queue processing alone marks the core ready and resets backoff, and only
+  authoritative group content can dirty a snapshot.
+- A focused transition test covers initial readiness, snapshot invalidation,
+  recovery entry versus continuation, last-error replacement, retry progression,
+  and backoff reset. Matched Rust 1.95 formatting and warning-as-error Clippy,
+  all 96 Rust tests, release-helper checks, the warning-as-error C build, all six
+  C/Purple tests, and the staged install/plugin-load probe pass locally.

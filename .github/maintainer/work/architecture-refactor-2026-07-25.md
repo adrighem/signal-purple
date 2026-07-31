@@ -34,8 +34,10 @@ from the extraction above:
 - ~~Read outgoing local files through a bounded single-open C helper so
   oversized files are rejected before a full allocation.~~ Completed in the
   v0.3.0 reliability-hardening phase.
-- Extract a deterministic recovery/session transition model from the backend
-  actor before splitting contact, group, projection, and outbox modules.
+- ~~Extract a deterministic recovery/session transition model from the backend
+  actor before splitting contact, group, projection, and outbox modules.~~
+  Completed by replacing independent recovery, readiness, group-authority, and
+  group-dirtiness flags with tested session and group-snapshot states.
 - Centralize `SignalConnection` construction and teardown while preserving
   Purple callback-detachment order.
 - ~~Prevent malformed direct, group, or attachment events from being
