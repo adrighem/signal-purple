@@ -4,6 +4,13 @@ All notable changes will be documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 semantic versioning after the first stable release.
 
+## [0.4.1](https://github.com/adrighem/signal-purple/compare/v0.4.0...v0.4.1) (2026-07-31)
+
+
+### Bug Fixes
+
+* **sync:** defer contact request until queue drain ([abf0b06](https://github.com/adrighem/signal-purple/commit/abf0b06dcb215f0f0b0131ef1cb267b26f1d0761))
+
 ## [0.4.0](https://github.com/adrighem/signal-purple/compare/v0.3.1...v0.4.0) (2026-07-31)
 
 
