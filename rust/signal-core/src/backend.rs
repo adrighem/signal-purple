@@ -1111,7 +1111,13 @@ async fn receive_and_command_loop(
         };
         pin_mut!(messages);
 
-        let mut contact_sync = tokio::task::spawn_local(request_contacts_with_retries(
+        // Presage's receive startup and this send share one serialized SQLite
+        // connection. Keep the contact request completely unpolled until the
+        // first QueueEmpty path has finished its startup store work.
+        let (contact_sync_start, contact_sync_wait) = oneshot::channel();
+        let mut contact_sync_start = Some(contact_sync_start);
+        let mut contact_sync = tokio::task::spawn_local(request_contacts_after_queue_drain(
+            contact_sync_wait,
             manager.clone(),
             shutdown.clone(),
             sink.clone(),
@@ -1196,6 +1202,9 @@ async fn receive_and_command_loop(
                                 recovery_backoff.reset();
                                 ready.store(true, Ordering::Release);
                                 sink.emit(Event { kind: EVENT_READY, ..Event::default() });
+                                if let Some(start) = contact_sync_start.take() {
+                                    let _ = start.send(());
+                                }
                             } else if groups_dirty && groups_authoritative {
                                 match await_phase_or_stop!(emit_group_snapshot(
                                     &manager,
@@ -1423,6 +1432,28 @@ async fn receive_and_command_loop(
             "{error}; reconnecting automatically"
         )));
     }
+}
+
+async fn run_after_start_signal<F>(start: oneshot::Receiver<()>, operation: F)
+where
+    F: Future<Output = ()>,
+{
+    if start.await.is_ok() {
+        operation.await;
+    }
+}
+
+async fn request_contacts_after_queue_drain(
+    start: oneshot::Receiver<()>,
+    manager: Manager<SqliteStore, Registered>,
+    shutdown: watch::Receiver<bool>,
+    sink: EventSink,
+) {
+    run_after_start_signal(
+        start,
+        request_contacts_with_retries(manager, shutdown, sink),
+    )
+    .await;
 }
 
 async fn request_contacts_with_retries(
@@ -3796,6 +3827,36 @@ mod tests {
 
             assert_eq!(outcome, None);
             assert!(!polled.load(Ordering::Acquire));
+        });
+    }
+
+    #[test]
+    fn contact_sync_work_waits_for_the_queue_drain_signal() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let (start_tx, start_rx) = oneshot::channel();
+            let polled = Arc::new(AtomicBool::new(false));
+            let operation_polled = Arc::clone(&polled);
+            let gated = run_after_start_signal(start_rx, async move {
+                operation_polled.store(true, Ordering::Release);
+            });
+            pin_mut!(gated);
+
+            assert!(
+                tokio::time::timeout(Duration::from_millis(10), gated.as_mut())
+                    .await
+                    .is_err()
+            );
+            assert!(!polled.load(Ordering::Acquire));
+
+            start_tx.send(()).unwrap();
+            tokio::time::timeout(Duration::from_secs(1), gated.as_mut())
+                .await
+                .expect("contact sync gate did not open");
+            assert!(polled.load(Ordering::Acquire));
         });
     }
 

@@ -58,3 +58,7 @@
   I/O, OS and application resource limits, strict output validation, and the
   original attachment as the failure presentation. Do not link an untrusted
   media decoder into the plugin process for presentation convenience.
+- A single-connection async database pool prevents SQLite write races but does
+  not make every actor-level overlap harmless. Gate optional startup work behind
+  the dependency's drained-queue boundary when its receive initialization can
+  retain the sole connection across longer protocol operations.
