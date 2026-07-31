@@ -40,6 +40,11 @@ and `CITATION.cff`. Do not edit these in an ordinary pull request unless the
 change explicitly repairs release metadata. The generated release pull request
 updates them together.
 
+Maintainers should use the [release process](docs/release-process.md) for
+candidate validation, automation, and publication. User installation lifecycle
+instructions belong in the [README](README.md#installation-lifecycle), not in
+the maintainer procedure.
+
 ## Validation
 
 Run the fast Rust feedback loop while iterating:
