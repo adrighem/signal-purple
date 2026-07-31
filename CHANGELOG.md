@@ -4,6 +4,14 @@ All notable changes will be documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 semantic versioning after the first stable release.
 
+## [0.3.1](https://github.com/adrighem/signal-purple/compare/v0.3.0...v0.3.1) (2026-07-31)
+
+
+### Bug Fixes
+
+* **core:** bound downloads and preserve contact names ([d398240](https://github.com/adrighem/signal-purple/commit/d39824089ee4d06dae8cb58471aef101b3e0444a))
+* **media:** present bounded GIFs inline ([5d390fe](https://github.com/adrighem/signal-purple/commit/5d390fec1ab7655cf5d9d14777afa32cf7837e13))
+
 ## [0.3.0](https://github.com/adrighem/signal-purple/compare/v0.2.4...v0.3.0) (2026-07-26)
 
 
