@@ -105,3 +105,18 @@
   plaintext media cache.
 - Give unnamed common media deterministic type-specific filenames so the
   fallback transfer remains usable. Preserve any sender-provided filename.
+
+## 2026-07-31 - Permit bounded Signal GIF presentation conversion
+
+- Supersede the earlier prohibition on automatic transcoding only for incoming
+  group MP4 attachments which carry Signal's GIF flag and a valid MP4 file-type
+  box. Ordinary video remains in Purple's receive-file flow.
+- Keep conversion optional and outside the process through Debian's FFmpeg and
+  `prlimit`, fixed arguments, a cleared environment, memory-only pipes, and
+  explicit input, output, CPU, memory, descriptor, thread, wall-time,
+  concurrency, attempt, frame-rate, dimension, and frame-area limits.
+- Replace the attachment presentation only after the generated GIF passes the
+  native structure and aggregate message budgets. Preserve the original MP4
+  for every unavailable, failed, contended, invalid, or over-budget conversion.
+- Recommend the runtime helpers rather than linking libav, keeping dependency
+  ABI churn and media-decoder failures outside the plugin process.

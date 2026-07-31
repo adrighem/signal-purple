@@ -1,10 +1,11 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
+use std::io::{Read, Write};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::{FutureExt, StreamExt, channel::oneshot, future::Abortable, pin_mut};
 use presage::libsignal_service::configuration::SignalServers;
@@ -47,11 +48,22 @@ use crate::event_queue::EventSink;
 
 const MESSAGE_PROJECTION_CLIENT: &str = "signal-purple-v1";
 const MAX_MESSAGE_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
+const MAX_INLINE_GIF_BYTES: usize = 8 * 1024 * 1024;
+const MAX_INLINE_GIF_EDGE: usize = 8192;
+const MAX_INLINE_GIF_PIXELS: usize = 16 * 1000 * 1000;
+const MAX_INLINE_GIF_PIXEL_FRAMES: usize = 8 * 1000 * 1000;
+const MAX_SIGNAL_GIF_TRANSCODES_PER_MESSAGE: usize = 2;
+const SIGNAL_GIF_TRANSCODE_POLL_INTERVAL: Duration = Duration::from_millis(20);
+const SIGNAL_GIF_TRANSCODE_TIMEOUT: Duration = Duration::from_secs(15);
+const SIGNAL_GIF_FFMPEG: &str = "/usr/bin/ffmpeg";
+const SIGNAL_GIF_PRLIMIT: &str = "/usr/bin/prlimit";
 const GROUP_SYNC_RETRY_SECS: u64 = 30;
 const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
 const RECENT_PROJECTION_IDENTITY_LIMIT: usize = 4096;
 const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const SNAPSHOT_YIELD_INTERVAL: usize = 64;
+
+static SIGNAL_GIF_TRANSCODE_LOCK: Mutex<()> = Mutex::new(());
 
 fn incoming_attachment_download_limit(downloaded_bytes: usize) -> usize {
     MAX_ATTACHMENT_BYTES.min(MAX_MESSAGE_ATTACHMENT_BYTES.saturating_sub(downloaded_bytes))
@@ -2796,6 +2808,371 @@ fn should_inline_group_image(
     !outgoing && group && data.is_some_and(|data| inline_group_image_matches(content_type, data))
 }
 
+fn gif_u16(data: &[u8], offset: usize) -> Option<usize> {
+    let encoded: [u8; 2] = data.get(offset..offset.checked_add(2)?)?.try_into().ok()?;
+    Some(u16::from_le_bytes(encoded) as usize)
+}
+
+fn advance_gif_offset(offset: &mut usize, amount: usize, size: usize) -> bool {
+    if *offset > size || amount > size - *offset {
+        return false;
+    }
+    *offset += amount;
+    true
+}
+
+fn skip_gif_sub_blocks(data: &[u8], offset: &mut usize) -> bool {
+    while *offset < data.len() {
+        let block_size = data[*offset] as usize;
+        *offset += 1;
+        if block_size == 0 {
+            return true;
+        }
+        if !advance_gif_offset(offset, block_size, data.len()) {
+            return false;
+        }
+    }
+    false
+}
+
+fn bounded_inline_gif(data: &[u8]) -> bool {
+    if data.len() < 13
+        || data.len() > MAX_INLINE_GIF_BYTES
+        || !(data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a"))
+    {
+        return false;
+    }
+
+    let Some(canvas_width) = gif_u16(data, 6) else {
+        return false;
+    };
+    let Some(canvas_height) = gif_u16(data, 8) else {
+        return false;
+    };
+    let Some(canvas_pixels) = canvas_width.checked_mul(canvas_height) else {
+        return false;
+    };
+    if canvas_width == 0
+        || canvas_height == 0
+        || canvas_width > MAX_INLINE_GIF_EDGE
+        || canvas_height > MAX_INLINE_GIF_EDGE
+        || canvas_pixels > MAX_INLINE_GIF_PIXELS
+    {
+        return false;
+    }
+
+    let mut offset = 13usize;
+    let packed = data[10];
+    if packed & 0x80 != 0 {
+        let color_table_size = 3usize << ((packed & 0x07) as usize + 1);
+        if !advance_gif_offset(&mut offset, color_table_size, data.len()) {
+            return false;
+        }
+    }
+
+    let mut frames = 0usize;
+    while offset < data.len() {
+        let marker = data[offset];
+        offset += 1;
+        match marker {
+            0x3b => return frames > 0,
+            0x21 => {
+                if !advance_gif_offset(&mut offset, 1, data.len())
+                    || !skip_gif_sub_blocks(data, &mut offset)
+                {
+                    return false;
+                }
+            }
+            0x2c => {
+                if offset > data.len() || 9 > data.len() - offset {
+                    return false;
+                }
+                let Some(left) = gif_u16(data, offset) else {
+                    return false;
+                };
+                let Some(top) = gif_u16(data, offset + 2) else {
+                    return false;
+                };
+                let Some(width) = gif_u16(data, offset + 4) else {
+                    return false;
+                };
+                let Some(height) = gif_u16(data, offset + 6) else {
+                    return false;
+                };
+                let image_packed = data[offset + 8];
+                offset += 9;
+
+                if width == 0
+                    || height == 0
+                    || left
+                        .checked_add(width)
+                        .is_none_or(|right| right > canvas_width)
+                    || top
+                        .checked_add(height)
+                        .is_none_or(|bottom| bottom > canvas_height)
+                {
+                    return false;
+                }
+                frames += 1;
+                if frames > MAX_INLINE_GIF_PIXEL_FRAMES / canvas_pixels {
+                    return false;
+                }
+
+                if image_packed & 0x80 != 0 {
+                    let color_table_size = 3usize << ((image_packed & 0x07) as usize + 1);
+                    if !advance_gif_offset(&mut offset, color_table_size, data.len()) {
+                        return false;
+                    }
+                }
+                if offset >= data.len() || !(2..=8).contains(&data[offset]) {
+                    return false;
+                }
+                offset += 1;
+                if !skip_gif_sub_blocks(data, &mut offset) {
+                    return false;
+                }
+            }
+            _ => return false,
+        }
+    }
+    false
+}
+
+fn mp4_file_type_box_matches(data: &[u8]) -> bool {
+    if data.len() < 16 || data.get(4..8) != Some(b"ftyp") {
+        return false;
+    }
+    let Some(encoded_size) = data.get(..4) else {
+        return false;
+    };
+    let Ok(encoded_size) = <[u8; 4]>::try_from(encoded_size) else {
+        return false;
+    };
+    let box_size = u32::from_be_bytes(encoded_size) as usize;
+    (16..=data.len()).contains(&box_size)
+}
+
+fn signal_gif_video_matches(group: bool, attachment: &AttachmentPointer, data: &[u8]) -> bool {
+    group
+        && data.len() <= MAX_INLINE_GIF_BYTES
+        && attachment
+            .content_type
+            .as_deref()
+            .is_some_and(|content_type| content_type.eq_ignore_ascii_case("video/mp4"))
+        && attachment.flags.unwrap_or_default() & attachment_pointer::Flags::Gif as u32 != 0
+        && mp4_file_type_box_matches(data)
+}
+
+fn signal_gif_inline_filename(attachment: &AttachmentPointer) -> String {
+    let Some(filename) = attachment
+        .file_name
+        .as_deref()
+        .filter(|filename| !filename.is_empty())
+    else {
+        return "signal-animation.gif".to_owned();
+    };
+    let basename = filename.rsplit(['/', '\\']).next().unwrap_or_default();
+    if basename.is_empty() || basename == "." || basename == ".." {
+        return "signal-animation.gif".to_owned();
+    }
+    let stem = basename
+        .rsplit_once('.')
+        .and_then(|(stem, _)| (!stem.is_empty()).then_some(stem))
+        .unwrap_or(basename);
+    format!("{stem}.gif")
+}
+
+struct DownloadedAttachment {
+    attachment_index: usize,
+    filename: String,
+    content_type: Option<String>,
+    data: Vec<u8>,
+    signal_gif_filename: Option<String>,
+}
+
+impl DownloadedAttachment {
+    fn new(
+        attachment_index: usize,
+        attachment: &AttachmentPointer,
+        data: Vec<u8>,
+        group: bool,
+    ) -> Self {
+        let signal_gif_filename = signal_gif_video_matches(group, attachment, &data)
+            .then(|| signal_gif_inline_filename(attachment));
+        Self {
+            attachment_index,
+            filename: attachment_display_name(attachment).to_owned(),
+            content_type: attachment.content_type.clone(),
+            data,
+            signal_gif_filename,
+        }
+    }
+
+    fn apply_signal_gif(&mut self, gif: Vec<u8>, presentation_bytes: &mut usize) -> bool {
+        let Some(filename) = self.signal_gif_filename.clone() else {
+            return false;
+        };
+        if !bounded_inline_gif(&gif) {
+            return false;
+        }
+        let Some(next_bytes) = presentation_bytes
+            .checked_sub(self.data.len())
+            .and_then(|bytes| bytes.checked_add(gif.len()))
+            .filter(|bytes| *bytes <= MAX_MESSAGE_ATTACHMENT_BYTES)
+        else {
+            return false;
+        };
+
+        self.filename = filename;
+        self.signal_gif_filename = None;
+        self.content_type = Some("image/gif".to_owned());
+        self.data = gif;
+        *presentation_bytes = next_bytes;
+        true
+    }
+}
+
+fn stop_transcode_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+fn read_transcode_output(mut output: impl Read) -> Option<Vec<u8>> {
+    let mut collected = Vec::new();
+    let mut chunk = [0u8; 64 * 1024];
+    loop {
+        let read = output.read(&mut chunk).ok()?;
+        if read == 0 {
+            return Some(collected);
+        }
+        if read > MAX_INLINE_GIF_BYTES.saturating_sub(collected.len()) {
+            return None;
+        }
+        collected.extend_from_slice(&chunk[..read]);
+    }
+}
+
+fn transcode_signal_gif_video_blocking(input: Vec<u8>) -> Option<Vec<u8>> {
+    let _permit = SIGNAL_GIF_TRANSCODE_LOCK.try_lock().ok()?;
+    if !Path::new(SIGNAL_GIF_FFMPEG).is_file() || !Path::new(SIGNAL_GIF_PRLIMIT).is_file() {
+        return None;
+    }
+
+    // Fixed Debian paths and arguments avoid shell or inherited PATH handling.
+    // prlimit execs FFmpeg in the same child, so kill and wait cover both.
+    let mut child = std::process::Command::new(SIGNAL_GIF_PRLIMIT)
+        .args([
+            "--as=536870912:536870912",
+            "--cpu=10:12",
+            "--nofile=64:64",
+            "--",
+            SIGNAL_GIF_FFMPEG,
+            "-nostdin",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-max_alloc",
+            "134217728",
+            "-threads",
+            "1",
+            "-filter_threads",
+            "1",
+            "-filter_complex_threads",
+            "1",
+            "-protocol_whitelist",
+            "pipe",
+            "-probesize",
+            "8388608",
+            "-analyzeduration",
+            "5000000",
+            "-i",
+            "pipe:0",
+            "-map",
+            "0:v:0",
+            "-map_metadata",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-an",
+            "-sn",
+            "-dn",
+            "-vf",
+            "scale=w='min(480,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease:flags=lanczos",
+            "-fpsmax",
+            "15",
+            "-threads",
+            "1",
+            "-loop",
+            "0",
+            "-f",
+            "gif",
+            "pipe:1",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .env_clear()
+        .env("PATH", "/usr/bin:/bin")
+        .env("LANG", "C")
+        .spawn()
+        .ok()?;
+
+    let (Some(mut stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
+        stop_transcode_child(&mut child);
+        return None;
+    };
+    let writer = match std::thread::Builder::new()
+        .name("signal-gif-input".to_owned())
+        .spawn(move || stdin.write_all(&input).is_ok())
+    {
+        Ok(writer) => writer,
+        Err(_) => {
+            stop_transcode_child(&mut child);
+            return None;
+        }
+    };
+    let reader = match std::thread::Builder::new()
+        .name("signal-gif-output".to_owned())
+        .spawn(move || read_transcode_output(stdout))
+    {
+        Ok(reader) => reader,
+        Err(_) => {
+            stop_transcode_child(&mut child);
+            let _ = writer.join();
+            return None;
+        }
+    };
+
+    let started = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) if started.elapsed() < SIGNAL_GIF_TRANSCODE_TIMEOUT => {
+                std::thread::sleep(SIGNAL_GIF_TRANSCODE_POLL_INTERVAL);
+            }
+            Ok(None) | Err(_) => {
+                stop_transcode_child(&mut child);
+                break None;
+            }
+        }
+    };
+    let input_complete = writer.join().unwrap_or(false);
+    let output = reader.join().ok().flatten();
+    if !input_complete || !status.is_some_and(|status| status.success()) {
+        return None;
+    }
+    output.filter(|output| bounded_inline_gif(output))
+}
+
+async fn transcode_signal_gif_video(input: &[u8]) -> Option<Vec<u8>> {
+    // Keep the caller's original bytes untouched for the receive-file fallback.
+    let input = input.to_vec();
+    tokio::task::spawn_blocking(move || transcode_signal_gif_video_blocking(input))
+        .await
+        .ok()
+        .flatten()
+}
+
 fn data_message_text(message: &DataMessage) -> String {
     if let Some(reaction) = &message.reaction
         && let Some(emoji) = &reaction.emoji
@@ -2954,7 +3331,12 @@ async fn emit_data_message(
                             <= MAX_MESSAGE_ATTACHMENT_BYTES =>
                 {
                     downloaded_bytes += data.len();
-                    downloaded.push((attachment_index, attachment, data));
+                    downloaded.push(DownloadedAttachment::new(
+                        attachment_index,
+                        attachment,
+                        data,
+                        group_key.is_some(),
+                    ));
                 }
                 Ok(_) => sink.emit(Event::error(
                     "Rejected a Signal attachment which exceeded its size limit after decryption",
@@ -2968,16 +3350,31 @@ async fn emit_data_message(
         }
     }
 
+    let mut presentation_bytes = downloaded_bytes;
+    let mut signal_gif_transcodes = 0usize;
+    for attachment in &mut downloaded {
+        if signal_gif_transcodes >= MAX_SIGNAL_GIF_TRANSCODES_PER_MESSAGE {
+            break;
+        }
+        if attachment.signal_gif_filename.is_none() {
+            continue;
+        }
+        signal_gif_transcodes += 1;
+        if let Some(gif) = transcode_signal_gif_video(&attachment.data).await {
+            attachment.apply_signal_gif(gif, &mut presentation_bytes);
+        }
+    }
+
     let inline_attachment_indexes: HashSet<usize> = downloaded
         .iter()
-        .filter_map(|(attachment_index, attachment, data)| {
+        .filter_map(|attachment| {
             should_inline_group_image(
                 outgoing,
                 group_key.is_some(),
                 attachment.content_type.as_deref(),
-                Some(data),
+                Some(&attachment.data),
             )
-            .then_some(*attachment_index)
+            .then_some(attachment.attachment_index)
         })
         .collect();
     let text = projected_data_message_text(
@@ -3029,7 +3426,7 @@ async fn emit_data_message(
     }
 
     let attachment_count = downloaded.len();
-    for (index, (_, attachment, data)) in downloaded.into_iter().enumerate() {
+    for (index, attachment) in downloaded.into_iter().enumerate() {
         sink.emit(Event {
             kind: EVENT_ATTACHMENT,
             request_id: if index + 1 == attachment_count {
@@ -3039,9 +3436,9 @@ async fn emit_data_message(
             },
             peer_id: Some(peer.to_owned()),
             chat_id: group_key.map(|key| group_identifier(&key)),
-            title: Some(attachment_display_name(attachment).to_owned()),
-            text: attachment.content_type.clone(),
-            data,
+            title: Some(attachment.filename),
+            text: attachment.content_type,
+            data: attachment.data,
             timestamp_ms: timestamp,
             ..Event::default()
         });
@@ -3923,6 +4320,182 @@ mod tests {
             ServiceId::Aci(local).service_id_string()
         );
         assert_eq!(group_message_peer(false, remote, local), remote);
+    }
+
+    fn encoded_gif(width: u16, height: u16, frames: usize) -> Vec<u8> {
+        let mut data = b"GIF89a".to_vec();
+        data.extend_from_slice(&width.to_le_bytes());
+        data.extend_from_slice(&height.to_le_bytes());
+        data.extend_from_slice(&[0x80, 0x00, 0x00]);
+        data.extend_from_slice(&[0x00, 0x00, 0x00, 0xff, 0xff, 0xff]);
+        for _ in 0..frames {
+            data.push(0x2c);
+            data.extend_from_slice(&0u16.to_le_bytes());
+            data.extend_from_slice(&0u16.to_le_bytes());
+            data.extend_from_slice(&width.to_le_bytes());
+            data.extend_from_slice(&height.to_le_bytes());
+            data.push(0x00);
+            data.extend_from_slice(&[0x02, 0x02, 0x44, 0x01, 0x00]);
+        }
+        data.push(0x3b);
+        data
+    }
+
+    fn signal_gif_mp4() -> Vec<u8> {
+        let mut data = 24u32.to_be_bytes().to_vec();
+        data.extend_from_slice(b"ftypisom");
+        data.extend_from_slice(&0u32.to_be_bytes());
+        data.extend_from_slice(b"isomiso2");
+        data
+    }
+
+    #[test]
+    fn recognizes_only_bounded_signal_gif_mp4_payloads() {
+        let animation = AttachmentPointer {
+            content_type: Some("video/mp4".into()),
+            flags: Some(attachment_pointer::Flags::Gif as u32),
+            ..AttachmentPointer::default()
+        };
+        let uppercase = AttachmentPointer {
+            content_type: Some("VIDEO/MP4".into()),
+            flags: Some(attachment_pointer::Flags::Gif as u32),
+            ..AttachmentPointer::default()
+        };
+        let video = AttachmentPointer {
+            content_type: Some("video/mp4".into()),
+            ..AttachmentPointer::default()
+        };
+        let mp4 = signal_gif_mp4();
+
+        assert!(signal_gif_video_matches(true, &animation, &mp4));
+        assert!(signal_gif_video_matches(true, &uppercase, &mp4));
+        assert!(!signal_gif_video_matches(false, &animation, &mp4));
+        assert!(!signal_gif_video_matches(true, &video, &mp4));
+        assert!(!signal_gif_video_matches(true, &animation, b"not an mp4"));
+
+        let mut invalid_box = mp4.clone();
+        invalid_box[..4].copy_from_slice(&u32::MAX.to_be_bytes());
+        assert!(!signal_gif_video_matches(true, &animation, &invalid_box));
+
+        let mut oversized = vec![0u8; MAX_INLINE_GIF_BYTES + 1];
+        oversized[..mp4.len()].copy_from_slice(&mp4);
+        assert!(!signal_gif_video_matches(true, &animation, &oversized));
+    }
+
+    #[test]
+    fn validates_generated_gif_structure_and_frame_budget() {
+        let gif = encoded_gif(1, 1, 2);
+        let excessive_frames = encoded_gif(1000, 1000, 9);
+        let mut truncated = gif.clone();
+        truncated.pop();
+        let mut oversized = gif.clone();
+        oversized.resize(MAX_INLINE_GIF_BYTES + 1, 0);
+
+        assert!(bounded_inline_gif(&gif));
+        assert!(!bounded_inline_gif(&excessive_frames));
+        assert!(!bounded_inline_gif(&truncated));
+        assert!(!bounded_inline_gif(&oversized));
+        assert!(!bounded_inline_gif(b"GIF89a"));
+    }
+
+    #[test]
+    fn bounds_streamed_transcode_output_before_appending() {
+        let output = b"bounded output";
+        assert_eq!(
+            read_transcode_output(std::io::Cursor::new(output)),
+            Some(output.to_vec())
+        );
+        assert!(
+            read_transcode_output(std::io::Read::take(
+                std::io::repeat(0),
+                (MAX_INLINE_GIF_BYTES + 1) as u64
+            ))
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn installed_ffmpeg_converter_produces_a_bounded_animation() {
+        if !Path::new(SIGNAL_GIF_FFMPEG).is_file() || !Path::new(SIGNAL_GIF_PRLIMIT).is_file() {
+            return;
+        }
+        let source = std::process::Command::new(SIGNAL_GIF_FFMPEG)
+            .args([
+                "-nostdin",
+                "-hide_banner",
+                "-loglevel",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "testsrc=size=16x16:rate=2:duration=1",
+                "-frames:v",
+                "2",
+                "-an",
+                "-c:v",
+                "mpeg4",
+                "-pix_fmt",
+                "yuv420p",
+                "-movflags",
+                "frag_keyframe+empty_moov",
+                "-f",
+                "mp4",
+                "pipe:1",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .env_clear()
+            .env("PATH", "/usr/bin:/bin")
+            .env("LANG", "C")
+            .output()
+            .expect("installed FFmpeg did not start");
+        assert!(source.status.success());
+        assert!(mp4_file_type_box_matches(&source.stdout));
+
+        let gif = transcode_signal_gif_video_blocking(source.stdout)
+            .expect("installed FFmpeg did not produce a bounded GIF");
+        assert!(bounded_inline_gif(&gif));
+        assert!(gif.starts_with(b"GIF89a"));
+    }
+
+    #[test]
+    fn applies_only_valid_in_budget_signal_gif_presentations() {
+        let attachment = AttachmentPointer {
+            file_name: Some("../../shared.MP4".into()),
+            content_type: Some("video/mp4".into()),
+            flags: Some(attachment_pointer::Flags::Gif as u32),
+            ..AttachmentPointer::default()
+        };
+        let original = signal_gif_mp4();
+        let gif = encoded_gif(1, 1, 2);
+        let mut downloaded = DownloadedAttachment::new(3, &attachment, original.clone(), true);
+        let mut presentation_bytes = original.len();
+
+        assert_eq!(
+            downloaded.signal_gif_filename.as_deref(),
+            Some("shared.gif")
+        );
+        assert!(downloaded.apply_signal_gif(gif.clone(), &mut presentation_bytes));
+        assert_eq!(downloaded.filename, "shared.gif");
+        assert_eq!(downloaded.content_type.as_deref(), Some("image/gif"));
+        assert_eq!(downloaded.data, gif);
+        assert_eq!(presentation_bytes, downloaded.data.len());
+
+        let mut invalid = DownloadedAttachment::new(4, &attachment, original.clone(), true);
+        let mut invalid_bytes = original.len();
+        assert!(!invalid.apply_signal_gif(b"GIF89a".to_vec(), &mut invalid_bytes));
+        assert_eq!(invalid.data, original);
+        assert_eq!(invalid.content_type.as_deref(), Some("video/mp4"));
+
+        let mut over_budget = DownloadedAttachment::new(5, &attachment, signal_gif_mp4(), true);
+        let original_data = over_budget.data.clone();
+        let mut full_budget = MAX_MESSAGE_ATTACHMENT_BYTES;
+        assert!(!over_budget.apply_signal_gif(encoded_gif(1, 1, 2), &mut full_budget));
+        assert_eq!(over_budget.data, original_data);
+        assert_eq!(full_budget, MAX_MESSAGE_ATTACHMENT_BYTES);
+
+        let direct = DownloadedAttachment::new(6, &attachment, signal_gif_mp4(), false);
+        assert!(direct.signal_gif_filename.is_none());
     }
 
     #[test]

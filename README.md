@@ -62,9 +62,9 @@ operating-system baselines are not supported. See the full
 On Debian 13:
 
 ```sh
-sudo apt install pidgin git gnupg build-essential cmake ninja-build pkg-config python3 \
+sudo apt install pidgin ffmpeg git gnupg build-essential cmake ninja-build pkg-config python3 \
   libpurple-dev libglib2.0-dev libgdk-pixbuf-2.0-dev libsecret-1-dev \
-  libssl-dev clang libclang-dev protobuf-compiler xz-utils
+  libssl-dev clang libclang-dev protobuf-compiler util-linux xz-utils
 ```
 
 Install [rustup](https://rustup.rs/), then install the pinned toolchain when the
@@ -203,13 +203,16 @@ not implemented.
 Valid, within-limit incoming and outgoing files use Purple's transfer UI. An
 incoming group JPEG, PNG, or genuine GIF renders inline only when its MIME type,
 signature, complete decode, and bounded dimensions agree. Animated GIFs also
-have compressed-size and cumulative decoded-frame limits. Video, including
-Signal GIFs transported as MP4, falls back to a transfer prompt because Purple
-2 has no inline video representation. Unnamed common media receives a usable
-type-specific filename. Empty, over-limit, or resource-exhausting content is
-rejected visibly. Each file is limited to 25 MiB and one incoming message to
-50 MiB. At most two outgoing files totaling 50 MiB are admitted per account;
-retry after another transfer finishes or is cancelled when that queue is full.
+have compressed-size and cumulative decoded-frame limits. Incoming group MP4s
+which carry Signal's GIF flag are converted through bounded, process-isolated
+FFmpeg pipes and presented as GIFs when the optional `ffmpeg` and `prlimit`
+helpers are installed. Ordinary video and any failed, unavailable, oversized,
+or invalid conversion retains the original MP4 transfer prompt. Unnamed common
+media receives a usable type-specific filename. Empty, over-limit, or
+resource-exhausting content is rejected visibly. Each file is limited to 25 MiB
+and one incoming message to 50 MiB. At most two outgoing files totaling 50 MiB
+are admitted per account; retry after another transfer finishes or is cancelled
+when that queue is full.
 The [attachment policy](docs/attachment-policy.md) records the ownership and
 memory bounds.
 

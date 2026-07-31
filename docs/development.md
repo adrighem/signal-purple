@@ -8,7 +8,7 @@ graph requires Rust 1.94 or later; `rust-toolchain.toml` pins 1.95.0.
 Install system dependencies:
 
 ```sh
-sudo apt install build-essential cmake git gnupg ninja-build pkg-config python3 xz-utils \
+sudo apt install build-essential cmake ffmpeg git gnupg ninja-build pkg-config python3 util-linux xz-utils \
   libpurple-dev libglib2.0-dev libgdk-pixbuf-2.0-dev libsecret-1-dev libssl-dev \
   clang libclang-dev protobuf-compiler
 rustup toolchain install 1.95.0 --component rustfmt,clippy
@@ -16,6 +16,11 @@ rustup toolchain install 1.95.0 --component rustfmt,clippy
 
 CDSI is intentionally disabled because its BoringSSL dependency conflicts with
 the SQLCipher/OpenSSL build used here.
+
+`ffmpeg` and `prlimit` from `util-linux` are optional at runtime. When both are
+available at their Debian paths, the receive worker can convert strictly
+eligible Signal GIF-style MP4 attachments to bounded inline GIFs. Missing
+helpers leave the original receive-file behavior intact.
 
 ## Standard checks
 
@@ -56,8 +61,9 @@ lifetime, bounded file admission, markup, inline-image ownership and routing,
 and contact-snapshot reconciliation. The Rust tests cover ABI values and owned
 payloads, FFI error outputs, acknowledgement and cancellation pressure,
 timestamp allocation, bounded shutdown, credential lifetime, event overflow,
-QR PNG generation, group-key validation, and group-image projection. The
-staged-install probe also verifies the Linux backend's ELF `NODELETE` contract.
+QR PNG generation, group-key validation, group-image projection, and optional
+bounded Signal GIF-style conversion. The staged-install probe also verifies the
+Linux backend's ELF `NODELETE` contract.
 Live compatibility tests require dedicated non-production Signal accounts and
 are not run for untrusted pull requests.
 
