@@ -643,3 +643,22 @@ schema.
   out-of-range sentinel. Matched Rust 1.95 formatting and warning-as-error
   Clippy, all 96 Rust tests, release-helper checks, the warning-as-error C build,
   all six C/Purple tests, and the staged install/plugin-load probe pass locally.
+- PR #42 merged as `8ff1aaf`; its post-merge CI, Debian 13 installation job,
+  CodeQL aggregate, and Release Please run passed. The test-only change
+  correctly produced no release, and its isolated build artifacts were removed.
+
+## 2026-07-31 - Installation lifecycle and pinned C formatting
+
+- User upgrade, rollback, relink, installed-file removal, and account-data
+  removal now live together in the README. The release-process document retains
+  only maintainer candidate validation, trust, automation, publication, and
+  rollback-readiness responsibilities.
+- The canonical fast and full gates require clang-format major version 19 and
+  scan every C source and header without relying on Git metadata. Check and fix
+  modes share one inline style which preserves intentional line wrapping.
+- Debian 13 clang-format 19.1.7 and Ubuntu 24.04 clang-format 19.1.1 produce the
+  same normalized tree. The gate also rejects a missing formatter and a wrong
+  major; shell syntax, gate assertions, and the GitHub workflow pass actionlint.
+- Matched Rust 1.95 formatting and warning-as-error Clippy, all 96 Rust tests,
+  release-helper checks, the warning-as-error C build, all six C/Purple tests,
+  and the staged install/plugin-load probe pass locally with the new format gate.

@@ -135,8 +135,8 @@ encoded_image(const char *format, int width, int height, gsize *size)
 static void
 append_gif_u16(GByteArray *bytes, guint16 value)
 {
-    guint8 encoded[] = {(guint8)(value & 0xffu),
-                        (guint8)((value >> 8) & 0xffu)};
+    guint8 encoded[] = { (guint8)(value & 0xffu),
+                         (guint8)((value >> 8) & 0xffu) };
 
     g_byte_array_append(bytes, encoded, sizeof(encoded));
 }
@@ -144,11 +144,11 @@ append_gif_u16(GByteArray *bytes, guint16 value)
 static GBytes *
 encoded_gif(guint16 width, guint16 height, guint frames)
 {
-    static const guint8 header[] = {'G', 'I', 'F', '8', '9', 'a'};
-    static const guint8 screen_tail[] = {0x80, 0x00, 0x00};
-    static const guint8 colors[] = {0x00, 0x00, 0x00,
-                                    0xff, 0xff, 0xff};
-    static const guint8 image_data[] = {0x02, 0x02, 0x44, 0x01, 0x00};
+    static const guint8 header[] = { 'G', 'I', 'F', '8', '9', 'a' };
+    static const guint8 screen_tail[] = { 0x80, 0x00, 0x00 };
+    static const guint8 colors[] = { 0x00, 0x00, 0x00,
+                                     0xff, 0xff, 0xff };
+    static const guint8 image_data[] = { 0x02, 0x02, 0x44, 0x01, 0x00 };
     GByteArray *bytes = g_byte_array_new();
 
     g_byte_array_append(bytes, header, sizeof(header));
@@ -222,16 +222,16 @@ reset_received(void)
     g_clear_pointer(&received.sender, g_free);
     g_clear_pointer(&received.markup, g_free);
     g_clear_pointer(&received.image, purple_imgstore_unref);
-    received = (ReceivedImage){0};
+    received = (ReceivedImage){ 0 };
 }
 
 static void
 test_supported_formats(void)
 {
-    static const guint8 corrupt_jpeg[] = {0xff, 0xd8, 0xff, 0xe0};
-    static const guint8 corrupt_png[] = {0x89, 0x50, 0x4e, 0x47, 0x0d,
-                                         0x0a, 0x1a, 0x0a, 0x00};
-    static const guint8 corrupt_gif[] = {'G', 'I', 'F', '8', '9', 'a'};
+    static const guint8 corrupt_jpeg[] = { 0xff, 0xd8, 0xff, 0xe0 };
+    static const guint8 corrupt_png[] = { 0x89, 0x50, 0x4e, 0x47, 0x0d,
+                                          0x0a, 0x1a, 0x0a, 0x00 };
+    static const guint8 corrupt_gif[] = { 'G', 'I', 'F', '8', '9', 'a' };
     g_autofree guint8 *jpeg = NULL;
     g_autofree guint8 *png = NULL;
     g_autofree guint8 *oversized_png = NULL;
@@ -297,7 +297,7 @@ test_supported_formats(void)
 static void
 test_group_delivery(void)
 {
-    PurpleConnection connection = {0};
+    PurpleConnection connection = { 0 };
     PurpleStoredImage *stored;
     g_autofree char *expected_markup = NULL;
     g_autofree guint8 *png = NULL;
@@ -349,7 +349,7 @@ test_group_delivery(void)
 static void
 test_group_gif_delivery(void)
 {
-    PurpleConnection connection = {0};
+    PurpleConnection connection = { 0 };
     PurpleStoredImage *stored;
     g_autoptr(GBytes) gif = NULL;
     gconstpointer gif_data;

@@ -21,7 +21,7 @@ test_path(const char *name)
 static void
 test_reads_binary_data(void)
 {
-    const guint8 expected[] = {0x00, 0x01, 0xff, 0x00, 0x7f};
+    const guint8 expected[] = { 0x00, 0x01, 0xff, 0x00, 0x7f };
     g_autofree char *path = test_path("binary");
     g_autoptr(GError) error = NULL;
     g_autoptr(GBytes) bytes = NULL;

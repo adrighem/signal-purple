@@ -6,7 +6,7 @@
 static void
 test_snapshot_reconciliation(void)
 {
-    SignalContactSync sync = {0};
+    SignalContactSync sync = { 0 };
 
     signal_contact_sync_init(&sync);
     g_assert_false(signal_contact_sync_should_remove(&sync, "aci:contact-one"));
@@ -30,7 +30,7 @@ test_snapshot_reconciliation(void)
 static void
 test_ignores_invalid_marks(void)
 {
-    SignalContactSync sync = {0};
+    SignalContactSync sync = { 0 };
 
     signal_contact_sync_init(&sync);
     signal_contact_sync_mark(&sync, "aci:outside-snapshot");

@@ -49,8 +49,10 @@ from the extraction above:
   tests.~~ Completed with a linked C test which queries the production Rust
   library for all contract values, both public struct layouts, and every
   declared FFI input limit.
-- Split installation lifecycle guidance from maintainer release automation and
-  add a pinned C formatting gate.
+- ~~Split installation lifecycle guidance from maintainer release automation
+  and add a pinned C formatting gate.~~ Completed by moving user lifecycle
+  procedures into the README and making clang-format 19 check and fix every C
+  source and header through the canonical gate.
 
 Each follow-up should land independently with focused regression coverage,
 full `scripts/check.sh full` validation, and the Debian 13 CI gate.

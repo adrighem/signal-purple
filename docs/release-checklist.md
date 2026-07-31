@@ -69,7 +69,8 @@ Those boxes remain unchecked and are known limitations, not test passes.
 
 ## Documentation and release
 
-- [x] Installation, upgrade, rollback, relinking, and removal are documented.
+- [x] The user-facing [installation lifecycle](../README.md#installation-lifecycle)
+  documents upgrade, rollback, relinking, and removal.
 - [ ] Candidate install, load, upgrade, rollback, and uninstall paths pass for
   every advertised installation scope.
 - [x] Security boundaries, data retention, limitations, and support are current.

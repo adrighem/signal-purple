@@ -11,9 +11,9 @@ static const SecretSchema signal_secret_schema = {
     .name = "io.github.adrighem.signal-purple",
     .flags = SECRET_SCHEMA_NONE,
     .attributes = {
-        {"account", SECRET_SCHEMA_ATTRIBUTE_STRING},
-        {"store", SECRET_SCHEMA_ATTRIBUTE_STRING},
-        {NULL, 0},
+        { "account", SECRET_SCHEMA_ATTRIBUTE_STRING },
+        { "store", SECRET_SCHEMA_ATTRIBUTE_STRING },
+        { NULL, 0 },
     },
 };
 

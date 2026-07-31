@@ -185,10 +185,10 @@ test_message_flags(void)
     g_assert_cmpuint(outgoing, ==,
                      PURPLE_MESSAGE_SEND | PURPLE_MESSAGE_REMOTE_SEND);
     g_assert_cmpuint(incoming & (PURPLE_MESSAGE_SYSTEM | PURPLE_MESSAGE_NOTIFY |
-                                PURPLE_MESSAGE_NO_LOG),
+                                 PURPLE_MESSAGE_NO_LOG),
                      ==, 0);
     g_assert_cmpuint(outgoing & (PURPLE_MESSAGE_SYSTEM | PURPLE_MESSAGE_NOTIFY |
-                                PURPLE_MESSAGE_NO_LOG),
+                                 PURPLE_MESSAGE_NO_LOG),
                      ==, 0);
 }
 
