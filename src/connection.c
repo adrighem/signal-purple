@@ -289,7 +289,7 @@ signal_attachment_init(PurpleXfer *xfer)
     purple_xfer_start(xfer, -1, NULL, 0);
 }
 
-static void
+static gboolean
 signal_deliver_attachment(SignalConnection *connection,
                           const SignalEvent *event)
 {
@@ -301,30 +301,30 @@ signal_deliver_attachment(SignalConnection *connection,
     const char *peer;
     time_t timestamp;
 
+    if (event->peer_id == NULL || event->peer_id[0] == '\0' ||
+        (event->chat_id != NULL && event->chat_id[0] == '\0') ||
+        event->data == NULL || event->data_len == 0) {
+        purple_debug_warning(
+            "signal-purple",
+            "Rejected a malformed Signal attachment projection without acknowledging it\n");
+        return FALSE;
+    }
+
     if (event->chat_id != NULL && event->chat_id[0] != '\0') {
         g_hash_table_add(connection->active_group_keys,
                          g_strdup(event->chat_id));
         conversation = signal_open_group(connection, event->chat_id, NULL);
     }
 
-    if (event->data == NULL || event->data_len == 0) {
-        purple_notify_error(connection, "Signal attachment unavailable",
-                            "Signal delivered an empty attachment",
-                            "Ask the sender to resend the attachment.");
-        signal_queue_final_group_read(connection, conversation, event);
-        return;
-    }
     if (event->data_len > SIGNAL_MAX_ATTACHMENT_BYTES) {
         purple_notify_error(
             connection, "Signal attachment rejected",
             "The Signal attachment exceeds the 25 MiB size limit",
             "Ask the sender to resend a smaller attachment.");
         signal_queue_final_group_read(connection, conversation, event);
-        return;
+        return TRUE;
     }
-    peer = event->peer_id != NULL && event->peer_id[0] != '\0'
-               ? event->peer_id
-               : "Signal contact";
+    peer = event->peer_id;
     filename = g_path_get_basename(
         event->title != NULL && event->title[0] != '\0'
             ? event->title
@@ -346,7 +346,7 @@ signal_deliver_attachment(SignalConnection *connection,
                 event->peer_id, filename, event->text, event->data,
                 event->data_len, timestamp)) {
             signal_queue_final_group_read(connection, conversation, event);
-            return;
+            return TRUE;
         }
     }
 
@@ -357,7 +357,7 @@ signal_deliver_attachment(SignalConnection *connection,
             "Too much attachment data is waiting for a save location",
             "Save or reject pending transfers, then ask the sender to resend the attachment.");
         signal_queue_final_group_read(connection, conversation, event);
-        return;
+        return TRUE;
     }
 
     account = purple_connection_get_account(connection->gc);
@@ -367,7 +367,7 @@ signal_deliver_attachment(SignalConnection *connection,
                             "Could not create a receive transfer",
                             "Restart Pidgin, then ask the sender to resend the attachment.");
         signal_queue_final_group_read(connection, conversation, event);
-        return;
+        return TRUE;
     }
     attachment = g_new0(SignalAttachment, 1);
     attachment->bytes = g_bytes_new(event->data, event->data_len);
@@ -383,6 +383,7 @@ signal_deliver_attachment(SignalConnection *connection,
     purple_xfer_set_cancel_recv_fnc(xfer, signal_attachment_cancel);
     purple_xfer_request(xfer);
     signal_queue_final_group_read(connection, conversation, event);
+    return TRUE;
 }
 
 static void
@@ -1002,7 +1003,7 @@ signal_open_group(SignalConnection *connection, const char *group_key,
     return conversation;
 }
 
-static void
+static gboolean
 signal_deliver_direct(SignalConnection *connection, const SignalEvent *event)
 {
     PurpleAccount *account;
@@ -1010,8 +1011,13 @@ signal_deliver_direct(SignalConnection *connection, const SignalEvent *event)
     g_autofree char *escaped = NULL;
     time_t timestamp;
 
-    if (event->peer_id == NULL || event->text == NULL)
-        return;
+    if (event->peer_id == NULL || event->peer_id[0] == '\0' ||
+        event->text == NULL) {
+        purple_debug_warning(
+            "signal-purple",
+            "Rejected a malformed direct-message projection without acknowledging it\n");
+        return FALSE;
+    }
 
     account = purple_connection_get_account(connection->gc);
     conversation = purple_find_conversation_with_account(
@@ -1029,24 +1035,31 @@ signal_deliver_direct(SignalConnection *connection, const SignalEvent *event)
         serv_got_im(connection->gc, event->peer_id, escaped,
                     signal_message_flags(FALSE), timestamp);
         signal_queue_read(connection, conversation, event);
-        return;
+        return TRUE;
     }
 
     purple_conv_im_write(PURPLE_CONV_IM(conversation),
                          purple_account_get_username(account), escaped,
                          signal_message_flags(TRUE),
                          timestamp);
+    return TRUE;
 }
 
-static void
+static gboolean
 signal_deliver_group(SignalConnection *connection, const SignalEvent *event)
 {
     guint id;
     g_autofree char *escaped = NULL;
     time_t timestamp;
 
-    if (event->chat_id == NULL || event->peer_id == NULL || event->text == NULL)
-        return;
+    if (event->chat_id == NULL || event->chat_id[0] == '\0' ||
+        event->peer_id == NULL || event->peer_id[0] == '\0' ||
+        event->text == NULL) {
+        purple_debug_warning(
+            "signal-purple",
+            "Rejected a malformed group-message projection without acknowledging it\n");
+        return FALSE;
+    }
 
     /* The backend emits group content only after confirming local membership.
      * This keeps a newly joined group usable before the next full snapshot. */
@@ -1064,6 +1077,7 @@ signal_deliver_group(SignalConnection *connection, const SignalEvent *event)
                          (event->flags & SIGNAL_EVENT_FLAG_OUTGOING) != 0),
                      escaped, timestamp);
     signal_queue_final_group_read(connection, conversation, event);
+    return TRUE;
 }
 
 static void
@@ -1180,8 +1194,13 @@ signal_group_left(SignalConnection *connection, const SignalEvent *event)
 }
 
 gboolean
-signal_handle_event(SignalConnection *connection, const SignalEvent *event)
+signal_dispatch_event(SignalConnection *connection, const SignalEvent *event,
+                      gboolean *accepted)
 {
+    gboolean projection_accepted = TRUE;
+
+    if (accepted != NULL)
+        *accepted = FALSE;
     switch ((SignalEventKind)event->kind) {
     case SIGNAL_EVENT_LINK_QR:
         signal_show_link_qr(connection, event);
@@ -1225,16 +1244,16 @@ signal_handle_event(SignalConnection *connection, const SignalEvent *event)
         signal_end_group_sync(connection);
         break;
     case SIGNAL_EVENT_MESSAGE:
-        signal_deliver_direct(connection, event);
+        projection_accepted = signal_deliver_direct(connection, event);
         break;
     case SIGNAL_EVENT_GROUP_MESSAGE:
-        signal_deliver_group(connection, event);
+        projection_accepted = signal_deliver_group(connection, event);
         break;
     case SIGNAL_EVENT_GROUP_LEFT:
         signal_group_left(connection, event);
         break;
     case SIGNAL_EVENT_ATTACHMENT:
-        signal_deliver_attachment(connection, event);
+        projection_accepted = signal_deliver_attachment(connection, event);
         break;
     case SIGNAL_EVENT_ATTACHMENT_SENT:
         signal_outgoing_attachment_complete(connection, event);
@@ -1292,10 +1311,19 @@ signal_handle_event(SignalConnection *connection, const SignalEvent *event)
     default:
         purple_debug_warning("signal-purple", "Unknown backend event %u\n",
                              event->kind);
+        projection_accepted = FALSE;
         break;
     }
 
+    if (accepted != NULL)
+        *accepted = projection_accepted;
     return TRUE;
+}
+
+gboolean
+signal_handle_event(SignalConnection *connection, const SignalEvent *event)
+{
+    return signal_dispatch_event(connection, event, NULL);
 }
 
 static gboolean
@@ -1313,6 +1341,7 @@ signal_poll_backend(gint fd, GIOCondition condition, gpointer data)
     for (guint index = 0; index < 64; index++) {
         SignalEvent *event = NULL;
         int result = signal_core_poll_event(connection->core, &event);
+        gboolean accepted;
         gboolean keep;
 
         if (result < 0) {
@@ -1341,8 +1370,8 @@ signal_poll_backend(gint fd, GIOCondition condition, gpointer data)
             return G_SOURCE_REMOVE;
         }
 
-        keep = signal_handle_event(connection, event);
-        if (keep && event->request_id != 0 &&
+        keep = signal_dispatch_event(connection, event, &accepted);
+        if (keep && accepted && event->request_id != 0 &&
             (event->kind == SIGNAL_EVENT_MESSAGE ||
              event->kind == SIGNAL_EVENT_GROUP_MESSAGE ||
              event->kind == SIGNAL_EVENT_ATTACHMENT)) {

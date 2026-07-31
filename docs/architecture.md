@@ -177,9 +177,12 @@ older messages from the primary phone or Signal service.
   Attachment sends are not part of the durable text-message outbox.
 - Presage acknowledges an envelope to Signal before the Purple UI can display
   it, but saves supported content in SQLCipher first. signal-purple records a
-  separate encrypted projection acknowledgment only after Purple accepts the
-  corresponding event. A crash anywhere between network receipt and UI
-  delivery therefore leaves the message eligible for replay on reconnect.
+  separate encrypted projection acknowledgment only after the adapter validates
+  the event's required routing and payload fields and accepts its synchronous
+  presentation or terminal policy rejection. A malformed event is left
+  unacknowledged and eligible for replay rather than being silently discarded.
+  A crash anywhere between network receipt and UI delivery likewise leaves the
+  message eligible for replay on reconnect.
   Acknowledgements are coalesced by registered delivery ID, retried after local
   store failures, and drained within the bounded orderly-shutdown budget.
   Existing stored history is marked projected when this mechanism is first

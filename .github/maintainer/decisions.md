@@ -155,3 +155,14 @@
   dynamic relocation table.
 - Bound direct, staged-install, and release-package probe execution so a loader
   or teardown regression fails promptly instead of consuming an entire CI job.
+
+## 2026-07-31 - Acknowledge only accepted projections
+
+- Keep event-source continuation separate from projection acceptance. A
+  malformed event must not stop the notifier, but it must not release the
+  durable encrypted projection either.
+- Require nonempty direct peers, nonempty group identifiers and senders, text
+  presence, consistent attachment routing, and nonempty attachment bytes before
+  a message-bearing event is accepted.
+- Treat explicit resource and presentation-policy rejections as terminal after
+  notifying the user; reserve replay for malformed or interrupted projections.
