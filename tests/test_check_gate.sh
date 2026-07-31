@@ -4,15 +4,23 @@ set -eu
 
 repository=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 check_script="$repository/scripts/check.sh"
+ci_workflow="$repository/.github/workflows/ci.yml"
 
 require_argument()
 {
-    argument=$1
-    if ! grep -F -- "$argument" "$check_script" >/dev/null; then
-        printf 'check.sh is missing required argument: %s\n' "$argument" >&2
+    subject=$1
+    file=$2
+    argument=$3
+    if ! grep -F -- "$argument" "$file" >/dev/null; then
+        printf '%s is missing required argument: %s\n' \
+            "$subject" "$argument" >&2
         exit 1
     fi
 }
 
-require_argument "-DBUILD_TESTING=ON"
-require_argument "--no-tests=error"
+require_argument "check.sh" "$check_script" "-DBUILD_TESTING=ON"
+require_argument "check.sh" "$check_script" "--no-tests=error"
+require_argument "Debian CI" "$ci_workflow" \
+    "cargo test --locked --manifest-path rust/signal-core/Cargo.toml"
+require_argument "Debian CI" "$ci_workflow" "-DBUILD_TESTING=ON"
+require_argument "Debian CI" "$ci_workflow" "--no-tests=error"
