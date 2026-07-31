@@ -388,3 +388,58 @@ unchanged rather than inferring its schema.
 - The remaining attachment-admission, recovery-state, connection-lifecycle,
   projection-acknowledgment, and ABI-conformance work is recorded in
   `work/architecture-refactor-2026-07-25.md`.
+
+## 2026-07-30 — v0.3.0 health and empty-queue audit
+
+- `main`, `origin/main`, and prerelease tag `v0.3.0` all identify
+  `be4b9a8`. The worktree was clean before this maintenance run.
+- The repository inbox, open issue and pull-request queues, Dependabot alerts,
+  code-scanning alerts, and private security-advisory queue are empty. Current
+  main CI, Release Please, dependency review, and scheduled CodeQL pass.
+- All four downloaded v0.3.0 payloads pass the published `SHA256SUMS`.
+  GitHub's attestation API reports one SLSA v1 bundle binding those four names
+  and digests to release workflow run `30200070988` and commit `be4b9a8`.
+  The installed GitHub CLI cannot independently verify the Sigstore bundle,
+  and `SHA256SUMS` itself is not an attested subject.
+- The recorded release-trust design depends on protected `main`, but the audit
+  initially found no branch protection or rulesets. With approval, active
+  rulesets now require pull requests, current CI, dependency review, CodeQL,
+  code-scanning results, and block deletion and force-push of `main`. Layered
+  tag rules let only Release Please create `v*` tags while allowing nobody to
+  update or delete them. Future releases are immutable. The existing v0.3.0
+  release record predates that setting and remains mutable, while its tag
+  reference is now protected.
+- Local Rust formatting, all 87 signal-purple Rust tests, all 35 Presage tests,
+  all 11 Presage SQLite-store tests, release-helper checks, the warning-as-error
+  C build, all five C/Purple tests, and the staged install probe pass. The full
+  Presage workspace also checks with all targets. Local Clippy remains
+  unavailable because the installed component is 1.87 while rustc and current
+  dependencies require newer versions; exact-main CI passed Clippy with its
+  matched toolchain.
+- Static review found that incoming attachment size checks run after Presage
+  has materialized the complete download, so missing or understated metadata
+  can exceed the intended allocation boundary. A bounded upstream download
+  API is required. Pending read receipts can also grow with every unread
+  message in an unfocused conversation and need an explicit bounded policy.
+- A local UUID-only buddy confirmed the generic profile-fallback gap: an empty
+  synchronized contact name and phone number leave Purple with no server alias,
+  while the baseline Presage contact sync can erase and then suppress repair of
+  a profile-derived fallback. No personal identifier was recorded here.
+- Prepared local CI hardening so the supported Debian 13 job runs Rust tests,
+  explicitly enables C tests, and fails when CTest discovers zero tests.
+  Removed the duplicate released SQLite fix from the `Unreleased` changelog.
+- Prepared an unpushed Presage commit that bounds attachment downloads before
+  allocation, validates encrypted framing before decryption, preserves
+  canonical profile keys during contact sync, and repairs empty contact names
+  from cached or freshly fetched Signal profiles. Profile refreshes are
+  sequence-ordered and coalesced by contact, use a bounded background fetch,
+  serialize final merges with contact sync, and drain before Presage reports an
+  empty receive queue. The local signal-purple branch pins that commit and uses
+  the remaining per-message byte budget as the download limit.
+- Approved repository-setting changes were applied and verified. No issue,
+  pull request, comment, release edit, or code push was made; both code branches
+  remain local pending review and approval.
+
+The installed maintainer package still lacks its referenced triage script and
+reference files. `state.json` remains unchanged rather than inferring its
+schema.

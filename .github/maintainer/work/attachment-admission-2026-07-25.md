@@ -30,9 +30,9 @@ model.
   request identifier and byte budget without a manual cleanup branch.
 - ABI version 7 and the existing status/event vocabulary remain unchanged.
 
-## Next phase
+## Completed follow-up
 
-Make cancellation independent of command-channel capacity and retain the C
-transfer until cancellation is accepted. Then replace the C adapter's eager
-whole-file read with a bounded single-open reader so oversized files are
-rejected before full allocation.
+The v0.3.0 reliability-hardening phase made cancellation independent of
+command-channel capacity, retained C transfer ownership through cancellation,
+and replaced the adapter's eager whole-file read with a bounded single-open
+regular-file reader.

@@ -28,10 +28,12 @@ from the extraction above:
 - ~~Bound aggregate queued and in-flight attachment bytes and upload
   concurrency; reject duplicate attachment request identifiers.~~ Completed in
   [the attachment-admission phase](attachment-admission-2026-07-25.md).
-- Make attachment cancellation reliable even when the command channel is full,
-  and keep C transfer ownership until cancellation is accepted.
-- Read outgoing local files through a bounded single-open C helper so oversized
-  files are rejected before a full allocation.
+- ~~Make attachment cancellation reliable even when the command channel is
+  full, and keep C transfer ownership until cancellation is accepted.~~
+  Completed in the v0.3.0 reliability-hardening phase.
+- ~~Read outgoing local files through a bounded single-open C helper so
+  oversized files are rejected before a full allocation.~~ Completed in the
+  v0.3.0 reliability-hardening phase.
 - Extract a deterministic recovery/session transition model from the backend
   actor before splitting contact, group, projection, and outbox modules.
 - Centralize `SignalConnection` construction and teardown while preserving

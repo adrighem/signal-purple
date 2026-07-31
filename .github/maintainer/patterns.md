@@ -38,3 +38,14 @@
 - Keep contributor commands and primary CI phases behind one repository-owned
   driver. Duplicated command lists drift in warning policy, test scope, and
   install probing even when each list is individually reasonable.
+- Verify live GitHub branch, tag, and release controls whenever release trust
+  depends on them. A documented protected-branch policy does not protect an
+  unconfigured repository.
+- A payload limit checked only after a dependency returns a complete buffer is
+  not an allocation limit. Enforce the bound while reading or downloading,
+  including when sender-controlled size metadata is absent or understated.
+- Empty contact snapshots must not erase a usable profile-derived display name.
+  Purple local aliases remain user-owned and take precedence over server data.
+- Optional profile enrichment must not delay message delivery or outlive the
+  receive queue boundary. Coalesce it per contact, bound network waits, and
+  serialize the final merge with synchronized contact writes.
