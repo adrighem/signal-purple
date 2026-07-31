@@ -73,3 +73,7 @@
 - A handler's event-loop continuation result is not evidence that a payload was
   accepted. Track projection acceptance separately so malformed durable input
   can remain replayable without tearing down an otherwise healthy event source.
+- Before splitting an actor whose behavior is gated by several related
+  booleans, replace them with a small tested transition model. Invalid state
+  combinations then become unrepresentable and later module boundaries can
+  consume named readiness and authority predicates.

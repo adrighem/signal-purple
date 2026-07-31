@@ -166,3 +166,13 @@
   a message-bearing event is accepted.
 - Treat explicit resource and presentation-policy rejections as terminal after
   notifying the user; reserve replay for malformed or interrupted projections.
+
+## 2026-07-31 - Make session transitions explicit
+
+- Represent initialization, recovery, and readiness as one tested session
+  phase instead of independently mutable booleans.
+- Represent group snapshots as pending, authoritative, or dirty. Recovery and
+  snapshot failure revoke authority; a successful full snapshot restores it.
+- Keep retry timing, deferred-command handling, direct-message availability,
+  and Purple readiness events unchanged while establishing a stable boundary
+  for later contact, group, projection, and outbox extraction.
