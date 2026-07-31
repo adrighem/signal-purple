@@ -59,8 +59,8 @@ signal_inline_gif_skip_sub_blocks(const guint8 *data, gsize size,
 static gboolean
 signal_inline_gif_is_bounded(const guint8 *data, gsize size)
 {
-    static const guint8 gif87a_prefix[] = {'G', 'I', 'F', '8', '7', 'a'};
-    static const guint8 gif89a_prefix[] = {'G', 'I', 'F', '8', '9', 'a'};
+    static const guint8 gif87a_prefix[] = { 'G', 'I', 'F', '8', '7', 'a' };
+    static const guint8 gif89a_prefix[] = { 'G', 'I', 'F', '8', '9', 'a' };
     guint16 canvas_width;
     guint16 canvas_height;
     guint64 canvas_pixels;
@@ -172,9 +172,9 @@ static const char *
 signal_inline_image_type(const char *mime_type, const guint8 *data,
                          gsize size)
 {
-    static const guint8 jpeg_prefix[] = {0xff, 0xd8, 0xff};
-    static const guint8 png_prefix[] = {0x89, 0x50, 0x4e, 0x47,
-                                        0x0d, 0x0a, 0x1a, 0x0a};
+    static const guint8 jpeg_prefix[] = { 0xff, 0xd8, 0xff };
+    static const guint8 png_prefix[] = { 0x89, 0x50, 0x4e, 0x47,
+                                         0x0d, 0x0a, 0x1a, 0x0a };
 
     if (mime_type == NULL || data == NULL || size == 0)
         return NULL;
@@ -196,7 +196,7 @@ gboolean
 signal_inline_image_is_supported(const char *mime_type, const guint8 *data,
                                  gsize size)
 {
-    SignalInlineImageValidation validation = {0};
+    SignalInlineImageValidation validation = { 0 };
     g_autoptr(GdkPixbufLoader) loader = NULL;
     g_autoptr(GError) error = NULL;
     const char *image_type;

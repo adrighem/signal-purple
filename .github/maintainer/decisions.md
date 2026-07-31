@@ -196,3 +196,14 @@
 - Link the existing C utility test to the real Rust library and compare its
   independently compiled values. Separate language-local assertions remain
   useful for readable stability failures but do not prove conformance.
+
+## 2026-07-31 - Separate lifecycle docs and pin C formatting
+
+- Keep user install, upgrade, rollback, relink, and removal procedures together
+  in the README. Keep `docs/release-process.md` scoped to maintainer candidate,
+  trust, automation, publication, and rollback-readiness responsibilities.
+- Require clang-format major version 19 in local and CI gates. Keep the exact
+  style in `scripts/check.sh`, preserve intentional wrapping with an unlimited
+  column setting, and expose matching check and fix modes.
+- Format every C source and header under `include`, `src`, and `tests`; do not
+  depend on Git metadata so the gate also works from a source archive.

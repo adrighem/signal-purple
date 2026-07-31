@@ -849,7 +849,7 @@ signal_add_group_member(SignalConnection *connection, const SignalEvent *event)
     member = g_new0(SignalGroupMember, 1);
     member->peer_id = g_strdup(event->peer_id);
     member->flags = event->value != 0 ? PURPLE_CBFLAGS_OP
-                                     : PURPLE_CBFLAGS_NONE;
+                                      : PURPLE_CBFLAGS_NONE;
     g_ptr_array_add(members, member);
 }
 
@@ -996,7 +996,7 @@ signal_open_group(SignalConnection *connection, const char *group_key,
     if (conversation == NULL ||
         purple_conv_chat_has_left(PURPLE_CONV_CHAT(conversation)))
         conversation = serv_got_joined_chat(connection->gc, (int)id,
-                                             group_key);
+                                            group_key);
     purple_conversation_set_title(
         conversation, signal_group_display_title(connection, group_key));
     signal_refresh_group_members(connection, group_key);
@@ -1521,7 +1521,7 @@ signal_login(PurpleAccount *account)
 
     config.store_path = store_path;
     config.device_name = purple_account_get_string(account, "device-name",
-                                                    "signal-purple");
+                                                   "signal-purple");
     config.passphrase = passphrase;
     status = signal_core_new(&config, &connection->core);
     secret_password_free(passphrase);

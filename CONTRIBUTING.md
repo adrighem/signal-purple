@@ -47,11 +47,14 @@ the maintainer procedure.
 
 ## Validation
 
-Run the fast Rust feedback loop while iterating:
+Run the fast feedback loop while iterating:
 
 ```sh
 scripts/check.sh fast
 ```
+
+If its C formatting phase fails, apply the repository's pinned style with
+`scripts/check.sh c-format-fix`.
 
 Before requesting review, run the complete local gate:
 

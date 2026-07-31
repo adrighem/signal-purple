@@ -84,3 +84,8 @@
 - Language-local ABI tests can each pass while their declarations disagree.
   Link one side to the production library and compare compiled constants,
   layouts, and public limits across the actual boundary.
+- Keep user data-lifecycle instructions out of maintainer release automation;
+  link the release gates to the user procedure they validate.
+- A formatting gate must pin the formatter major and share one style between
+  check and fix modes. Scan source directories rather than Git state so release
+  archives receive the same result as working trees.

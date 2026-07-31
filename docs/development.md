@@ -8,7 +8,8 @@ graph requires Rust 1.94 or later; `rust-toolchain.toml` pins 1.95.0.
 Install system dependencies:
 
 ```sh
-sudo apt install build-essential cmake ffmpeg git gnupg ninja-build pkg-config python3 util-linux xz-utils \
+sudo apt install build-essential clang-format-19 cmake ffmpeg git gnupg \
+  ninja-build pkg-config python3 util-linux xz-utils \
   libpurple-dev libglib2.0-dev libgdk-pixbuf-2.0-dev libsecret-1-dev libssl-dev \
   clang libclang-dev protobuf-compiler
 rustup toolchain install 1.95.0 --component rustfmt,clippy
@@ -37,16 +38,18 @@ CI job:
 scripts/check.sh full
 ```
 
-The full gate runs Rust format, clippy, and all Rust tests; release-helper
-tests; a Debug CMake/Ninja build; CTest; and a staged installation/plugin-load
-probe. Set `SIGNAL_PURPLE_BUILD_DIR` to use a different build directory and
-`SIGNAL_PURPLE_BUILD_JOBS` to change build parallelism. The separate Debian 13
-CI job validates the clean supported-platform environment.
+The full gate runs the pinned C formatter, Rust format, clippy, and all Rust
+tests; release-helper tests; a Debug CMake/Ninja build; CTest; and a staged
+installation/plugin-load probe. Set `SIGNAL_PURPLE_BUILD_DIR` to select the
+build directory and `SIGNAL_PURPLE_BUILD_JOBS` to change build parallelism. The
+separate Debian 13 CI job validates the clean supported-platform environment.
 
 Each phase is also directly runnable, for example:
 
 ```sh
 scripts/check.sh rust-test
+scripts/check.sh c-format
+scripts/check.sh c-format-fix
 scripts/check.sh configure
 scripts/check.sh build
 scripts/check.sh c-test
@@ -54,6 +57,11 @@ ctest --test-dir build --output-on-failure --no-tests=error -R contact-sync
 cargo test --locked --manifest-path rust/signal-core/Cargo.toml \
   bounds_binary_events
 ```
+
+The C gate requires clang-format 19 and rejects any other major version. Its
+repository-owned style preserves intentional line wrapping while normalizing
+indentation, declarations, braces, and token spacing. Use `c-format-fix` to
+apply that exact style.
 
 The C tests include a linked C/Rust ABI constant, layout, and input-limit check
 plus a headless libpurple core that probes and loads the actual plugin module,

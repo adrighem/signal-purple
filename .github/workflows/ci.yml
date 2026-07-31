@@ -29,9 +29,10 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends \
-            build-essential clang cmake git libclang-dev libglib2.0-dev \
-            libgdk-pixbuf-2.0-dev libpurple-dev libsecret-1-dev libssl-dev ninja-build \
-            gnupg pkg-config protobuf-compiler python3 xz-utils
+            build-essential clang clang-format-19 cmake git gnupg \
+            libclang-dev libgdk-pixbuf-2.0-dev libglib2.0-dev \
+            libpurple-dev libsecret-1-dev libssl-dev ninja-build pkg-config \
+            protobuf-compiler python3 xz-utils
 
       - name: Install pinned Rust toolchain
         uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c
@@ -58,9 +59,10 @@ jobs:
         run: |
           apt-get update
           apt-get install --yes --no-install-recommends \
-            build-essential ca-certificates clang cmake curl git gzip \
-            libclang-dev libgdk-pixbuf-2.0-dev libglib2.0-dev libpurple-dev \
-            libsecret-1-dev libssl-dev ninja-build pkgconf protobuf-compiler tar
+            build-essential ca-certificates clang clang-format-19 cmake curl \
+            git gzip libclang-dev libgdk-pixbuf-2.0-dev libglib2.0-dev \
+            libpurple-dev libsecret-1-dev libssl-dev ninja-build pkgconf \
+            protobuf-compiler tar
 
       - name: Check out source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -86,6 +88,9 @@ jobs:
         run: |
           cat /etc/os-release
           uname -m
+
+      - name: Check C formatting
+        run: scripts/check.sh c-format
 
       - name: Test Rust core
         run: cargo test --locked --manifest-path rust/signal-core/Cargo.toml

@@ -21,7 +21,7 @@ typedef gboolean (*SignalDispatchEventFunc)(SignalConnection *connection,
                                             const SignalEvent *event,
                                             gboolean *accepted);
 typedef SignalConnection *(*SignalConnectionNewFunc)(PurpleConnection *gc,
-                                                      const char *store_path);
+                                                     const char *store_path);
 
 static SignalConnectionNewFunc connection_new;
 
@@ -118,7 +118,7 @@ dispatch_group_snapshot(SignalHandleEventFunc handle_event,
                         SignalConnection *connection)
 {
     SignalEvent events[] = {
-        {.kind = SIGNAL_EVENT_GROUP_SYNC_BEGIN},
+        { .kind = SIGNAL_EVENT_GROUP_SYNC_BEGIN },
         {
             .kind = SIGNAL_EVENT_GROUP,
             .chat_id = "stable-conversation-one",
@@ -139,7 +139,7 @@ dispatch_group_snapshot(SignalHandleEventFunc handle_event,
             .chat_id = "stable-conversation-legacy",
             .title = "Remote legacy title",
         },
-        {.kind = SIGNAL_EVENT_GROUP_SYNC_END},
+        { .kind = SIGNAL_EVENT_GROUP_SYNC_END },
     };
 
     for (guint index = 0; index < G_N_ELEMENTS(events); index++) {
@@ -516,7 +516,7 @@ test_chat_legacy_migration(PurpleAccount *account,
                                              SIGNAL_SYNCED_GROUP_KEY));
     g_assert_cmpstr(purple_chat_get_name(chat), ==, "Test group");
     g_assert_cmpstr(g_hash_table_lookup(purple_chat_get_components(chat),
-                                       SIGNAL_GROUP_COMPONENT_KEY),
+                                        SIGNAL_GROUP_COMPONENT_KEY),
                     ==, "legacy-chat-managed");
     g_assert_null(purple_find_group(SIGNAL_LEGACY_CHAT_GROUP));
 
@@ -618,7 +618,7 @@ test_group_conversation_identity(PurplePlugin *plugin,
     union {
         gpointer pointer;
         SignalHandleEventFunc function;
-    } handle_event = {0};
+    } handle_event = { 0 };
     guint reconnect_joined = 0;
 
     purple_account_set_connection(account, &gc);
@@ -1090,7 +1090,7 @@ static void
 test_standard_conversation_logging(PurplePlugin *plugin,
                                    PurplePluginProtocolInfo *protocol)
 {
-    const gboolean configured_states[] = {FALSE, TRUE};
+    const gboolean configured_states[] = { FALSE, TRUE };
     const gboolean original_im_logging =
         purple_prefs_get_bool("/purple/logging/log_ims");
     const gboolean original_chat_logging =
@@ -1098,7 +1098,7 @@ test_standard_conversation_logging(PurplePlugin *plugin,
     union {
         gpointer pointer;
         SignalDispatchEventFunc function;
-    } dispatch_event = {0};
+    } dispatch_event = { 0 };
 
     g_assert_true(g_module_symbol((GModule *)plugin->handle,
                                   "signal_dispatch_event",
@@ -1210,10 +1210,10 @@ test_standard_conversation_logging(PurplePlugin *plugin,
         group_id =
             purple_conv_chat_get_id(PURPLE_CONV_CHAT(group));
         g_assert_cmpint(protocol->send_im(&gc, direct_event.peer_id,
-                                         "outbound direct probe", 0),
+                                          "outbound direct probe", 0),
                         ==, -EINVAL);
         g_assert_cmpint(protocol->chat_send(&gc, group_id,
-                                           "outbound group probe", 0),
+                                            "outbound group probe", 0),
                         ==, -EINVAL);
         g_assert_cmpint(purple_conversation_is_logging(direct), ==,
                         !configured);
@@ -1246,11 +1246,11 @@ test_pending_transfer_disconnect(PurplePluginProtocolInfo *protocol,
         enum TransferCallback callback;
         gboolean disconnect_first;
     } cases[] = {
-        {CANCEL_TRANSFER, FALSE},
-        {DENY_TRANSFER, FALSE},
-        {CANCEL_TRANSFER, TRUE},
-        {DENY_TRANSFER, TRUE},
-        {ACCEPT_TRANSFER, TRUE},
+        { CANCEL_TRANSFER, FALSE },
+        { DENY_TRANSFER, FALSE },
+        { CANCEL_TRANSFER, TRUE },
+        { DENY_TRANSFER, TRUE },
+        { ACCEPT_TRANSFER, TRUE },
     };
     g_autofree char *filename =
         g_build_filename(user_dir, "pending-transfer.txt", NULL);
@@ -1479,7 +1479,7 @@ main(int argc, char **argv)
     union {
         gpointer pointer;
         SignalConnectionNewFunc function;
-    } resolved_connection_new = {0};
+    } resolved_connection_new = { 0 };
 
     g_assert_cmpint(argc, ==, 2);
     user_dir = g_dir_make_tmp("signal-purple-test-XXXXXX", &error);
