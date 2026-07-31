@@ -138,8 +138,15 @@ older messages from the primary phone or Signal service.
   remains within the format-specific pixel limits is copied into Purple's image
   store and written to the originating chat with the Signal sender and
   timestamp. GIF structure is parsed before decoding to bound frame count by
-  cumulative canvas area. Video, including Signal GIFs transported as MP4, and
-  any image the UI does not retain fall back to Purple's receive-file flow.
+  cumulative canvas area. An incoming group MP4 with Signal's GIF flag and a
+  valid file-type box is eligible for an in-memory FFmpeg conversion on a
+  blocking worker. The helper receives fixed arguments and a cleared
+  environment under `prlimit`; input, output, process concurrency, attempts,
+  threads, file descriptors, memory, CPU, wall time, dimensions, frame rate,
+  frame area, and aggregate presentation bytes are bounded. Only validated GIF
+  output replaces the presentation. Missing helpers or any failed boundary
+  preserves the original MP4 receive-file flow. Ordinary video and any image
+  the UI does not retain also use that flow.
   Outgoing transfers use
   Purple's direct and group send-file callbacks. Each admitted request carries
   cancellation state from queue admission through its backend upload task, so a
@@ -157,7 +164,8 @@ older messages from the primary phone or Signal service.
   files totaling 50 MiB per account. Queued binary events and unresolved Purple
   receive prompts each have independent 64 MiB budgets. The
   [attachment policy](attachment-policy.md) maps these limits to their owners.
-  Decrypted attachment data is never written to a plugin-managed plaintext cache.
+  Decrypted attachment data and generated GIF data are passed through memory
+  pipes and never written to a plugin-managed plaintext cache.
   Attachment sends are not part of the durable text-message outbox.
 - Presage acknowledges an envelope to Signal before the Purple UI can display
   it, but saves supported content in SQLCipher first. signal-purple records a

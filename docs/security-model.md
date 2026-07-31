@@ -89,8 +89,14 @@ user-facing local storage, not diagnostic output.
   larger than 8192 pixels per edge or 16 megapixels total. GIFs are limited to
   8 MiB and 8 million cumulative canvas pixel-frames; their block structure is
   checked before decoder allocation. Decoder validation is chunked, and
-  rejected dimensions are scaled down before allocation. Video and other data
-  fall back to a receive prompt. Decrypted
+  rejected dimensions are scaled down before allocation. A Signal GIF-flagged
+  group MP4 may be converted to a GIF by a pipe-only FFmpeg child with a cleared
+  environment and fixed arguments. `prlimit` bounds its address space, CPU, and
+  file descriptors; the worker separately bounds source/output bytes, wall
+  time, threads, dimensions, frame rate, cumulative frame area, attempts, and
+  concurrency. Invalid output and all conversion failures preserve the
+  original receive prompt. Ordinary video and other data also use that prompt.
+  Decrypted
   incoming bytes remain in memory until the displayed image is released, saved,
   or rejected; the plugin creates no plaintext attachment cache. Remote
   filenames are reduced to a basename before Purple uses them.

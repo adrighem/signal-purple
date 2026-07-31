@@ -464,3 +464,24 @@ schema.
   tests, the warning-as-error C build, all five C/Purple tests, and the staged
   installation probe pass locally. Live validation remains required for a real
   GIF payload and the inferred MP4 filename.
+
+## 2026-07-31 - Bounded Signal GIF-style MP4 conversion
+
+- Approved and implemented automatic conversion only for incoming group MP4s
+  with Signal's GIF flag, an exact `video/mp4` type, a valid first `ftyp` box,
+  and an input no larger than 8 MiB. Ordinary and direct video is unchanged.
+- The optional Debian FFmpeg child runs through `prlimit` with fixed absolute
+  paths and arguments, a cleared environment, pipe-only protocols, one global
+  process, two attempts per message, one codec/filter thread, 512 MiB address
+  space, 10/12 seconds CPU, 15 seconds wall time, 64 descriptors, a 480-pixel
+  edge and 15-fps ceiling, and an 8 MiB output ceiling. No media file is made.
+- The original MP4 stays owned by the receive projection until generated GIF
+  structure, cumulative frame area, and the 50 MiB presentation budget pass;
+  missing tools, contention, process or I/O failure, timeout, and invalid or
+  over-budget output retain the original Purple receive prompt.
+- The exact reported 480x480, 1.87-second sample converts to 28 GIF frames under
+  the final policy. A production-path synthetic MP4 conversion test passes, as
+  do matched Rust 1.95 formatting and Clippy, all 93 Rust tests, release-helper
+  checks, the warning-as-error C build, all five C/Purple tests, and the staged
+  install/plugin-load probe. Live receipt of a newly flagged Signal GIF remains
+  pending.

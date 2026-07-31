@@ -162,12 +162,14 @@ outbox, so send the file again after a restart or failed upload.
 
 Incoming group JPEG, PNG, and genuine GIF images are shown inline when their
 MIME type and file signature agree and the complete image passes its
-format-specific resource limits. Signal can transport GIF-style
-animations as MP4 video; Purple 2 cannot render those inline, so they still use
-a receive prompt with an `.mp4` fallback name. Direct images, other image
-formats, ordinary files, invalid or oversized images, and content with
-mismatched metadata also use a receive prompt. If an eligible group image still
-opens as a direct transfer after upgrading, fully quit and restart Pidgin. The
-Linux Rust backend is deliberately process-resident for safe dependency-thread
-shutdown, so only process exit guarantees that an older backend mapping is
-discarded.
+format-specific resource limits. Signal can transport GIF-style animations as
+MP4 video. When such an incoming group attachment has Signal's GIF flag, a
+valid MP4 signature, and stays within the conversion policy, installed
+`/usr/bin/ffmpeg` and `/usr/bin/prlimit` helpers convert it through memory pipes
+for inline display. Missing helpers, an ordinary video, direct images, other
+formats, invalid or oversized media, contention, timeout, or any failed limit
+keeps the original receive prompt. If an eligible group image still opens as a
+direct transfer after upgrading, verify that the two helper paths exist, then
+fully quit and restart Pidgin. The Linux Rust backend is deliberately
+process-resident for safe dependency-thread shutdown, so only process exit
+guarantees that an older backend mapping is discarded.

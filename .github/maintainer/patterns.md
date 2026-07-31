@@ -53,3 +53,8 @@
   represent attached video. Signal may flag an MP4 as GIF-style media; keep
   that payload in the bounded file-transfer path unless a separately reviewed
   UI or transcoding design can preserve resource and plaintext-cache policy.
+- When conversion is justified by protocol metadata, keep the media decoder in
+  a disposable child with fixed arguments, an empty environment, pipe-only
+  I/O, OS and application resource limits, strict output validation, and the
+  original attachment as the failure presentation. Do not link an untrusted
+  media decoder into the plugin process for presentation convenience.
