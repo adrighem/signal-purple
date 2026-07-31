@@ -55,10 +55,11 @@ cargo test --locked --manifest-path rust/signal-core/Cargo.toml \
   bounds_binary_events
 ```
 
-The C tests include a headless libpurple core that probes and loads the actual
-plugin module plus focused ABI values, conversation logging, outgoing-transfer
-lifetime, bounded file admission, markup, inline-image ownership and routing,
-and contact-snapshot reconciliation. A relocation check proves that helpers
+The C tests include a linked C/Rust ABI constant, layout, and input-limit check
+plus a headless libpurple core that probes and loads the actual plugin module,
+conversation logging, outgoing-transfer lifetime, bounded file admission,
+markup, inline-image ownership and routing, and contact-snapshot reconciliation.
+A relocation check proves that helpers
 compiled into the export-dynamic probe executable cannot preempt the loaded
 module's own implementations, and every direct probe invocation has a hard
 timeout. The Rust tests cover ABI values and owned payloads, FFI error outputs,
@@ -96,6 +97,8 @@ are not run for untrusted pull requests.
   an in-progress stream future can own the sole connection and must remain
   polled to release it.
 - Validate every public ABI pointer, UTF-8 string, and length.
+- Keep every public input bound in `signal_core.h` and the compiled ABI
+  conformance manifest; changing either side must fail the linked C test.
 - Contain panics at exported boundaries and keep teardown non-panicking; never
   unwind into C.
 - Never expose raw upstream `libsignal` bridge symbols.

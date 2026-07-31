@@ -24,6 +24,12 @@ It is versioned and exposes opaque cores, asynchronous commands, a borrowed
 event-notifier descriptor, nonblocking event polling, and explicit event
 destruction.
 
+The C test executable links the real Rust library and queries a compiled ABI
+manifest. It compares the version, status and event values, flags, complete
+`SignalCoreConfig` and `SignalEvent` layouts, and every documented FFI input
+limit with the independently compiled header. This catches cross-language
+drift which separate C-only and Rust-only assertions cannot detect.
+
 - C strings passed into a command are validated and copied before return.
 - Rust owns all event strings and blobs until `signal_event_free`.
 - The event queue is bounded at 4096 entries. Overflow produces a fatal event

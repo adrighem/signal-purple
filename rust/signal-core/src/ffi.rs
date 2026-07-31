@@ -13,16 +13,88 @@ const BACKEND_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 use crate::acknowledgment::AcknowledgmentInbox;
 use crate::attachment::{AttachmentAdmission, AttachmentAdmissionError, MAX_ATTACHMENT_BYTES};
 use crate::backend::{self, Command, Config, StorePassphrase, WorkerContext};
-use crate::event::{ABI_VERSION, Event, OwnedEvent, SignalEvent};
+use crate::event::{self, ABI_VERSION, Event, OwnedEvent, SignalEvent};
 #[cfg(test)]
 use crate::event_queue::EventSink;
 use crate::event_queue::{EventPoll, EventQueue, event_queue};
 
+const MAX_STORE_PATH_BYTES: usize = 4096;
+const MAX_DEVICE_NAME_BYTES: usize = 128;
+const MAX_PASSPHRASE_BYTES: usize = 4096;
 const MAX_RECIPIENT_BYTES: usize = 256;
+const GROUP_KEY_BYTES: usize = 64;
 const MAX_MESSAGE_BYTES: usize = 64 * 1024;
 const MAX_ATTACHMENT_FILENAME_BYTES: usize = 255;
 const MAX_CONTENT_TYPE_BYTES: usize = 255;
 const EVENT_QUEUE_CAPACITY: usize = 4096;
+
+const ABI_CONTRACT_VALUE_COUNT: usize = 64;
+const ABI_CONTRACT_VALUES: [i64; ABI_CONTRACT_VALUE_COUNT] = [
+    ABI_VERSION as i64,
+    SignalStatus::Ok as i64,
+    SignalStatus::InvalidArgument as i64,
+    SignalStatus::NotReady as i64,
+    SignalStatus::QueueFull as i64,
+    SignalStatus::InternalError as i64,
+    event::EVENT_LINK_QR as i64,
+    event::EVENT_READY as i64,
+    event::EVENT_CONTACT as i64,
+    event::EVENT_GROUP as i64,
+    event::EVENT_MESSAGE as i64,
+    event::EVENT_GROUP_MESSAGE as i64,
+    event::EVENT_TYPING as i64,
+    event::EVENT_RECEIPT as i64,
+    event::EVENT_NOTICE_RESERVED as i64,
+    event::EVENT_ERROR as i64,
+    event::EVENT_DISCONNECTED as i64,
+    event::EVENT_CONTACT_SYNC_BEGIN as i64,
+    event::EVENT_CONTACT_SYNC_END as i64,
+    event::EVENT_GROUP_SYNC_BEGIN as i64,
+    event::EVENT_GROUP_SYNC_END as i64,
+    event::EVENT_GROUP_MEMBER as i64,
+    event::EVENT_IDENTITY_CHANGE as i64,
+    event::EVENT_IDENTITY_ACCEPTED as i64,
+    event::EVENT_ATTACHMENT as i64,
+    event::EVENT_ATTACHMENT_SENT as i64,
+    event::EVENT_GROUP_LEFT as i64,
+    event::EVENT_RECOVERING as i64,
+    event::EVENT_ACCOUNT as i64,
+    0,
+    event::FLAG_OUTGOING as i64,
+    event::FLAG_FATAL as i64,
+    event::FLAG_TRANSIENT as i64,
+    std::mem::size_of::<SignalCoreConfig>() as i64,
+    std::mem::align_of::<SignalCoreConfig>() as i64,
+    std::mem::offset_of!(SignalCoreConfig, abi_version) as i64,
+    std::mem::offset_of!(SignalCoreConfig, struct_size) as i64,
+    std::mem::offset_of!(SignalCoreConfig, store_path) as i64,
+    std::mem::offset_of!(SignalCoreConfig, device_name) as i64,
+    std::mem::offset_of!(SignalCoreConfig, passphrase) as i64,
+    std::mem::size_of::<SignalEvent>() as i64,
+    std::mem::align_of::<SignalEvent>() as i64,
+    std::mem::offset_of!(SignalEvent, abi_version) as i64,
+    std::mem::offset_of!(SignalEvent, struct_size) as i64,
+    std::mem::offset_of!(SignalEvent, kind) as i64,
+    std::mem::offset_of!(SignalEvent, flags) as i64,
+    std::mem::offset_of!(SignalEvent, request_id) as i64,
+    std::mem::offset_of!(SignalEvent, timestamp_ms) as i64,
+    std::mem::offset_of!(SignalEvent, value) as i64,
+    std::mem::offset_of!(SignalEvent, peer_id) as i64,
+    std::mem::offset_of!(SignalEvent, chat_id) as i64,
+    std::mem::offset_of!(SignalEvent, title) as i64,
+    std::mem::offset_of!(SignalEvent, text) as i64,
+    std::mem::offset_of!(SignalEvent, data) as i64,
+    std::mem::offset_of!(SignalEvent, data_len) as i64,
+    MAX_STORE_PATH_BYTES as i64,
+    MAX_DEVICE_NAME_BYTES as i64,
+    MAX_PASSPHRASE_BYTES as i64,
+    MAX_RECIPIENT_BYTES as i64,
+    GROUP_KEY_BYTES as i64,
+    MAX_MESSAGE_BYTES as i64,
+    MAX_ATTACHMENT_FILENAME_BYTES as i64,
+    MAX_CONTENT_TYPE_BYTES as i64,
+    MAX_ATTACHMENT_BYTES as i64,
+];
 
 #[repr(i32)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -117,6 +189,14 @@ pub extern "C" fn signal_core_abi_version() -> u32 {
 }
 
 #[unsafe(no_mangle)]
+pub extern "C" fn signal_core_abi_contract_value(index: u32) -> i64 {
+    ABI_CONTRACT_VALUES
+        .get(index as usize)
+        .copied()
+        .unwrap_or(i64::MIN)
+}
+
+#[unsafe(no_mangle)]
 /// Returns the borrowed file descriptor which becomes readable when an event
 /// is queued, or `-1` for an invalid core.
 ///
@@ -172,12 +252,14 @@ pub unsafe extern "C" fn signal_core_new(
         let config = unsafe { &*config };
 
         // SAFETY: validated and copied by `required_string`.
-        let store_path = status_try!(unsafe { required_string(config.store_path, 4096) });
+        let store_path =
+            status_try!(unsafe { required_string(config.store_path, MAX_STORE_PATH_BYTES) });
         status_try!(
             backend::ensure_store_parent(&store_path).map_err(|_| SignalStatus::InternalError)
         );
         // SAFETY: validated and copied by `required_string`.
-        let device_name = status_try!(unsafe { required_string(config.device_name, 128) });
+        let device_name =
+            status_try!(unsafe { required_string(config.device_name, MAX_DEVICE_NAME_BYTES) });
         let (command_tx, command_rx) = tokio_mpsc::channel(128);
         let acknowledgments = AcknowledgmentInbox::new();
         let worker_acknowledgments = Arc::clone(&acknowledgments);
@@ -188,7 +270,9 @@ pub unsafe extern "C" fn signal_core_new(
         let worker_ready = Arc::clone(&ready);
         // SAFETY: validated, copied, and immediately put under zeroizing
         // ownership by `required_store_passphrase`.
-        let passphrase = status_try!(unsafe { required_store_passphrase(config.passphrase, 4096) });
+        let passphrase = status_try!(unsafe {
+            required_store_passphrase(config.passphrase, MAX_PASSPHRASE_BYTES)
+        });
         let worker_config = Config {
             store_path,
             device_name,
@@ -280,8 +364,10 @@ pub unsafe extern "C" fn signal_core_send_group_message(
             return SignalStatus::InvalidArgument;
         }
         // SAFETY: copied immediately after validation.
-        let group_key = status_try!(unsafe { required_string(group_key, 64) });
-        if group_key.len() != 64 || hex::decode(&group_key).map_or(true, |v| v.len() != 32) {
+        let group_key = status_try!(unsafe { required_string(group_key, GROUP_KEY_BYTES) });
+        if group_key.len() != GROUP_KEY_BYTES
+            || hex::decode(&group_key).map_or(true, |v| v.len() != 32)
+        {
             return SignalStatus::InvalidArgument;
         }
         // SAFETY: copied immediately after validation.
@@ -315,8 +401,10 @@ pub unsafe extern "C" fn signal_core_leave_group(
             return SignalStatus::InvalidArgument;
         }
         // SAFETY: copied immediately after validation.
-        let group_key = status_try!(unsafe { required_string(group_key, 64) });
-        if group_key.len() != 64 || hex::decode(&group_key).map_or(true, |v| v.len() != 32) {
+        let group_key = status_try!(unsafe { required_string(group_key, GROUP_KEY_BYTES) });
+        if group_key.len() != GROUP_KEY_BYTES
+            || hex::decode(&group_key).map_or(true, |v| v.len() != 32)
+        {
             return SignalStatus::InvalidArgument;
         }
         // SAFETY: `core` is live and C serializes this call with teardown.
@@ -365,7 +453,7 @@ unsafe fn send_attachment(
         let content_type =
             status_try!(unsafe { required_string(input.content_type, MAX_CONTENT_TYPE_BYTES) });
         if group
-            && (recipient.len() != 64
+            && (recipient.len() != GROUP_KEY_BYTES
                 || hex::decode(&recipient).map_or(true, |value| value.len() != 32))
         {
             return SignalStatus::InvalidArgument;
@@ -797,7 +885,8 @@ mod tests {
         let dropped = Arc::new(AtomicBool::new(false));
 
         // SAFETY: `input` is a live, NUL-terminated C string.
-        let mut passphrase = unsafe { required_store_passphrase(input.as_ptr(), 4096) }.unwrap();
+        let mut passphrase =
+            unsafe { required_store_passphrase(input.as_ptr(), MAX_PASSPHRASE_BYTES) }.unwrap();
         passphrase.observe_drop(Arc::clone(&dropped));
 
         assert_eq!(passphrase.as_str().len(), input.as_bytes().len());

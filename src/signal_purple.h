@@ -11,8 +11,6 @@
 #include "signal_core.h"
 
 #define SIGNAL_PLUGIN_ID "prpl-adrighem-signal"
-#define SIGNAL_MAX_MESSAGE_BYTES (64u * 1024u)
-#define SIGNAL_MAX_ATTACHMENT_BYTES (25u * 1024u * 1024u)
 
 typedef SignalStatus (*SignalSendGroupMessageFunc)(
     SignalCore *core, uint64_t request_id, const char *group_key,

@@ -81,3 +81,6 @@
   of copying its initializer. Keep framework callback detachment as an explicit
   phase before the shared finalizer, and observe that ordering from a callback
   which runs during teardown.
+- Language-local ABI tests can each pass while their declarations disagree.
+  Link one side to the production library and compare compiled constants,
+  layouts, and public limits across the actual boundary.
