@@ -4,6 +4,13 @@ All notable changes will be documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 semantic versioning after the first stable release.
 
+## [0.4.0](https://github.com/adrighem/signal-purple/compare/v0.3.1...v0.4.0) (2026-07-31)
+
+
+### Features
+
+* **media:** render Signal GIF videos inline ([0db5162](https://github.com/adrighem/signal-purple/commit/0db51620d45f63bc6593699c81b8e32a3d913cfa))
+
 ## [0.3.1](https://github.com/adrighem/signal-purple/compare/v0.3.0...v0.3.1) (2026-07-31)
 
 
