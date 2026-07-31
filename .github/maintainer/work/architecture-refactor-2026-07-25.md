@@ -38,8 +38,10 @@ from the extraction above:
   actor before splitting contact, group, projection, and outbox modules.~~
   Completed by replacing independent recovery, readiness, group-authority, and
   group-dirtiness flags with tested session and group-snapshot states.
-- Centralize `SignalConnection` construction and teardown while preserving
-  Purple callback-detachment order.
+- ~~Centralize `SignalConnection` construction and teardown while preserving
+  Purple callback-detachment order.~~ Completed with one adapter constructor,
+  one owned-resource finalizer, and a loaded-module lifecycle probe which uses
+  the production owner and observes detachment before transfer callbacks.
 - ~~Prevent malformed direct, group, or attachment events from being
   projection-acknowledged unless the adapter accepted them.~~ Completed by
   separating projection acceptance from the event source's keep-running result.

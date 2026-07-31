@@ -176,3 +176,14 @@
 - Keep retry timing, deferred-command handling, direct-message availability,
   and Purple readiness events unchanged while establishing a stable boundary
   for later contact, group, projection, and outbox extraction.
+
+## 2026-07-31 - Give SignalConnection one owner lifecycle
+
+- Initialize every adapter-owned container, sync helper, callback function,
+  counter, and path through one constructor used by production and the loaded
+  module probe.
+- Route startup failure and normal close through one finalizer for notifier,
+  core, container, sync-state, and string ownership.
+- Keep Purple detachment visibly ahead of finalization: mark closing, clear
+  protocol data, disconnect signals and request handles, null callback
+  back-references, and detach transfers before releasing owned resources.

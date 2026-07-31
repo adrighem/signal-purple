@@ -1398,6 +1398,87 @@ signal_connection_data(PurpleConnection *gc)
     return gc != NULL ? purple_connection_get_protocol_data(gc) : NULL;
 }
 
+SignalConnection *
+signal_connection_new(PurpleConnection *gc, const char *store_path)
+{
+    SignalConnection *connection;
+
+    g_return_val_if_fail(gc != NULL, NULL);
+    g_return_val_if_fail(store_path != NULL, NULL);
+
+    connection = g_new0(SignalConnection, 1);
+    connection->gc = gc;
+    connection->send_group_message = signal_core_send_group_message;
+    connection->start_xfer = purple_xfer_start;
+    connection->store_path = g_strdup(store_path);
+    connection->group_ids_by_key = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, NULL);
+    connection->group_keys_by_id = g_hash_table_new_full(
+        g_direct_hash, g_direct_equal, NULL, g_free);
+    connection->group_titles_by_key = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, g_free);
+    connection->group_members_by_key = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_ptr_array_unref);
+    connection->active_group_keys = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, NULL);
+    connection->pending_group_joins = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, NULL);
+    connection->pending_group_leaves = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, NULL);
+    connection->identity_changes_seen = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, NULL);
+    connection->pending_identity_changes = g_hash_table_new_full(
+        g_str_hash, g_str_equal, g_free, NULL);
+    connection->outgoing_attachments = g_hash_table_new_full(
+        g_int64_hash, g_int64_equal, g_free, (GDestroyNotify)purple_xfer_unref);
+    connection->outgoing_attachment_contexts =
+        g_hash_table_new(g_direct_hash, g_direct_equal);
+    connection->pending_reads = g_ptr_array_new_with_free_func(
+        signal_pending_read_free);
+    connection->group_leave_requests = g_ptr_array_new_with_free_func(
+        signal_group_leave_request_free);
+    signal_contact_sync_init(&connection->contact_sync);
+    signal_contact_sync_init(&connection->group_sync);
+    connection->next_group_id = 1;
+    connection->next_request_id = 1;
+    return connection;
+}
+
+static void
+signal_connection_free(SignalConnection *connection)
+{
+    if (connection == NULL)
+        return;
+
+    if (connection->poll_source != NULL) {
+        g_source_destroy(connection->poll_source);
+        g_source_unref(connection->poll_source);
+    }
+    if (connection->core != NULL)
+        signal_core_free(connection->core);
+
+    g_clear_pointer(&connection->link_qr, g_bytes_unref);
+    g_hash_table_unref(connection->group_ids_by_key);
+    g_hash_table_unref(connection->group_keys_by_id);
+    g_hash_table_unref(connection->group_titles_by_key);
+    g_hash_table_unref(connection->group_members_by_key);
+    g_hash_table_unref(connection->active_group_keys);
+    g_hash_table_unref(connection->pending_group_joins);
+    g_hash_table_unref(connection->pending_group_leaves);
+    g_hash_table_unref(connection->identity_changes_seen);
+    g_hash_table_unref(connection->pending_identity_changes);
+    g_hash_table_unref(connection->outgoing_attachments);
+    g_hash_table_unref(connection->outgoing_attachment_contexts);
+    g_ptr_array_unref(connection->pending_reads);
+    g_ptr_array_unref(connection->group_leave_requests);
+    signal_contact_sync_clear(&connection->contact_sync);
+    signal_contact_sync_clear(&connection->group_sync);
+    g_free(connection->store_path);
+    g_free(connection->local_aci);
+    g_free(connection->remote_profile_name);
+    g_free(connection);
+}
+
 void
 signal_login(PurpleAccount *account)
 {
@@ -1436,41 +1517,7 @@ signal_login(PurpleAccount *account)
         return;
     }
 
-    connection = g_new0(SignalConnection, 1);
-    connection->gc = gc;
-    connection->send_group_message = signal_core_send_group_message;
-    connection->start_xfer = purple_xfer_start;
-    connection->store_path = g_strdup(store_path);
-    connection->group_ids_by_key = g_hash_table_new_full(
-        g_str_hash, g_str_equal, g_free, NULL);
-    connection->group_keys_by_id = g_hash_table_new_full(
-        g_direct_hash, g_direct_equal, NULL, g_free);
-    connection->group_titles_by_key = g_hash_table_new_full(
-        g_str_hash, g_str_equal, g_free, g_free);
-    connection->group_members_by_key = g_hash_table_new_full(
-        g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_ptr_array_unref);
-    connection->active_group_keys = g_hash_table_new_full(
-        g_str_hash, g_str_equal, g_free, NULL);
-    connection->pending_group_joins = g_hash_table_new_full(
-        g_str_hash, g_str_equal, g_free, NULL);
-    connection->pending_group_leaves = g_hash_table_new_full(
-        g_str_hash, g_str_equal, g_free, NULL);
-    connection->identity_changes_seen = g_hash_table_new_full(
-        g_str_hash, g_str_equal, g_free, NULL);
-    connection->pending_identity_changes = g_hash_table_new_full(
-        g_str_hash, g_str_equal, g_free, NULL);
-    connection->outgoing_attachments = g_hash_table_new_full(
-        g_int64_hash, g_int64_equal, g_free, (GDestroyNotify)purple_xfer_unref);
-    connection->outgoing_attachment_contexts =
-        g_hash_table_new(g_direct_hash, g_direct_equal);
-    connection->pending_reads = g_ptr_array_new_with_free_func(
-        signal_pending_read_free);
-    connection->group_leave_requests = g_ptr_array_new_with_free_func(
-        signal_group_leave_request_free);
-    signal_contact_sync_init(&connection->contact_sync);
-    signal_contact_sync_init(&connection->group_sync);
-    connection->next_group_id = 1;
-    connection->next_request_id = 1;
+    connection = signal_connection_new(gc, store_path);
 
     config.store_path = store_path;
     config.device_name = purple_account_get_string(account, "device-name",
@@ -1489,25 +1536,7 @@ signal_login(PurpleAccount *account)
     }
 
     if (status != SIGNAL_STATUS_OK) {
-        g_hash_table_unref(connection->group_ids_by_key);
-        g_hash_table_unref(connection->group_keys_by_id);
-        g_hash_table_unref(connection->group_titles_by_key);
-        g_hash_table_unref(connection->group_members_by_key);
-        g_hash_table_unref(connection->active_group_keys);
-        g_hash_table_unref(connection->pending_group_joins);
-        g_hash_table_unref(connection->pending_group_leaves);
-        g_hash_table_unref(connection->identity_changes_seen);
-        g_hash_table_unref(connection->pending_identity_changes);
-        g_hash_table_unref(connection->outgoing_attachments);
-        g_hash_table_unref(connection->outgoing_attachment_contexts);
-        g_ptr_array_unref(connection->pending_reads);
-        g_ptr_array_unref(connection->group_leave_requests);
-        signal_contact_sync_clear(&connection->contact_sync);
-        signal_contact_sync_clear(&connection->group_sync);
-        g_free(connection->store_path);
-        g_free(connection->local_aci);
-        g_free(connection->remote_profile_name);
-        g_free(connection);
+        signal_connection_free(connection);
         purple_connection_error_reason(gc, PURPLE_CONNECTION_ERROR_OTHER_ERROR,
                                        "Could not start the Signal backend");
         return;
@@ -1590,33 +1619,7 @@ signal_close(PurpleConnection *gc)
     }
     g_hash_table_remove_all(connection->outgoing_attachments);
 
-    if (connection->poll_source != NULL) {
-        g_source_destroy(connection->poll_source);
-        g_source_unref(connection->poll_source);
-    }
-    if (connection->core != NULL)
-        signal_core_free(connection->core);
-
-    g_clear_pointer(&connection->link_qr, g_bytes_unref);
-    g_hash_table_unref(connection->group_ids_by_key);
-    g_hash_table_unref(connection->group_keys_by_id);
-    g_hash_table_unref(connection->group_titles_by_key);
-    g_hash_table_unref(connection->group_members_by_key);
-    g_hash_table_unref(connection->active_group_keys);
-    g_hash_table_unref(connection->pending_group_joins);
-    g_hash_table_unref(connection->pending_group_leaves);
-    g_hash_table_unref(connection->identity_changes_seen);
-    g_hash_table_unref(connection->pending_identity_changes);
-    g_hash_table_unref(connection->outgoing_attachments);
-    g_hash_table_unref(connection->outgoing_attachment_contexts);
-    g_ptr_array_unref(connection->pending_reads);
-    g_ptr_array_unref(connection->group_leave_requests);
-    signal_contact_sync_clear(&connection->contact_sync);
-    signal_contact_sync_clear(&connection->group_sync);
-    g_free(connection->store_path);
-    g_free(connection->local_aci);
-    g_free(connection->remote_profile_name);
-    g_free(connection);
+    signal_connection_free(connection);
 }
 
 char *

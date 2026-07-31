@@ -66,6 +66,8 @@ struct _SignalConnection {
     gboolean closing;
 };
 
+SignalConnection *signal_connection_new(PurpleConnection *gc,
+                                        const char *store_path);
 void signal_login(PurpleAccount *account);
 void signal_close(PurpleConnection *gc);
 int signal_send_im(PurpleConnection *gc, const char *who, const char *message,

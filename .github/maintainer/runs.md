@@ -605,3 +605,23 @@ schema.
   and backoff reset. Matched Rust 1.95 formatting and warning-as-error Clippy,
   all 96 Rust tests, release-helper checks, the warning-as-error C build, all six
   C/Purple tests, and the staged install/plugin-load probe pass locally.
+
+## 2026-07-31 - SignalConnection owner lifecycle
+
+- Login, startup failure, the loaded-module probe, and normal close previously
+  maintained separate copies of `SignalConnection` initialization or cleanup.
+  Adding an owned field could therefore leave a test fixture unrepresentative or
+  one failure path incomplete.
+- One production constructor now initializes every adapter-owned field, and one
+  finalizer releases the notifier, core, containers, sync state, and strings.
+  Startup failure and normal close share the finalizer; Purple protocol data,
+  signals, requests, pending callback back-references, and transfers remain
+  detached first on the normal close path.
+- The loaded-module probe now resolves and uses the production constructor,
+  observes owned `GSource` finalization, and verifies protocol-data detachment
+  plus the closing marker from an active transfer cancellation callback.
+  Matched Rust 1.95 formatting and warning-as-error Clippy, all 96 Rust tests,
+  release-helper checks, the warning-as-error C build, all six C/Purple tests,
+  and the staged install/plugin-load probe pass locally. A C-only GCC
+  AddressSanitizer/UndefinedBehaviorSanitizer run also passed all six tests with
+  LeakSanitizer disabled for libpurple's process-global registries.

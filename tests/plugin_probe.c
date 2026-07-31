@@ -20,6 +20,10 @@ typedef gboolean (*SignalHandleEventFunc)(SignalConnection *connection,
 typedef gboolean (*SignalDispatchEventFunc)(SignalConnection *connection,
                                             const SignalEvent *event,
                                             gboolean *accepted);
+typedef SignalConnection *(*SignalConnectionNewFunc)(PurpleConnection *gc,
+                                                      const char *store_path);
+
+static SignalConnectionNewFunc connection_new;
 
 static gboolean
 input_dispatch(GIOChannel *channel, GIOCondition condition, gpointer data)
@@ -1015,40 +1019,71 @@ test_group_title_tracking(PurpleAccount *account, PurpleGroup *group)
 static SignalConnection *
 new_transfer_connection(PurpleConnection *gc)
 {
-    SignalConnection *connection = g_new0(SignalConnection, 1);
+    SignalConnection *connection;
 
-    connection->gc = gc;
-    connection->start_xfer = purple_xfer_start;
-    connection->group_ids_by_key =
-        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    connection->group_keys_by_id =
-        g_hash_table_new_full(g_direct_hash, g_direct_equal, NULL, g_free);
-    connection->group_titles_by_key =
-        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, g_free);
-    connection->group_members_by_key = g_hash_table_new_full(
-        g_str_hash, g_str_equal, g_free, (GDestroyNotify)g_ptr_array_unref);
-    connection->active_group_keys =
-        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    connection->pending_group_joins =
-        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    connection->pending_group_leaves =
-        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    connection->identity_changes_seen =
-        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    connection->pending_identity_changes =
-        g_hash_table_new_full(g_str_hash, g_str_equal, g_free, NULL);
-    connection->outgoing_attachments = g_hash_table_new_full(
-        g_int64_hash, g_int64_equal, g_free, (GDestroyNotify)purple_xfer_unref);
-    connection->outgoing_attachment_contexts =
-        g_hash_table_new(g_direct_hash, g_direct_equal);
-    connection->pending_reads = g_ptr_array_new();
-    connection->group_leave_requests = g_ptr_array_new();
-    signal_contact_sync_init(&connection->contact_sync);
-    signal_contact_sync_init(&connection->group_sync);
-    connection->next_group_id = 1;
-    connection->next_request_id = 1;
+    g_assert_nonnull(connection_new);
+    connection = connection_new(gc, "plugin-probe-store");
+    g_assert_nonnull(connection);
+    g_assert_cmpstr(connection->store_path, ==, "plugin-probe-store");
+    g_assert_nonnull(connection->group_ids_by_key);
+    g_assert_nonnull(connection->group_keys_by_id);
+    g_assert_nonnull(connection->group_titles_by_key);
+    g_assert_nonnull(connection->group_members_by_key);
+    g_assert_nonnull(connection->active_group_keys);
+    g_assert_nonnull(connection->pending_group_joins);
+    g_assert_nonnull(connection->pending_group_leaves);
+    g_assert_nonnull(connection->identity_changes_seen);
+    g_assert_nonnull(connection->pending_identity_changes);
+    g_assert_nonnull(connection->outgoing_attachments);
+    g_assert_nonnull(connection->outgoing_attachment_contexts);
+    g_assert_nonnull(connection->pending_reads);
+    g_assert_nonnull(connection->group_leave_requests);
+    g_assert_cmpuint(connection->next_group_id, ==, 1);
+    g_assert_cmpuint(connection->next_request_id, ==, 1);
     purple_connection_set_protocol_data(gc, connection);
     return connection;
+}
+
+static gboolean
+unused_source_callback(gpointer data)
+{
+    (void)data;
+    return G_SOURCE_REMOVE;
+}
+
+static void
+mark_source_finalized(gpointer data)
+{
+    gboolean *finalized = data;
+
+    *finalized = TRUE;
+}
+
+static void
+test_connection_owned_resource_cleanup(PurplePluginProtocolInfo *protocol)
+{
+    PurpleAccount *account =
+        purple_account_new("connection-lifecycle", SIGNAL_PLUGIN_ID);
+    PurpleConnection gc = {
+        .state = PURPLE_CONNECTED,
+        .account = account,
+    };
+    SignalConnection *connection;
+    gboolean source_finalized = FALSE;
+    GSource *source = g_idle_source_new();
+
+    purple_account_set_connection(account, &gc);
+    connection = new_transfer_connection(&gc);
+    g_source_set_callback(source, unused_source_callback, &source_finalized,
+                          mark_source_finalized);
+    connection->poll_source = source;
+
+    protocol->close(&gc);
+
+    g_assert_null(purple_connection_get_protocol_data(&gc));
+    g_assert_true(source_finalized);
+    purple_account_set_connection(account, NULL);
+    purple_account_destroy(account);
 }
 
 static void
@@ -1274,6 +1309,11 @@ test_pending_transfer_disconnect(PurplePluginProtocolInfo *protocol,
 
 static guint start_reference_floor;
 static gboolean start_had_temporary_reference;
+static PurpleConnection *closing_gc;
+static SignalConnection *closing_connection;
+static void (*closing_cancel_send)(PurpleXfer *xfer);
+static gboolean close_detached_protocol_data;
+static gboolean close_marked_connection_closing;
 
 static void
 cancel_transfer_during_start(PurpleXfer *xfer, int fd, const char *ip,
@@ -1284,6 +1324,18 @@ cancel_transfer_during_start(PurpleXfer *xfer, int fd, const char *ip,
     (void)port;
     start_had_temporary_reference = xfer->ref >= start_reference_floor;
     purple_xfer_cancel_local(xfer);
+}
+
+static void
+observe_close_order(PurpleXfer *xfer)
+{
+    g_assert_nonnull(closing_gc);
+    g_assert_nonnull(closing_connection);
+    g_assert_nonnull(closing_cancel_send);
+    close_detached_protocol_data =
+        purple_connection_get_protocol_data(closing_gc) == NULL;
+    close_marked_connection_closing = closing_connection->closing;
+    closing_cancel_send(xfer);
 }
 
 static void
@@ -1349,6 +1401,12 @@ test_started_transfer_disconnect(PurplePluginProtocolInfo *protocol)
     g_assert_nonnull(attachment);
     attachment->request_id = 42;
     xfer->status = PURPLE_XFER_STATUS_STARTED;
+    closing_gc = &gc;
+    closing_connection = connection;
+    closing_cancel_send = xfer->ops.cancel_send;
+    close_detached_protocol_data = FALSE;
+    close_marked_connection_closing = FALSE;
+    purple_xfer_set_cancel_send_fnc(xfer, observe_close_order);
     key = g_new(guint64, 1);
     *key = attachment->request_id;
     purple_xfer_ref(xfer);
@@ -1356,8 +1414,13 @@ test_started_transfer_disconnect(PurplePluginProtocolInfo *protocol)
 
     protocol->close(&gc);
 
+    g_assert_true(close_detached_protocol_data);
+    g_assert_true(close_marked_connection_closing);
     g_assert_true(purple_xfer_is_canceled(xfer));
     g_assert_null(xfer->data);
+    closing_gc = NULL;
+    closing_connection = NULL;
+    closing_cancel_send = NULL;
     purple_xfer_unref(xfer);
     purple_account_set_connection(account, NULL);
     purple_account_destroy(account);
@@ -1413,6 +1476,10 @@ main(int argc, char **argv)
     g_autofree char *chat_name = NULL;
     g_autoptr(GError) error = NULL;
     g_autofree char *user_dir = NULL;
+    union {
+        gpointer pointer;
+        SignalConnectionNewFunc function;
+    } resolved_connection_new = {0};
 
     g_assert_cmpint(argc, ==, 2);
     user_dir = g_dir_make_tmp("signal-purple-test-XXXXXX", &error);
@@ -1441,6 +1508,10 @@ main(int argc, char **argv)
     g_assert_cmpint(plugin->info->type, ==, PURPLE_PLUGIN_PROTOCOL);
     if (!purple_plugin_is_loaded(plugin))
         g_assert_true(purple_plugin_load(plugin));
+    g_assert_true(g_module_symbol((GModule *)plugin->handle,
+                                  "signal_connection_new",
+                                  &resolved_connection_new.pointer));
+    connection_new = resolved_connection_new.function;
 
     protocol = PURPLE_PLUGIN_PROTOCOL_INFO(plugin);
     g_assert_nonnull(protocol);
@@ -1465,6 +1536,7 @@ main(int argc, char **argv)
     g_assert_nonnull(protocol->chat_send_file);
     g_assert_nonnull(protocol->find_blist_chat);
     g_assert_nonnull(protocol->get_cb_alias);
+    test_connection_owned_resource_cleanup(protocol);
     test_standard_conversation_logging(plugin, protocol);
     test_pending_transfer_disconnect(protocol, user_dir);
     test_synchronous_start_failure(protocol, user_dir);
