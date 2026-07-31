@@ -132,3 +132,15 @@
 - Keep Purple's curated `signal-purple` diagnostics as the supported debug
   surface. Do not forward raw Presage tracing, which can carry private Signal
   metadata.
+
+## 2026-07-31 - Independently drive the receive stream
+
+- Preserve Presage's intentional one-connection SQLx pool. Do not mask pool
+  starvation with a longer acquisition timeout or reintroduce concurrent
+  SQLite writers.
+- Poll the long-lived Presage receive stream in its own task on the existing
+  `LocalSet` and forward ordered `Received` values through a bounded channel.
+  The actor remains the sole owner of projection and command state.
+- Abort and join the receive driver with contact sync and attachment work at
+  every active-generation shutdown boundary. Keep startup failures integrated
+  with the existing bounded connection-recovery policy.

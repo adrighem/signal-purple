@@ -87,6 +87,11 @@ are not run for untrusted pull requests.
 - Keep the pinned Presage SQLx pool at one connection. Signal protocol
   read-modify-write transactions must serialize at the database boundary;
   retrying an entire send after a store error can duplicate its remote effect.
+- Keep the Presage receive stream independently scheduled on the actor's
+  `LocalSet` and forward only through a bounded ordered channel. Do not poll the
+  stream directly in a `select!` whose winning branches await other store work:
+  an in-progress stream future can own the sole connection and must remain
+  polled to release it.
 - Validate every public ABI pointer, UTF-8 string, and length.
 - Contain panics at exported boundaries and keep teardown non-panicking; never
   unwind into C.

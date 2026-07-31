@@ -62,3 +62,7 @@
   not make every actor-level overlap harmless. Gate optional startup work behind
   the dependency's drained-queue boundary when its receive initialization can
   retain the sole connection across longer protocol operations.
+- A long-lived stream can retain an in-progress future after `select!` chooses
+  another branch. If that future owns an exclusive resource needed by the
+  winning branch, awaiting the branch inline self-deadlocks. Keep the stream
+  independently scheduled and bound the handoff queue.
