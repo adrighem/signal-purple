@@ -41,4 +41,5 @@ ldd "$plugin"
 resolved_backend=$(ldd "$plugin" \
     | sed -n 's/^[[:space:]]*libsignal_core\.so => \(.*\) (0x[0-9a-fA-F]*)$/\1/p')
 test "$resolved_backend" = "$backend"
-G_DEBUG=fatal-warnings "$probe" "$plugin"
+G_DEBUG=fatal-warnings timeout --signal=TERM --kill-after=5s 30s \
+    "$probe" "$plugin"

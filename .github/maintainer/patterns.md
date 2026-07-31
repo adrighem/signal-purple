@@ -66,3 +66,7 @@
   another branch. If that future owns an exclusive resource needed by the
   winning branch, awaiting the branch inline self-deadlocks. Keep the stream
   independently scheduled and bound the handoff queue.
+- A module probe which links production helpers into an export-dynamic test
+  executable can silently interpose those helpers over the loaded module's own
+  copies. Bind internal module calls locally and inspect dynamic relocations so
+  the test proves which implementation it exercises.

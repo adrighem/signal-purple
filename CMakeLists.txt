@@ -120,7 +120,9 @@ target_include_directories(signal-purple PRIVATE
 target_link_libraries(signal-purple PRIVATE
     PkgConfig::PURPLE PkgConfig::GLIB PkgConfig::GDK_PIXBUF
     PkgConfig::LIBSECRET signal-core)
-target_link_options(signal-purple PRIVATE "-Wl,--no-undefined")
+target_link_options(signal-purple PRIVATE
+    "LINKER:--no-undefined"
+    "LINKER:-Bsymbolic-functions")
 set_target_properties(signal-purple PROPERTIES
     BUILD_RPATH "$ORIGIN/signal-purple"
     BUILD_WITH_INSTALL_RPATH TRUE
@@ -137,6 +139,8 @@ foreach(size IN ITEMS 16 22 48)
 endforeach()
 
 if(BUILD_TESTING)
+    find_program(READELF_EXECUTABLE readelf REQUIRED)
+
     add_executable(test-attachment-file
         tests/test_attachment_file.c
         src/attachment_file.c)
@@ -201,5 +205,12 @@ if(BUILD_TESTING)
     add_test(NAME plugin-probe
              COMMAND plugin-probe "$<TARGET_FILE:signal-purple>")
     set_tests_properties(plugin-probe PROPERTIES
-        ENVIRONMENT "G_DEBUG=fatal-warnings")
+        ENVIRONMENT "G_DEBUG=fatal-warnings"
+        TIMEOUT 30)
+    add_test(NAME plugin-module-local-bindings
+             COMMAND "${READELF_EXECUTABLE}" --relocs --wide
+                     "$<TARGET_FILE:signal-purple>")
+    set_tests_properties(plugin-module-local-bindings PROPERTIES
+        FAIL_REGULAR_EXPRESSION "signal_(blist|contact|group)_sync_"
+        TIMEOUT 5)
 endif()

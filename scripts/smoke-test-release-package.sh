@@ -31,5 +31,6 @@ if [ "$(uname -s)" = Linux ]; then
 fi
 readelf -d "$plugin" \
     | grep -F "Library runpath: [\$ORIGIN/signal-purple]"
-G_DEBUG=fatal-warnings "$probe" "$plugin"
+G_DEBUG=fatal-warnings timeout --signal=TERM --kill-after=5s 30s \
+    "$probe" "$plugin"
 dpkg -V signal-purple
