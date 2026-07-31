@@ -4,6 +4,13 @@ All notable changes will be documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 semantic versioning after the first stable release.
 
+## [0.4.3](https://github.com/adrighem/signal-purple/compare/v0.4.2...v0.4.3) (2026-07-31)
+
+
+### Bug Fixes
+
+* **build:** prevent plugin symbol interposition ([4bc1e4a](https://github.com/adrighem/signal-purple/commit/4bc1e4a3cb066e4f53d8c13b0e18e65dbc9e9217))
+
 ## [0.4.2](https://github.com/adrighem/signal-purple/compare/v0.4.1...v0.4.2) (2026-07-31)
 
 
