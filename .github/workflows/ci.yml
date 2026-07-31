@@ -87,17 +87,23 @@ jobs:
           cat /etc/os-release
           uname -m
 
+      - name: Test Rust core
+        run: cargo test --locked --manifest-path rust/signal-core/Cargo.toml
+
       - name: Configure release build
         run: >-
           cmake -S . -B build-debian-13 -G Ninja
           -DCMAKE_BUILD_TYPE=Release
+          -DBUILD_TESTING=ON
           -DCMAKE_INSTALL_PREFIX=/usr
 
       - name: Build
         run: cmake --build build-debian-13 --parallel 2
 
       - name: Test C adapter and plugin
-        run: ctest --test-dir build-debian-13 --output-on-failure
+        run: >-
+          ctest --test-dir build-debian-13 --output-on-failure
+          --no-tests=error
 
       - name: Stage and probe installed plugin
         shell: bash

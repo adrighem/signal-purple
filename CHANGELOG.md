@@ -38,14 +38,6 @@ semantic versioning after the first stable release.
 * preserve release version marker ([2c3aaef](https://github.com/adrighem/signal-purple/commit/2c3aaefff3156db3fb2d49a6d29a7920222847bd)), closes [#20](https://github.com/adrighem/signal-purple/issues/20)
 * preserve release version marker ([d5dc805](https://github.com/adrighem/signal-purple/commit/d5dc80503c7f9aa4397e0e7085806dfafe2797c3)), closes [#18](https://github.com/adrighem/signal-purple/issues/18)
 
-## [Unreleased]
-
-### Fixed
-
-- Serialize Presage SQLite access so concurrent startup replay, receipts,
-  acknowledgements, and protocol-state refreshes in one live core do not race
-  each other into `database is locked` errors.
-
 ## 0.2.2 (2026-07-24)
 
 ### Changed

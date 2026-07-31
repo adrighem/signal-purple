@@ -12,6 +12,12 @@ different ownership stages independently and may change without a C ABI bump.
 | Unresolved receive prompts | 64 MiB | C adapter | Ask the user to resolve existing prompts |
 | Inline group images | 8192 pixels per edge and 16 megapixels | C image decoder | Fall back to a file prompt |
 
+Incoming downloads use the smaller of the per-file limit and the message's
+remaining byte budget. Presage stops the encrypted stream after the bounded
+plaintext allowance plus Signal privacy padding and cryptographic framing, then
+checks the decrypted length again. Missing or understated sender metadata
+therefore cannot turn either limit into an unbounded allocation.
+
 Outgoing admission covers commands waiting in the core, commands deferred
 during recovery, and active upload tasks. A non-cloneable permit owns both the
 payload budget and request identifier through terminal event delivery; dropping
