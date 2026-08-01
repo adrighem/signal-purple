@@ -40,6 +40,17 @@ jobs:
           toolchain: 1.95.0
           components: rustfmt, clippy
 
+      - name: Cache Rust dependencies and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/signal-core/target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('rust/signal-core/Cargo.lock') }}
+
       - name: Run canonical checks
         run: scripts/check.sh full
 
@@ -83,6 +94,17 @@ jobs:
           "$source_dir/install.sh" --prefix=/usr/local --without=rust-docs
           rustc --version --verbose
           cargo --version --verbose
+
+      - name: Cache Rust dependencies and target
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            rust/signal-core/target/
+          key: debian13-cargo-${{ hashFiles('rust/signal-core/Cargo.lock') }}
 
       - name: Record Debian baseline
         run: |
