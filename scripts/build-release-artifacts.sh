@@ -130,16 +130,34 @@ build_package()
     test "$(dpkg-deb --field "$debug" Version)" = "$debian_version"
     test "$(dpkg-deb --field "$runtime" Architecture)" = "$architecture"
     test "$(dpkg-deb --field "$debug" Architecture)" = "$architecture"
+
+    (
+        cd "$source_dir"
+        cmake -S . -B build-rpm -G Ninja \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=OFF \
+            -DCMAKE_INSTALL_PREFIX=/usr
+        cmake --build build-rpm --parallel 2
+        cd build-rpm
+        cpack -G RPM
+    )
+    rpm_name="signal-purple-${version}-1.x86_64.rpm"
+    rpm_src="$source_dir/build-rpm/$rpm_name"
+    test -s "$rpm_src"
 }
 
 build_package a "$archive_a"
 build_package b "$archive_b"
 cmp "$temporary/build-a/$runtime_name" "$temporary/build-b/$runtime_name"
 cmp "$temporary/build-a/$debug_name" "$temporary/build-b/$debug_name"
+cmp "$temporary/build-a/signal-purple-$version/build-rpm/signal-purple-$version-1.x86_64.rpm" \
+    "$temporary/build-b/signal-purple-$version/build-rpm/signal-purple-$version-1.x86_64.rpm"
 
 cp "$archive_a" "$output/$archive_name"
 cp "$temporary/build-a/$runtime_name" "$output/$runtime_name"
 cp "$temporary/build-a/$debug_name" "$output/$debug_name"
+cp "$temporary/build-a/signal-purple-$version/build-rpm/signal-purple-$version-1.x86_64.rpm" \
+    "$output/signal-purple-${version}-1.x86_64.rpm"
 
 probe=$(find "$temporary/build-a/signal-purple-$version" \
     -type f -name plugin-probe -perm -u+x -print -quit)
@@ -148,4 +166,4 @@ mkdir "$output/.validation"
 cp "$probe" "$output/.validation/plugin-probe"
 
 sha256sum "$output/$archive_name" "$output/$runtime_name" \
-    "$output/$debug_name"
+    "$output/$debug_name" "$output/signal-purple-${version}-1.x86_64.rpm"

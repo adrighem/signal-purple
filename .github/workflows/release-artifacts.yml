@@ -260,6 +260,7 @@ jobs:
             dist/release/signal-purple_${{ steps.release.outputs.version }}.orig.tar.xz
             dist/release/signal-purple_${{ steps.release.outputs.version }}-1_amd64.deb
             dist/release/signal-purple-dbgsym_${{ steps.release.outputs.version }}-1_amd64.deb
+            dist/release/signal-purple-${{ steps.release.outputs.version }}-1.x86_64.rpm
             dist/release/signal-purple-${{ steps.release.outputs.version }}.spdx.json
           retention-days: 7
 
