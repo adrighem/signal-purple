@@ -1,6 +1,6 @@
 # Support
 
-This is a volunteer, alpha-quality project.
+This is a volunteer open source project.
 
 - Read the [README](README.md) and
   [troubleshooting guide](docs/troubleshooting.md) first. GitHub Discussions is
