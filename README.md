@@ -1,8 +1,7 @@
 # signal-purple
 
 > [!WARNING]
-> **Unofficial and not supported by Signal.** Test with a non-production
-> account, keep an official Signal client available, and expect Signal service
+> **Unofficial and not supported by Signal.** Expect Signal service
 > changes to break compatibility without warning.
 
 `signal-purple` is a Signal linked-device protocol plugin for Pidgin and
