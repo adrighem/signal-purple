@@ -18,8 +18,9 @@ upgrade, rollback, relink, and removal guidance lives in the README's
    GitHub release for the merged `main` commit.
 7. In the same workflow graph, the artifact pipeline verifies the Release
    Please tag, commit, version, and manifest. It then reproduces the source
-   archive and Debian packages twice, installs and probes the package, creates
-   the SBOM and checksums, and attests their provenance.
+   archive, Debian packages, and Fedora RPM packages twice, installs and
+   probes the package, creates the SBOM and checksums, and attests their
+   provenance.
 8. The final job uploads the verified assets and publishes the draft as a
    GitHub prerelease without marking it as `Latest`. A failed build leaves the
    release private and does not move or recreate its tag.

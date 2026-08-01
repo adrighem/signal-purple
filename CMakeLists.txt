@@ -214,3 +214,18 @@ if(BUILD_TESTING)
         FAIL_REGULAR_EXPRESSION "signal_(blist|contact|group)_sync_"
         TIMEOUT 5)
 endif()
+
+# --- CPack Configuration ---
+set(CPACK_GENERATOR "RPM")
+set(CPACK_PACKAGE_NAME "signal-purple")
+set(CPACK_PACKAGE_VERSION "${PROJECT_VERSION}")
+set(CPACK_PACKAGE_RELEASE "1")
+set(CPACK_PACKAGE_CONTACT "Vincent van Adrighem and contributors")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY "Signal protocol plugin for libpurple 2")
+set(CPACK_PACKAGE_VENDOR "signal-purple contributors")
+set(CPACK_PACKAGE_LICENSE "GPL-3.0-or-later AND AGPL-3.0-only")
+set(CPACK_RPM_FILE_NAME "signal-purple-${CPACK_PACKAGE_VERSION}-${CPACK_PACKAGE_RELEASE}.x86_64.rpm")
+set(CPACK_RPM_PACKAGE_REQUIRES "pidgin, libsecret")
+set(CPACK_RPM_PACKAGE_LICENSE "GPL-3.0-or-later AND AGPL-3.0-only")
+set(CPACK_RPM_PACKAGE_GROUP "Applications/Communications")
+include(CPack)

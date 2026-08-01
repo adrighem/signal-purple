@@ -40,7 +40,7 @@ RUN set -eu; \
         build-essential ca-certificates clang cmake curl debhelper dpkg-dev \
         fakeroot git gzip libclang-dev libgdk-pixbuf-2.0-dev \
         libglib2.0-dev libpurple-dev libsecret-1-dev libssl-dev ninja-build \
-        pkgconf protobuf-compiler python3 tar util-linux xz-utils
+        pkgconf protobuf-compiler python3 rpm tar util-linux xz-utils
 
 RUN set -eu; \
     archive="/tmp/${RUST_ARCHIVE}"; \

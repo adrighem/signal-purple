@@ -37,8 +37,8 @@ Those boxes remain unchecked and are known limitations, not test passes.
 - [x] Primary CI passes formatting, warnings, tests, and ABI/module-load checks.
 - [x] The candidate passes the clean Debian 13 build, test, and staged-install
   job.
-- [x] The candidate's vendored source archive produces installable Debian
-  packages twice with identical contents.
+- [x] The candidate's vendored source archive produces installable Debian and
+  Fedora RPM packages twice with identical contents.
 - [x] The source archive, packages, checksums, SBOM, and provenance
   attestation agree.
 - [x] No known unresolved release-blocking vulnerability remains.
