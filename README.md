@@ -1,15 +1,13 @@
 # signal-purple
 
 > [!WARNING]
-> **Alpha quality, unofficial, and not supported by Signal.** Tagged alpha
-> releases are available; `main` may contain newer unreleased work. Test with a
-> non-production account, keep an official Signal client available, and expect
-> Signal service changes to break compatibility without warning.
+> **Unofficial and not supported by Signal.** Expect Signal service
+> changes to break compatibility without warning.
 
-`signal-purple` is an alpha-quality Signal linked-device protocol plugin for
-Pidgin and libpurple 2. It adds synchronized Signal contacts, direct messages,
-and group conversations to Pidgin while a Rust/Presage backend handles the
-Signal protocol inside the same process.
+`signal-purple` is a Signal linked-device protocol plugin for Pidgin and
+libpurple 2. It adds synchronized Signal contacts, direct messages, and group
+conversations to Pidgin while a Rust/Presage backend handles the Signal
+protocol inside the same process.
 
 ## Current state
 
