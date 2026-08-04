@@ -200,6 +200,7 @@ struct MessageProjection {
     pending: HashMap<u64, Content>,
     identities: ProjectionIdentities,
     acknowledgments: Arc<AcknowledgmentInbox>,
+    delivery_receipts: DeliveryReceiptQueue,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -254,6 +255,46 @@ struct SessionState {
 struct ReceiveStartError {
     message: String,
     transient: bool,
+}
+
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct DeliveryReceiptIdentity {
+    recipient: String,
+    message_timestamp: u64,
+}
+
+#[derive(Clone, Debug)]
+struct PendingDeliveryReceipt {
+    identity: DeliveryReceiptIdentity,
+    recipient: ServiceId,
+    send_timestamp: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+enum DeliveryReceiptState {
+    #[default]
+    Ready,
+    InFlight,
+    Deferred,
+}
+
+#[derive(Default)]
+struct DeliveryReceiptQueue {
+    pending: VecDeque<(PendingDeliveryReceipt, DeliveryReceiptState)>,
+    identities: HashSet<DeliveryReceiptIdentity>,
+}
+
+struct DeliveryReceiptCompletion {
+    generation: u64,
+    receipt: PendingDeliveryReceipt,
+    result: Result<(), presage::Error<presage_store_sqlite::SqliteStoreError>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DeliveryReceiptFailureAction {
+    Retry,
+    Recover,
+    Discard,
 }
 
 struct ActiveReceiveTasks {
@@ -512,6 +553,7 @@ impl MessageProjection {
             pending: HashMap::new(),
             identities: ProjectionIdentities::default(),
             acknowledgments,
+            delivery_receipts: DeliveryReceiptQueue::default(),
         }
     }
 
@@ -539,6 +581,88 @@ impl MessageProjection {
         self.acknowledgments.unregister(delivery_id);
         self.identities.complete(projection_identity(&content));
         Some(content)
+    }
+}
+
+impl DeliveryReceiptQueue {
+    fn enqueue(&mut self, recipient: ServiceId, message_timestamp: u64, send_timestamp: u64) {
+        let identity = DeliveryReceiptIdentity {
+            recipient: recipient.service_id_string(),
+            message_timestamp,
+        };
+        if !self.identities.insert(identity.clone()) {
+            return;
+        }
+        self.pending.push_back((
+            PendingDeliveryReceipt {
+                identity,
+                recipient,
+                send_timestamp,
+            },
+            DeliveryReceiptState::Ready,
+        ));
+    }
+
+    fn start_next(&mut self, session_ready: bool) -> Option<PendingDeliveryReceipt> {
+        if !session_ready {
+            return None;
+        }
+        let (receipt, state) = self
+            .pending
+            .iter_mut()
+            .find(|(_, state)| *state == DeliveryReceiptState::Ready)?;
+        *state = DeliveryReceiptState::InFlight;
+        Some(receipt.clone())
+    }
+
+    fn complete(&mut self, identity: &DeliveryReceiptIdentity) {
+        let Some(index) = self
+            .pending
+            .iter()
+            .position(|(receipt, _)| &receipt.identity == identity)
+        else {
+            return;
+        };
+        let (receipt, _) = self
+            .pending
+            .remove(index)
+            .expect("delivery receipt index came from the same queue");
+        self.identities.remove(&receipt.identity);
+    }
+
+    fn retry(&mut self, identity: &DeliveryReceiptIdentity, immediately: bool) {
+        if let Some((_, state)) = self
+            .pending
+            .iter_mut()
+            .find(|(receipt, _)| &receipt.identity == identity)
+        {
+            *state = if immediately {
+                DeliveryReceiptState::Ready
+            } else {
+                DeliveryReceiptState::Deferred
+            };
+        }
+    }
+
+    fn activate_retries(&mut self) {
+        for (_, state) in &mut self.pending {
+            if *state == DeliveryReceiptState::Deferred {
+                *state = DeliveryReceiptState::Ready;
+            }
+        }
+    }
+
+    fn release_in_flight(&mut self) {
+        for (_, state) in &mut self.pending {
+            if *state == DeliveryReceiptState::InFlight {
+                *state = DeliveryReceiptState::Ready;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.pending.len()
     }
 }
 
@@ -715,6 +839,38 @@ fn receive_error_is_transient(
                 if service_error_is_transient(error))
         }
         _ => false,
+    }
+}
+
+fn service_error_indicates_closed_websocket(error: &ServiceError) -> bool {
+    matches!(error, ServiceError::WsClosing { .. })
+        || matches!(error, ServiceError::WsError(error)
+            if matches!(error.as_ref(), reqwest_websocket::Error::Tungstenite(_)))
+}
+
+fn receipt_error_indicates_closed_websocket(
+    error: &presage::Error<presage_store_sqlite::SqliteStoreError>,
+) -> bool {
+    match error {
+        presage::Error::MessagePipeInterruptedError => true,
+        presage::Error::ServiceError(error) => service_error_indicates_closed_websocket(error),
+        presage::Error::MessageSenderError(error) => {
+            matches!(error.as_ref(), MessageSenderError::ServiceError(error)
+                if service_error_indicates_closed_websocket(error))
+        }
+        _ => false,
+    }
+}
+
+fn delivery_receipt_failure_action(
+    error: &presage::Error<presage_store_sqlite::SqliteStoreError>,
+) -> DeliveryReceiptFailureAction {
+    if !receive_error_is_transient(error) {
+        DeliveryReceiptFailureAction::Discard
+    } else if receipt_error_indicates_closed_websocket(error) {
+        DeliveryReceiptFailureAction::Recover
+    } else {
+        DeliveryReceiptFailureAction::Retry
     }
 }
 
@@ -986,6 +1142,8 @@ async fn receive_and_command_loop(
     let mut deferred_commands = VecDeque::new();
     let mut attachment_tasks = tokio::task::JoinSet::new();
     let mut attachment_aborts = HashMap::new();
+    let mut delivery_receipt_tasks = tokio::task::JoinSet::new();
+    let mut receive_generation = 0u64;
     let departed_groups = DepartedGroups::default();
     let mut retry_tick = tokio::time::interval(std::time::Duration::from_secs(5));
     retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -1008,6 +1166,7 @@ async fn receive_and_command_loop(
                         &sink,
                         &mut attachment_tasks,
                         &mut attachment_aborts,
+                        &mut delivery_receipt_tasks,
                         &acknowledgments,
                         &mut projection,
                     )
@@ -1026,6 +1185,7 @@ async fn receive_and_command_loop(
                     &sink,
                     &mut attachment_tasks,
                     &mut attachment_aborts,
+                    &mut delivery_receipt_tasks,
                     &acknowledgments,
                     &mut projection,
                 )
@@ -1052,6 +1212,7 @@ async fn receive_and_command_loop(
                     &sink,
                     &mut attachment_tasks,
                     &mut attachment_aborts,
+                    &mut delivery_receipt_tasks,
                     &acknowledgments,
                     &mut projection,
                 )
@@ -1071,6 +1232,7 @@ async fn receive_and_command_loop(
                                     &sink,
                                     &mut attachment_tasks,
                                     &mut attachment_aborts,
+                                    &mut delivery_receipt_tasks,
                                     &acknowledgments,
                                     &mut projection,
                                 ).await;
@@ -1108,6 +1270,7 @@ async fn receive_and_command_loop(
                                 &sink,
                                 &mut attachment_tasks,
                                 &mut attachment_aborts,
+                                &mut delivery_receipt_tasks,
                                 &acknowledgments,
                                 &mut projection,
                             ).await;
@@ -1136,6 +1299,7 @@ async fn receive_and_command_loop(
                             &sink,
                             &mut attachment_tasks,
                             &mut attachment_aborts,
+                            &mut delivery_receipt_tasks,
                             &acknowledgments,
                             &mut projection,
                         )
@@ -1164,6 +1328,7 @@ async fn receive_and_command_loop(
                             &sink,
                             &mut attachment_tasks,
                             &mut attachment_aborts,
+                            &mut delivery_receipt_tasks,
                             &acknowledgments,
                             &mut projection,
                         ).await;
@@ -1202,6 +1367,7 @@ async fn receive_and_command_loop(
                         &sink,
                         &mut attachment_tasks,
                         &mut attachment_aborts,
+                        &mut delivery_receipt_tasks,
                         &acknowledgments,
                         &mut projection,
                     ).await;
@@ -1224,6 +1390,7 @@ async fn receive_and_command_loop(
                     &sink,
                     &mut attachment_tasks,
                     &mut attachment_aborts,
+                    &mut delivery_receipt_tasks,
                     &acknowledgments,
                     &mut projection,
                 )
@@ -1245,6 +1412,7 @@ async fn receive_and_command_loop(
             sink.emit(Event::transient_error(format!("{error}; {status}")));
             continue;
         }
+        receive_generation = receive_generation.wrapping_add(1).max(1);
 
         // Keep the contact request completely unpolled until the first
         // QueueEmpty path has finished its startup store work.
@@ -1272,6 +1440,7 @@ async fn receive_and_command_loop(
                             &sink,
                             &mut attachment_tasks,
                             &mut attachment_aborts,
+                            &mut delivery_receipt_tasks,
                             &acknowledgments,
                             &mut projection,
                         )
@@ -1282,10 +1451,20 @@ async fn receive_and_command_loop(
             };
         }
 
-        loop {
+        let recovery_error = loop {
             let session_ready = session.is_ready();
             let groups_authoritative = session.groups_authoritative();
             let groups_dirty = session.groups_dirty();
+            if delivery_receipt_tasks.is_empty()
+                && let Some(receipt) = projection.delivery_receipts.start_next(session_ready)
+            {
+                spawn_delivery_receipt_attempt(
+                    &mut delivery_receipt_tasks,
+                    manager.clone(),
+                    receive_generation,
+                    receipt,
+                );
+            }
             tokio::select! {
                 _ = acknowledgments.wait() => {
                     await_phase_or_stop!(process_acknowledgments(
@@ -1334,6 +1513,7 @@ async fn receive_and_command_loop(
                                     session.groups_authoritative(),
                                 ));
                                 session.mark_ready();
+                                projection.delivery_receipts.activate_retries();
                                 ready.store(true, Ordering::Release);
                                 sink.emit(Event { kind: EVENT_READY, ..Event::default() });
                                 if let Some(start) = contact_sync_start.take() {
@@ -1372,7 +1552,7 @@ async fn receive_and_command_loop(
                                 await_phase_or_stop!(emit_identity_changes(&manager, &sink));
                             }
                         }
-                        None => break,
+                        None => break "Signal's message stream ended unexpectedly".to_owned(),
                     }
                 }
                 command = async {
@@ -1391,6 +1571,7 @@ async fn receive_and_command_loop(
                             &sink,
                             &mut attachment_tasks,
                             &mut attachment_aborts,
+                            &mut delivery_receipt_tasks,
                             &acknowledgments,
                             &mut projection,
                         ).await;
@@ -1471,6 +1652,7 @@ async fn receive_and_command_loop(
                                     &sink,
                                     &mut attachment_tasks,
                                     &mut attachment_aborts,
+                                    &mut delivery_receipt_tasks,
                                     &acknowledgments,
                                     &mut projection,
                                 ).await;
@@ -1490,7 +1672,36 @@ async fn receive_and_command_loop(
                         ));
                     }
                 }
+                completed = delivery_receipt_tasks.join_next(),
+                    if !delivery_receipt_tasks.is_empty() =>
+                {
+                    let Some(completed) = completed else {
+                        unreachable!("a non-empty delivery receipt task set returned no task")
+                    };
+                    match completed {
+                        Ok(completion) => {
+                            let generation = completion.generation;
+                            if let Some(error) = finish_delivery_receipt_attempt(
+                                &mut projection.delivery_receipts,
+                                &sink,
+                                &completion,
+                            ) && generation == receive_generation {
+                                break error;
+                            }
+                        }
+                        Err(error) => {
+                            projection.delivery_receipts.release_in_flight();
+                            sink.emit(Event::error(
+                                format!(
+                                    "Signal delivery receipt worker stopped unexpectedly: {error}"
+                                ),
+                                false,
+                            ));
+                        }
+                    }
+                }
                 _ = retry_tick.tick(), if session_ready => {
+                    projection.delivery_receipts.activate_retries();
                     await_phase_or_stop!(retry_outbox(
                         &mut manager,
                         &sink,
@@ -1537,16 +1748,17 @@ async fn receive_and_command_loop(
                         &sink,
                         &mut attachment_tasks,
                         &mut attachment_aborts,
+                        &mut delivery_receipt_tasks,
                         &acknowledgments,
                         &mut projection,
                     ).await;
                     return Ok(());
                 },
             }
-        }
+        };
 
         ready.store(false, Ordering::Release);
-        let error = "Signal's message stream ended unexpectedly".to_owned();
+        let error = recovery_error;
         let transition = session.enter_recovery(error.clone());
         if transition == RecoveryTransition::Entered {
             sink.emit(Event {
@@ -2430,6 +2642,7 @@ async fn project_content(
             delivery_id,
             sink,
             departed_groups,
+            &mut projection.delivery_receipts,
             timestamps,
         )
         .await,
@@ -2544,16 +2757,28 @@ async fn drain_acknowledgments(
     while process_acknowledgments(manager, acknowledgments, sink, projection, false).await != 0 {}
 }
 
+async fn abort_delivery_receipt_tasks(
+    tasks: &mut tokio::task::JoinSet<DeliveryReceiptCompletion>,
+    receipts: &mut DeliveryReceiptQueue,
+) {
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+    receipts.release_in_flight();
+}
+
 async fn stop_attachments_and_drain_acknowledgments(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
     attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
     attachment_controls: &mut HashMap<u64, AttachmentTaskControl>,
+    delivery_receipt_tasks: &mut tokio::task::JoinSet<DeliveryReceiptCompletion>,
     acknowledgments: &AcknowledgmentInbox,
     projection: &mut MessageProjection,
 ) {
     acknowledgments.close();
     let cleanup = async {
+        abort_delivery_receipt_tasks(delivery_receipt_tasks, &mut projection.delivery_receipts)
+            .await;
         abort_in_flight_attachments(manager, sink, attachment_tasks, attachment_controls).await;
         drain_acknowledgments(manager, acknowledgments, sink, projection).await;
     };
@@ -2591,17 +2816,23 @@ async fn stop_active_receive_loop(
     sink: &EventSink,
     attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
     attachment_controls: &mut HashMap<u64, AttachmentTaskControl>,
+    delivery_receipt_tasks: &mut tokio::task::JoinSet<DeliveryReceiptCompletion>,
     acknowledgments: &AcknowledgmentInbox,
     projection: &mut MessageProjection,
 ) {
     acknowledgments.close();
+    let final_cleanup = async {
+        abort_delivery_receipt_tasks(delivery_receipt_tasks, &mut projection.delivery_receipts)
+            .await;
+        drain_acknowledgments(manager, acknowledgments, sink, projection).await;
+    };
     stop_receive_tasks(
         tasks,
         manager,
         sink,
         attachment_tasks,
         attachment_controls,
-        drain_acknowledgments(manager, acknowledgments, sink, projection),
+        final_cleanup,
     )
     .await;
 }
@@ -2856,6 +3087,7 @@ async fn handle_content(
     delivery_id: u64,
     sink: &EventSink,
     departed_groups: &DepartedGroups,
+    delivery_receipts: &mut DeliveryReceiptQueue,
     timestamps: &MessageTimestampAllocator,
 ) -> ProjectionDisposition {
     let timestamp = content_timestamp(&content);
@@ -2876,20 +3108,7 @@ async fn handle_content(
             };
             let disposition = emit_data_message(manager, projection, sink, departed_groups).await;
             if content.metadata.needs_receipt {
-                let mut receipt_manager = manager.clone();
-                let receipt_sink = sink.clone();
-                let receipt_recipient = content.metadata.sender;
-                let receipt_timestamps = timestamps.clone();
-                tokio::task::spawn_local(async move {
-                    send_delivery_receipt(
-                        &mut receipt_manager,
-                        receipt_recipient,
-                        timestamp,
-                        &receipt_sink,
-                        &receipt_timestamps,
-                    )
-                    .await;
-                });
+                delivery_receipts.enqueue(content.metadata.sender, timestamp, timestamps.next());
             }
             return disposition;
         }
@@ -3660,27 +3879,78 @@ async fn emit_data_message(
     ProjectionDisposition::AwaitingAck
 }
 
-async fn send_delivery_receipt(
+fn spawn_delivery_receipt_attempt(
+    tasks: &mut tokio::task::JoinSet<DeliveryReceiptCompletion>,
+    manager: Manager<SqliteStore, Registered>,
+    generation: u64,
+    receipt: PendingDeliveryReceipt,
+) {
+    tasks.spawn_local(async move {
+        let mut manager = manager;
+        let result = send_receipt_at_timestamp(
+            &mut manager,
+            receipt.recipient,
+            receipt.identity.message_timestamp,
+            receipt_message::Type::Delivery,
+            receipt.send_timestamp,
+        )
+        .await;
+        DeliveryReceiptCompletion {
+            generation,
+            receipt,
+            result,
+        }
+    });
+}
+
+fn finish_delivery_receipt_attempt(
+    receipts: &mut DeliveryReceiptQueue,
+    sink: &EventSink,
+    completion: &DeliveryReceiptCompletion,
+) -> Option<String> {
+    let Err(error) = &completion.result else {
+        receipts.complete(&completion.receipt.identity);
+        return None;
+    };
+    match delivery_receipt_failure_action(error) {
+        DeliveryReceiptFailureAction::Retry => {
+            receipts.retry(&completion.receipt.identity, false);
+            None
+        }
+        DeliveryReceiptFailureAction::Recover => {
+            receipts.retry(&completion.receipt.identity, true);
+            Some(format!(
+                "Signal websocket closed while sending a delivery receipt: {error}"
+            ))
+        }
+        DeliveryReceiptFailureAction::Discard => {
+            receipts.complete(&completion.receipt.identity);
+            sink.emit(Event::error(
+                format!("Could not send a Signal delivery receipt: {error}"),
+                false,
+            ));
+            None
+        }
+    }
+}
+
+async fn send_receipt_at_timestamp(
     manager: &mut Manager<SqliteStore, Registered>,
     recipient: ServiceId,
     message_timestamp: u64,
-    sink: &EventSink,
-    timestamps: &MessageTimestampAllocator,
-) {
-    if let Err(error) = send_receipt(
-        manager,
-        recipient,
-        message_timestamp,
-        receipt_message::Type::Delivery,
-        timestamps,
-    )
-    .await
-    {
-        sink.emit(Event::error(
-            format!("Could not send a Signal delivery receipt: {error}"),
-            false,
-        ));
-    }
+    receipt_type: receipt_message::Type,
+    send_timestamp: u64,
+) -> Result<(), presage::Error<presage_store_sqlite::SqliteStoreError>> {
+    manager
+        .send_message(
+            recipient,
+            ReceiptMessage {
+                r#type: Some(receipt_type.into()),
+                timestamp: vec![message_timestamp],
+            },
+            send_timestamp,
+        )
+        .await
 }
 
 async fn send_receipt(
@@ -3690,17 +3960,14 @@ async fn send_receipt(
     receipt_type: receipt_message::Type,
     timestamps: &MessageTimestampAllocator,
 ) -> Result<(), presage::Error<presage_store_sqlite::SqliteStoreError>> {
-    let timestamp = timestamps.next();
-    manager
-        .send_message(
-            recipient,
-            ReceiptMessage {
-                r#type: Some(receipt_type.into()),
-                timestamp: vec![message_timestamp],
-            },
-            timestamp,
-        )
-        .await
+    send_receipt_at_timestamp(
+        manager,
+        recipient,
+        message_timestamp,
+        receipt_type,
+        timestamps.next(),
+    )
+    .await
 }
 
 fn parse_recipient(value: &str) -> Option<ServiceId> {
@@ -5314,14 +5581,146 @@ mod tests {
                     reqwest_websocket::HandshakeError::UnexpectedStatusCode("503".parse().unwrap()),
                 ))),
             );
+        let sender_websocket_closing =
+            presage::Error::<presage_store_sqlite::SqliteStoreError>::MessageSenderError(Box::new(
+                MessageSenderError::ServiceError(ServiceError::WsClosing {
+                    reason: "test close while sending",
+                }),
+            ));
         let relink = presage::Error::<presage_store_sqlite::SqliteStoreError>::RelinkNecessary;
 
         assert!(receive_error_is_transient(&websocket_closing));
         assert!(receive_error_is_transient(&rate_limited));
         assert!(receive_error_is_transient(&websocket_unavailable));
+        assert!(receive_error_is_transient(&sender_websocket_closing));
+        assert_eq!(
+            delivery_receipt_failure_action(&sender_websocket_closing),
+            DeliveryReceiptFailureAction::Recover
+        );
         assert!(!receive_error_is_transient(&unauthorized));
         assert!(!receive_error_is_transient(&websocket_unauthorized));
         assert!(!receive_error_is_transient(&relink));
+    }
+
+    #[test]
+    fn retries_closed_websocket_receipts_after_recovery_without_an_error_event() {
+        let recipient = parse_recipient("11111111-1111-4111-8111-111111111111").unwrap();
+        let mut receipts = DeliveryReceiptQueue::default();
+        receipts.enqueue(recipient, 42, 100);
+        receipts.enqueue(recipient, 42, 101);
+        assert_eq!(receipts.len(), 1);
+        assert!(receipts.start_next(false).is_none());
+        let receipt = receipts.start_next(true).unwrap();
+        let completion = DeliveryReceiptCompletion {
+            generation: 7,
+            receipt: receipt.clone(),
+            result: Err(presage::Error::MessageSenderError(Box::new(
+                MessageSenderError::ServiceError(ServiceError::WsClosing {
+                    reason: "test close while waiting for a response",
+                }),
+            ))),
+        };
+        let (sink, events) = crate::event_queue::event_queue(2).unwrap();
+
+        assert!(finish_delivery_receipt_attempt(&mut receipts, &sink, &completion).is_some());
+        assert_eq!(receipts.len(), 1);
+        assert!(matches!(
+            events.poll(),
+            crate::event_queue::EventPoll::Empty
+        ));
+        assert!(receipts.start_next(false).is_none());
+        let retry = receipts.start_next(true).unwrap();
+        assert_eq!(retry.identity, receipt.identity);
+        assert_eq!(retry.send_timestamp, 100);
+    }
+
+    #[test]
+    fn defers_transient_receipt_failures_without_resetting_a_healthy_socket() {
+        let recipient = parse_recipient("11111111-1111-4111-8111-111111111111").unwrap();
+        let mut receipts = DeliveryReceiptQueue::default();
+        receipts.enqueue(recipient, 42, 100);
+        let receipt = receipts.start_next(true).unwrap();
+        let completion = DeliveryReceiptCompletion {
+            generation: 7,
+            receipt,
+            result: Err(presage::Error::ServiceError(
+                ServiceError::RateLimitExceeded { retry_after: None },
+            )),
+        };
+        let (sink, events) = crate::event_queue::event_queue(2).unwrap();
+
+        assert_eq!(
+            finish_delivery_receipt_attempt(&mut receipts, &sink, &completion),
+            None
+        );
+        assert!(receipts.start_next(true).is_none());
+        assert!(matches!(
+            events.poll(),
+            crate::event_queue::EventPoll::Empty
+        ));
+        receipts.activate_retries();
+        assert!(receipts.start_next(true).is_some());
+    }
+
+    #[test]
+    fn reports_and_discards_permanent_delivery_receipt_failures() {
+        let recipient = parse_recipient("11111111-1111-4111-8111-111111111111").unwrap();
+        let mut receipts = DeliveryReceiptQueue::default();
+        receipts.enqueue(recipient, 42, 100);
+        let receipt = receipts.start_next(true).unwrap();
+        let completion = DeliveryReceiptCompletion {
+            generation: 7,
+            receipt,
+            result: Err(presage::Error::ServiceError(ServiceError::Unauthorized)),
+        };
+        let (sink, events) = crate::event_queue::event_queue(2).unwrap();
+
+        assert_eq!(
+            finish_delivery_receipt_attempt(&mut receipts, &sink, &completion),
+            None
+        );
+        assert_eq!(receipts.len(), 0);
+        let crate::event_queue::EventPoll::Event(event) = events.poll() else {
+            panic!("expected a permanent delivery receipt error");
+        };
+        assert_eq!(event.kind, crate::event::EVENT_ERROR);
+        assert_eq!(event.flags, 0);
+        assert!(matches!(
+            events.poll(),
+            crate::event_queue::EventPoll::Empty
+        ));
+    }
+
+    #[test]
+    fn aborts_owned_delivery_receipt_work_and_releases_it_for_retry() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .unwrap();
+        let local = tokio::task::LocalSet::new();
+        runtime.block_on(local.run_until(async {
+            let recipient = parse_recipient("11111111-1111-4111-8111-111111111111").unwrap();
+            let mut receipts = DeliveryReceiptQueue::default();
+            receipts.enqueue(recipient, 42, 100);
+            let original = receipts.start_next(true).unwrap();
+            let dropped = Arc::new(AtomicBool::new(false));
+            let task_dropped = Arc::clone(&dropped);
+            let (started_tx, started_rx) = oneshot::channel();
+            let mut tasks = tokio::task::JoinSet::new();
+            tasks.spawn_local(async move {
+                let _drop_flag = DropFlag(task_dropped);
+                let _ = started_tx.send(());
+                std::future::pending::<DeliveryReceiptCompletion>().await
+            });
+            started_rx.await.unwrap();
+
+            abort_delivery_receipt_tasks(&mut tasks, &mut receipts).await;
+
+            assert!(tasks.is_empty());
+            assert!(dropped.load(Ordering::Acquire));
+            let retry = receipts.start_next(true).unwrap();
+            assert_eq!(retry.identity, original.identity);
+            assert_eq!(retry.send_timestamp, original.send_timestamp);
+        }));
     }
 
     #[test]
