@@ -52,7 +52,11 @@ drift which separate C-only and Rust-only assertions cannot detect.
   contact synchronization and attachment tasks before draining accepted
   projection acknowledgements. Profile lookup, group synchronization, durable
   replay, outbox retry, and live message projection all race the authoritative
-  shutdown signal, as do store registration and schema initialization. Parent
+  shutdown signal, as do store registration and schema initialization. Delivery
+  receipts use one actor-owned send task and a deduplicated pending queue. A
+  websocket-close completion remains queued across connection generations and is
+  retried only after the replacement stream reaches ready; shutdown aborts and
+  joins the owned task. Parent
   directory setup completes synchronously before the worker is created, so no
   plugin-owned filesystem operation can outlive the joined actor. Cleanup gets
   a two-second budget, and Tokio runtime shutdown gets a separate two-second
@@ -148,7 +152,11 @@ direct messaging remains available.
   connection assigns a collision-free sequential Purple chat integer.
 - Incoming text is markup-escaped. Outgoing Purple markup is stripped.
 - Own-device `SynchronizeMessage` values render as outgoing messages.
-- Delivery receipts are sent when Presage marks an envelope as needing one.
+- Delivery receipts are queued when Presage marks an envelope as needing one.
+  Transient websocket-close failures enter the normal connection recovery path
+  without a user notification, then retry the same logical receipt and allocated
+  send timestamp after the replacement stream is ready. Permanent failures are
+  reported and discarded.
 - Read receipts are held until Purple reports that the direct or group
   conversation is focused. Background delivery and notification rendering do
   not mark a message read.
