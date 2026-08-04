@@ -201,6 +201,7 @@ struct MessageProjection {
     identities: ProjectionIdentities,
     acknowledgments: Arc<AcknowledgmentInbox>,
     delivery_receipts: DeliveryReceiptQueue,
+    delivery_receipt_tasks: tokio::task::JoinSet<DeliveryReceiptCompletion>,
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -554,6 +555,7 @@ impl MessageProjection {
             identities: ProjectionIdentities::default(),
             acknowledgments,
             delivery_receipts: DeliveryReceiptQueue::default(),
+            delivery_receipt_tasks: tokio::task::JoinSet::new(),
         }
     }
 
@@ -1142,7 +1144,6 @@ async fn receive_and_command_loop(
     let mut deferred_commands = VecDeque::new();
     let mut attachment_tasks = tokio::task::JoinSet::new();
     let mut attachment_aborts = HashMap::new();
-    let mut delivery_receipt_tasks = tokio::task::JoinSet::new();
     let mut receive_generation = 0u64;
     let departed_groups = DepartedGroups::default();
     let mut retry_tick = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -1166,7 +1167,6 @@ async fn receive_and_command_loop(
                         &sink,
                         &mut attachment_tasks,
                         &mut attachment_aborts,
-                        &mut delivery_receipt_tasks,
                         &acknowledgments,
                         &mut projection,
                     )
@@ -1185,7 +1185,6 @@ async fn receive_and_command_loop(
                     &sink,
                     &mut attachment_tasks,
                     &mut attachment_aborts,
-                    &mut delivery_receipt_tasks,
                     &acknowledgments,
                     &mut projection,
                 )
@@ -1212,7 +1211,6 @@ async fn receive_and_command_loop(
                     &sink,
                     &mut attachment_tasks,
                     &mut attachment_aborts,
-                    &mut delivery_receipt_tasks,
                     &acknowledgments,
                     &mut projection,
                 )
@@ -1232,7 +1230,6 @@ async fn receive_and_command_loop(
                                     &sink,
                                     &mut attachment_tasks,
                                     &mut attachment_aborts,
-                                    &mut delivery_receipt_tasks,
                                     &acknowledgments,
                                     &mut projection,
                                 ).await;
@@ -1270,7 +1267,6 @@ async fn receive_and_command_loop(
                                 &sink,
                                 &mut attachment_tasks,
                                 &mut attachment_aborts,
-                                &mut delivery_receipt_tasks,
                                 &acknowledgments,
                                 &mut projection,
                             ).await;
@@ -1299,7 +1295,6 @@ async fn receive_and_command_loop(
                             &sink,
                             &mut attachment_tasks,
                             &mut attachment_aborts,
-                            &mut delivery_receipt_tasks,
                             &acknowledgments,
                             &mut projection,
                         )
@@ -1328,7 +1323,6 @@ async fn receive_and_command_loop(
                             &sink,
                             &mut attachment_tasks,
                             &mut attachment_aborts,
-                            &mut delivery_receipt_tasks,
                             &acknowledgments,
                             &mut projection,
                         ).await;
@@ -1367,7 +1361,6 @@ async fn receive_and_command_loop(
                         &sink,
                         &mut attachment_tasks,
                         &mut attachment_aborts,
-                        &mut delivery_receipt_tasks,
                         &acknowledgments,
                         &mut projection,
                     ).await;
@@ -1390,7 +1383,6 @@ async fn receive_and_command_loop(
                     &sink,
                     &mut attachment_tasks,
                     &mut attachment_aborts,
-                    &mut delivery_receipt_tasks,
                     &acknowledgments,
                     &mut projection,
                 )
@@ -1440,7 +1432,6 @@ async fn receive_and_command_loop(
                             &sink,
                             &mut attachment_tasks,
                             &mut attachment_aborts,
-                            &mut delivery_receipt_tasks,
                             &acknowledgments,
                             &mut projection,
                         )
@@ -1455,11 +1446,11 @@ async fn receive_and_command_loop(
             let session_ready = session.is_ready();
             let groups_authoritative = session.groups_authoritative();
             let groups_dirty = session.groups_dirty();
-            if delivery_receipt_tasks.is_empty()
+            if projection.delivery_receipt_tasks.is_empty()
                 && let Some(receipt) = projection.delivery_receipts.start_next(session_ready)
             {
                 spawn_delivery_receipt_attempt(
-                    &mut delivery_receipt_tasks,
+                    &mut projection.delivery_receipt_tasks,
                     manager.clone(),
                     receive_generation,
                     receipt,
@@ -1571,7 +1562,6 @@ async fn receive_and_command_loop(
                             &sink,
                             &mut attachment_tasks,
                             &mut attachment_aborts,
-                            &mut delivery_receipt_tasks,
                             &acknowledgments,
                             &mut projection,
                         ).await;
@@ -1652,7 +1642,6 @@ async fn receive_and_command_loop(
                                     &sink,
                                     &mut attachment_tasks,
                                     &mut attachment_aborts,
-                                    &mut delivery_receipt_tasks,
                                     &acknowledgments,
                                     &mut projection,
                                 ).await;
@@ -1672,8 +1661,8 @@ async fn receive_and_command_loop(
                         ));
                     }
                 }
-                completed = delivery_receipt_tasks.join_next(),
-                    if !delivery_receipt_tasks.is_empty() =>
+                completed = projection.delivery_receipt_tasks.join_next(),
+                    if !projection.delivery_receipt_tasks.is_empty() =>
                 {
                     let Some(completed) = completed else {
                         unreachable!("a non-empty delivery receipt task set returned no task")
@@ -1748,7 +1737,6 @@ async fn receive_and_command_loop(
                         &sink,
                         &mut attachment_tasks,
                         &mut attachment_aborts,
-                        &mut delivery_receipt_tasks,
                         &acknowledgments,
                         &mut projection,
                     ).await;
@@ -2771,14 +2759,16 @@ async fn stop_attachments_and_drain_acknowledgments(
     sink: &EventSink,
     attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
     attachment_controls: &mut HashMap<u64, AttachmentTaskControl>,
-    delivery_receipt_tasks: &mut tokio::task::JoinSet<DeliveryReceiptCompletion>,
     acknowledgments: &AcknowledgmentInbox,
     projection: &mut MessageProjection,
 ) {
     acknowledgments.close();
     let cleanup = async {
-        abort_delivery_receipt_tasks(delivery_receipt_tasks, &mut projection.delivery_receipts)
-            .await;
+        abort_delivery_receipt_tasks(
+            &mut projection.delivery_receipt_tasks,
+            &mut projection.delivery_receipts,
+        )
+        .await;
         abort_in_flight_attachments(manager, sink, attachment_tasks, attachment_controls).await;
         drain_acknowledgments(manager, acknowledgments, sink, projection).await;
     };
@@ -2816,14 +2806,16 @@ async fn stop_active_receive_loop(
     sink: &EventSink,
     attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
     attachment_controls: &mut HashMap<u64, AttachmentTaskControl>,
-    delivery_receipt_tasks: &mut tokio::task::JoinSet<DeliveryReceiptCompletion>,
     acknowledgments: &AcknowledgmentInbox,
     projection: &mut MessageProjection,
 ) {
     acknowledgments.close();
     let final_cleanup = async {
-        abort_delivery_receipt_tasks(delivery_receipt_tasks, &mut projection.delivery_receipts)
-            .await;
+        abort_delivery_receipt_tasks(
+            &mut projection.delivery_receipt_tasks,
+            &mut projection.delivery_receipts,
+        )
+        .await;
         drain_acknowledgments(manager, acknowledgments, sink, projection).await;
     };
     stop_receive_tasks(
