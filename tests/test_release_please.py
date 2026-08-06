@@ -12,6 +12,9 @@ MARKER = "# x-release-please-version"
 RELEASE_ARTIFACTS_WORKFLOW = pathlib.PurePosixPath(
     ".github/workflows/release-artifacts.yml"
 )
+APT_REPOSITORY_WORKFLOW = pathlib.PurePosixPath(
+    ".github/workflows/apt-repository.yml"
+)
 RELEASE_PLEASE_WORKFLOW = pathlib.PurePosixPath(
     ".github/workflows/release-please.yml"
 )
@@ -144,6 +147,79 @@ def validate_release_workflows() -> None:
             "gh release create",
             "--generate-notes",
         ],
+    )
+
+    apt_repository = (PROJECT_ROOT / APT_REPOSITORY_WORKFLOW).read_text(
+        encoding="utf-8"
+    )
+    require_fragments(
+        apt_repository,
+        APT_REPOSITORY_WORKFLOW,
+        [
+            "workflow_call:",
+            "workflow_dispatch:",
+            "types: [released]",
+            "group: apt-repository-pages",
+            'test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"',
+            "scripts/select-apt-release-assets.py",
+            "scripts/build-apt-repository.sh",
+            "debian-13",
+            "environment:\n      name: apt-repository",
+            "APT_SIGNING_KEY_FINGERPRINT: "
+            "${{ vars.APT_SIGNING_KEY_FINGERPRINT }}",
+            "APT_SIGNING_PRIVATE_KEY: ${{ secrets.APT_SIGNING_PRIVATE_KEY }}",
+            "APT_SIGNING_KEY_PASSPHRASE: "
+            "${{ secrets.APT_SIGNING_KEY_PASSPHRASE }}",
+            'test "$fingerprint" = "$APT_SIGNING_KEY_FINGERPRINT"',
+            "signal-purple-archive-keyring.gpg",
+            "signal-purple-archive-keyring.fingerprint",
+            "--clearsign",
+            "--detach-sign",
+            "gpgv --keyring",
+            "actions/upload-pages-artifact@"
+            "fc324d3547104276b827a68afc52ff2a11cc49c9",
+            "environment:\n      name: github-pages",
+            "id-token: write",
+            "pages: write",
+            "actions/deploy-pages@"
+            "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128",
+        ],
+    )
+    reject_fragments(
+        apt_repository,
+        APT_REPOSITORY_WORKFLOW,
+        [
+            "apt-key",
+            "trusted=yes",
+            "allow-unauthenticated",
+            "types: [published]",
+            "keys/release-signing-key.asc",
+        ],
+    )
+
+    try:
+        prepare_job, remaining_jobs = apt_repository.split("\n  sign:\n", 1)
+        sign_job, deploy_job = remaining_jobs.split("\n  deploy:\n", 1)
+    except ValueError as error:
+        fail(f"APT repository workflow has an invalid job boundary: {error}")
+    reject_fragments(
+        prepare_job,
+        APT_REPOSITORY_WORKFLOW,
+        [
+            "APT_SIGNING_KEY_FINGERPRINT",
+            "APT_SIGNING_PRIVATE_KEY",
+            "APT_SIGNING_KEY_PASSPHRASE",
+        ],
+    )
+    reject_fragments(
+        sign_job,
+        APT_REPOSITORY_WORKFLOW,
+        ["actions/checkout@", "scripts/"],
+    )
+    require_fragments(
+        deploy_job,
+        APT_REPOSITORY_WORKFLOW,
+        ["needs: sign", "pages: write", "id-token: write"],
     )
 
 

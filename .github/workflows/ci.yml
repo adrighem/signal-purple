@@ -29,7 +29,7 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install --no-install-recommends \
-            build-essential clang clang-format-19 cmake git gnupg \
+            apt-utils build-essential clang clang-format-19 cmake git gnupg \
             libclang-dev libgdk-pixbuf-2.0-dev libglib2.0-dev \
             libpurple-dev libsecret-1-dev libssl-dev ninja-build pkg-config \
             protobuf-compiler python3 xz-utils

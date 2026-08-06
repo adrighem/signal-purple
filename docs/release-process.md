@@ -24,6 +24,11 @@ upgrade, rollback, relink, and removal guidance lives in the README's
 8. The final job uploads the verified assets and publishes the draft as a
    GitHub prerelease without marking it as `Latest`. A failed build leaves the
    release private and does not move or recreate its tag.
+9. After candidate validation, promote the prerelease to a full GitHub release.
+   The `released` event rebuilds the signed APT repository from the highest two
+   stable semantic versions and deploys it through GitHub Pages. If event
+   delivery or deployment fails, manually dispatch the APT repository workflow;
+   it never changes a release, tag, or asset.
 
 The workflow uses a repository-scoped installation token from the private
 Release Please GitHub App. The App has only Contents and Pull requests
@@ -52,6 +57,16 @@ Release Please action, exact tag/commit/version checks, least-privilege job
 permissions, and GitHub's OIDC-backed artifact attestations. The public key in
 `keys/release-signing-key.asc` remains only for verification of historical
 releases.
+
+APT metadata uses a separate signing key held only as the
+`APT_SIGNING_PRIVATE_KEY` secret in the protected `apt-repository` environment.
+Its passphrase is the `APT_SIGNING_KEY_PASSPHRASE` secret in the same
+environment. The non-secret `APT_SIGNING_KEY_FINGERPRINT` environment variable
+must match its uppercase primary-key fingerprint. The workflow exports only the
+public key into the Pages artifact. Enable Pages with GitHub Actions as its
+source before the first deployment. The `apt-repository` and `github-pages`
+environments must allow both the `main` branch and `v*` tags because manual runs
+use the branch while `released` events use the promoted release's tag.
 
 Do not publish a release from a working tree with only compilation evidence.
 
