@@ -20,6 +20,7 @@ RELEASE_PLEASE_WORKFLOW = pathlib.PurePosixPath(
 )
 RELEASE_BUILDER = pathlib.PurePosixPath("scripts/build-release-artifacts.sh")
 RELEASE_DOCKERFILE = pathlib.PurePosixPath(".github/release/Dockerfile")
+CMAKE_CONFIG = pathlib.PurePosixPath("CMakeLists.txt")
 
 
 def fail(message: str) -> None:
@@ -182,6 +183,23 @@ def validate_release_workflows() -> None:
             "/etc/os-release",
             '"$os_id" != "$expected_os_id"',
             '"$os_version" != "$expected_os_version"',
+            'source_date_epoch=$(git -C "$repository" show -s --format=%ct "$commit")',
+            "-ffile-prefix-map=$source_dir=/usr/src/signal-purple",
+            "--remap-path-prefix=$source_dir=/usr/src/signal-purple",
+            "export CFLAGS RUSTFLAGS",
+            'export SOURCE_DATE_EPOCH="$source_date_epoch"',
+        ],
+    )
+
+    cmake_config = (PROJECT_ROOT / CMAKE_CONFIG).read_text(encoding="utf-8")
+    require_fragments(
+        cmake_config,
+        CMAKE_CONFIG,
+        [
+            "CPACK_RPM_SPEC_MORE_DEFINE",
+            "%define _buildhost signal-purple-build.invalid",
+            "%define use_source_date_epoch_as_buildtime 1",
+            "%define build_mtime_policy clamp_to_source_date_epoch",
         ],
     )
 
