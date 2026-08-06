@@ -16,7 +16,7 @@ Those boxes remain unchecked and are known limitations, not test passes.
 
 ## Supported scope
 
-- Debian 13 with libpurple 2.
+- Debian 13 and Ubuntu 24.04 LTS with libpurple 2.
 - One Signal account per configured Purple account.
 - Direct messages, contact synchronization, typing, delivery, read, retry, and
   messages received while this client was offline.
@@ -37,10 +37,15 @@ Those boxes remain unchecked and are known limitations, not test passes.
 - [x] Primary CI passes formatting, warnings, tests, and ABI/module-load checks.
 - [x] The candidate passes the clean Debian 13 build, test, and staged-install
   job.
-- [x] The candidate's vendored source archive produces installable Debian and
-  Fedora RPM packages twice with identical contents.
-- [x] The source archive, packages, checksums, SBOM, and provenance
-  attestation agree.
+- [ ] The candidate passes the clean Ubuntu 24.04 build, test, and
+  staged-install job, then both release packages pass their matching distro
+  probe.
+- [x] The candidate's vendored source archive produces installable Debian 13
+  and Fedora RPM packages twice with identical contents.
+- [ ] The candidate's vendored source archive produces installable Ubuntu
+  24.04 LTS packages twice with identical contents.
+- [ ] The source archive, dual-distribution packages, checksums, SBOM, and
+  provenance attestation agree.
 - [x] No known unresolved release-blocking vulnerability remains.
 
 ## Interoperability
@@ -77,9 +82,10 @@ Those boxes remain unchecked and are known limitations, not test passes.
 - [x] The release-please pull request matches the audited changelog and version.
 - [x] The Release Please tag identifies the merged release commit.
 - [x] Release artifacts are reproduced, attested, smoke-tested, and attached
-  before the draft is published.
+  before the draft is published as stable.
 - [ ] Downloaded release assets match `SHA256SUMS`.
-- [ ] Stable promotion deploys signed APT metadata, and an isolated Debian 13
-  client selects the promoted package while retaining the prior stable version
-  when one exists.
+- [ ] Stable publication deploys signed APT metadata, and isolated Debian 13 and
+  Ubuntu 24.04 clients select their matching promoted packages. Debian retains
+  the legacy predecessor during the first dual-distro release; later suites
+  retain the prior stable version when one exists.
 - [x] A rollback decision and recovery path exist before publication.

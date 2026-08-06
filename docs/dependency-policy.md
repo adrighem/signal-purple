@@ -10,7 +10,7 @@ update:
 1. Review the complete upstream diff and provenance.
 2. Inspect new build scripts, native code, network behavior, and licenses.
 3. Run Rust formatting, clippy, unit tests, CMake build, C tests, and plugin
-   probe on Debian 13.
+   probes on Debian 13 and Ubuntu 24.04 LTS.
 4. Exercise store open/migration and teardown under sanitizers where possible.
 5. Run the live compatibility matrix in `compatibility.md` with dedicated test
    accounts.

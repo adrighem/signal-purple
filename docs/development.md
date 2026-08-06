@@ -2,8 +2,9 @@
 
 ## Toolchain
 
-The target runtime is Debian 13 with libpurple 2.14.14. The current dependency
-graph requires Rust 1.94 or later; `rust-toolchain.toml` pins 1.95.0.
+The target runtimes are Debian 13 and Ubuntu 24.04 LTS with libpurple 2.14.x.
+The current dependency graph requires Rust 1.94 or later;
+`rust-toolchain.toml` pins 1.95.0.
 
 Install system dependencies:
 
@@ -42,7 +43,8 @@ The full gate runs the pinned C formatter, Rust format, clippy, and all Rust
 tests; release-helper tests; a Debug CMake/Ninja build; CTest; and a staged
 installation/plugin-load probe. Set `SIGNAL_PURPLE_BUILD_DIR` to select the
 build directory and `SIGNAL_PURPLE_BUILD_JOBS` to change build parallelism. The
-separate Debian 13 CI job validates the clean supported-platform environment.
+separate Debian 13 and Ubuntu 24.04 CI jobs validate clean supported-platform
+environments.
 
 Each phase is also directly runnable, for example:
 

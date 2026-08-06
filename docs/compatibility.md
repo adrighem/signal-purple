@@ -2,7 +2,7 @@
 
 ## Supported baseline
 
-- Debian 13 userspace
+- Debian 13 or Ubuntu 24.04 LTS userspace
 - libpurple 2.14.x
 - Pidgin 2 or another Purple 2 UI with request-field support
 - Rust 1.94+ for building (repository pin: 1.95.0)

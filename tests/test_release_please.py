@@ -18,6 +18,8 @@ APT_REPOSITORY_WORKFLOW = pathlib.PurePosixPath(
 RELEASE_PLEASE_WORKFLOW = pathlib.PurePosixPath(
     ".github/workflows/release-please.yml"
 )
+RELEASE_BUILDER = pathlib.PurePosixPath("scripts/build-release-artifacts.sh")
+RELEASE_DOCKERFILE = pathlib.PurePosixPath(".github/release/Dockerfile")
 
 
 def fail(message: str) -> None:
@@ -102,6 +104,17 @@ def validate_release_workflows() -> None:
             "release_version: ${{ steps.release.outputs.version }}",
             "if: ${{ needs.release-please.outputs.release_created == 'true' }}",
             "uses: ./.github/workflows/release-artifacts.yml",
+            "uses: ./.github/workflows/apt-repository.yml",
+            "actions: read",
+            "pages: write",
+            "id-token: write",
+            "cleanup-failed-release:",
+            "needs.release-artifacts.result != 'success'",
+            "id: cleanup-app-token",
+            "GH_TOKEN: ${{ steps.cleanup-app-token.outputs.token }}",
+            '"repos/$GITHUB_REPOSITORY/releases?per_page=100"',
+            "refusing to delete published release",
+            'gh release delete "$RELEASE_TAG" --cleanup-tag --yes',
         ],
     )
     reject_fragments(
@@ -111,6 +124,7 @@ def validate_release_workflows() -> None:
             "workflow_dispatch",
             "RELEASE_PLEASE_TOKEN",
             "secrets.GITHUB_TOKEN",
+            'releases/tags/$RELEASE_TAG',
         ],
     )
 
@@ -130,9 +144,12 @@ def validate_release_workflows() -> None:
             'test "$commit" = "$RELEASE_SHA"',
             "gh api --paginate",
             "cannot add missing asset to published release",
+            "ubuntu-24.04-lts",
+            "signal-purple-release-ubuntu:",
+            "signal-purple-${RELEASE_VERSION}-1.x86_64.rpm",
             "-F draft=false",
-            "-F prerelease=true",
-            "-f make_latest=false",
+            "-F prerelease=false",
+            "-f make_latest=true",
         ],
     )
     reject_fragments(
@@ -146,6 +163,38 @@ def validate_release_workflows() -> None:
             "RELEASE_KEY_FINGERPRINT",
             "gh release create",
             "--generate-notes",
+            "-F prerelease=true",
+            "-f make_latest=false",
+        ],
+    )
+
+    release_builder = (PROJECT_ROOT / RELEASE_BUILDER).read_text(
+        encoding="utf-8"
+    )
+    require_fragments(
+        release_builder,
+        RELEASE_BUILDER,
+        [
+            "expected_os_id=debian",
+            "expected_os_version=13",
+            "expected_os_id=ubuntu",
+            "expected_os_version=24.04",
+            "/etc/os-release",
+            '"$os_id" != "$expected_os_id"',
+            '"$os_version" != "$expected_os_version"',
+        ],
+    )
+
+    release_dockerfile = (PROJECT_ROOT / RELEASE_DOCKERFILE).read_text(
+        encoding="utf-8"
+    )
+    require_fragments(
+        release_dockerfile,
+        RELEASE_DOCKERFILE,
+        [
+            "ARG UBUNTU_SNAPSHOT=20260805T000000Z",
+            'test "$ID" = ubuntu',
+            'test "$VERSION_ID" = 24.04',
         ],
     )
 
@@ -158,12 +207,12 @@ def validate_release_workflows() -> None:
         [
             "workflow_call:",
             "workflow_dispatch:",
-            "types: [released]",
             "group: apt-repository-pages",
             'test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"',
             "scripts/select-apt-release-assets.py",
             "scripts/build-apt-repository.sh",
             "debian-13",
+            "ubuntu-24.04",
             "environment:\n      name: apt-repository",
             "APT_SIGNING_KEY_FINGERPRINT: "
             "${{ vars.APT_SIGNING_KEY_FINGERPRINT }}",
@@ -193,6 +242,7 @@ def validate_release_workflows() -> None:
             "trusted=yes",
             "allow-unauthenticated",
             "types: [published]",
+            "types: [released]",
             "keys/release-signing-key.asc",
         ],
     )

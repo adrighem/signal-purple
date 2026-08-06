@@ -9,18 +9,44 @@ import sys
 
 TAG_PATTERN = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
+DISTRO_IDS = ("debian-13", "ubuntu-24.04-lts")
 
 
 def fail(message: str) -> None:
     raise SystemExit(message)
 
 
-def required_names(tag: str) -> tuple[str, str]:
+def distro_names(tag: str) -> tuple[str, ...]:
+    version = tag[1:]
+    return tuple(
+        name
+        for distro_id in DISTRO_IDS
+        for name in (
+            f"signal-purple_{version}-1_{distro_id}_amd64.deb",
+            f"signal-purple-dbgsym_{version}-1_{distro_id}_amd64.deb",
+        )
+    )
+
+
+def legacy_debian_names(tag: str) -> tuple[str, str]:
     version = tag[1:]
     return (
         f"signal-purple_{version}-1_amd64.deb",
         f"signal-purple-dbgsym_{version}-1_amd64.deb",
     )
+
+
+def required_names(
+    tag: str, by_name: dict[str, dict[str, object]], newest: bool
+) -> tuple[str, ...]:
+    current = distro_names(tag)
+    present = tuple(name in by_name for name in current)
+    if newest or any(present):
+        if not all(present):
+            missing = next(name for name in current if name not in by_name)
+            fail(f"stable release {tag} is missing required asset {missing}")
+        return current
+    return legacy_debian_names(tag)
 
 
 def version_key(release: dict[str, object]) -> tuple[int, int, int]:
@@ -53,7 +79,7 @@ def select_assets(releases: object) -> list[tuple[str, str, int, str]]:
         fail("no published stable release is available for the APT repository")
 
     result: list[tuple[str, str, int, str]] = []
-    for release in selected:
+    for release_index, release in enumerate(selected):
         tag = str(release["tag_name"])
         assets = release.get("assets")
         if not isinstance(assets, list):
@@ -70,7 +96,7 @@ def select_assets(releases: object) -> list[tuple[str, str, int, str]]:
                 fail(f"stable release {tag} contains duplicate asset {name}")
             by_name[name] = asset
 
-        for name in required_names(tag):
+        for name in required_names(tag, by_name, release_index == 0):
             asset = by_name.get(name)
             if asset is None:
                 fail(f"stable release {tag} is missing required asset {name}")

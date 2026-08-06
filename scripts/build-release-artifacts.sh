@@ -20,6 +20,7 @@ version=$(git -C "$repository" show "$commit:version.txt")
 debian_version=${3:-"$version-1"}
 architecture=$(dpkg-architecture -qDEB_HOST_ARCH)
 build_profile=pkg.signal-purple.upstream-rust
+distro_id=${RELEASE_DISTRO_ID:-debian-13}
 
 if ! printf '%s\n' "$version" \
     | grep -Eq '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'; then
@@ -49,6 +50,36 @@ if [ "$architecture" != amd64 ]; then
     printf 'release packages support amd64, not %s\n' "$architecture" >&2
     exit 1
 fi
+case "$distro_id" in
+    debian-13)
+        expected_os_id=debian
+        expected_os_version=13
+        ;;
+    ubuntu-24.04-lts)
+        expected_os_id=ubuntu
+        expected_os_version=24.04
+        ;;
+    *)
+        printf 'unsupported release distribution: %s\n' "$distro_id" >&2
+        exit 1
+        ;;
+esac
+if [ ! -r /etc/os-release ]; then
+    printf '%s\n' 'cannot verify release distribution: /etc/os-release is missing' >&2
+    exit 1
+fi
+os_id=$(awk -F= '$1 == "ID" { gsub(/^"|"$/, "", $2); print $2; exit }' \
+    /etc/os-release)
+os_version=$(awk -F= \
+    '$1 == "VERSION_ID" { gsub(/^"|"$/, "", $2); print $2; exit }' \
+    /etc/os-release)
+if [ "$os_id" != "$expected_os_id" ] \
+    || [ "$os_version" != "$expected_os_version" ]; then
+    printf 'release distribution %s requires %s %s, found %s %s\n' \
+        "$distro_id" "$expected_os_id" "$expected_os_version" \
+        "$os_id" "$os_version" >&2
+    exit 1
+fi
 
 mkdir -p "$output"
 output=$(CDPATH='' cd -- "$output" && pwd)
@@ -61,8 +92,10 @@ temporary=$(mktemp -d "${TMPDIR:-/tmp}/signal-purple-release.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 
 archive_name="signal-purple_${version}.orig.tar.xz"
-runtime_name="signal-purple_${debian_version}_${architecture}.deb"
-debug_name="signal-purple-dbgsym_${debian_version}_${architecture}.deb"
+runtime_package_name="signal-purple_${debian_version}_${architecture}.deb"
+debug_package_name="signal-purple-dbgsym_${debian_version}_${architecture}.deb"
+runtime_asset_name="signal-purple_${debian_version}_${distro_id}_${architecture}.deb"
+debug_asset_name="signal-purple-dbgsym_${debian_version}_${distro_id}_${architecture}.deb"
 if [ "$argument_count" -eq 5 ]; then
     archive_a=$4
     archive_b=$5
@@ -120,8 +153,8 @@ build_package()
                 --no-sign
     )
 
-    runtime="$build_root/$runtime_name"
-    debug="$build_root/$debug_name"
+    runtime="$build_root/$runtime_package_name"
+    debug="$build_root/$debug_package_name"
     test -s "$runtime"
     test -s "$debug"
     test "$(dpkg-deb --field "$runtime" Package)" = signal-purple
@@ -131,33 +164,41 @@ build_package()
     test "$(dpkg-deb --field "$runtime" Architecture)" = "$architecture"
     test "$(dpkg-deb --field "$debug" Architecture)" = "$architecture"
 
-    (
-        cd "$source_dir"
-        cmake -S . -B build-rpm -G Ninja \
-            -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_TESTING=OFF \
-            -DCMAKE_INSTALL_PREFIX=/usr
-        cmake --build build-rpm --parallel 2
-        cd build-rpm
-        cpack -G RPM
-    )
-    rpm_name="signal-purple-${version}-1.x86_64.rpm"
-    rpm_src="$source_dir/build-rpm/$rpm_name"
-    test -s "$rpm_src"
+    if [ "$distro_id" = debian-13 ]; then
+        (
+            cd "$source_dir"
+            cmake -S . -B build-rpm -G Ninja \
+                -DCMAKE_BUILD_TYPE=Release \
+                -DBUILD_TESTING=OFF \
+                -DCMAKE_INSTALL_PREFIX=/usr
+            cmake --build build-rpm --parallel 2
+            cd build-rpm
+            cpack -G RPM
+        )
+        rpm_name="signal-purple-${version}-1.x86_64.rpm"
+        rpm_src="$source_dir/build-rpm/$rpm_name"
+        test -s "$rpm_src"
+    fi
 }
 
 build_package a "$archive_a"
 build_package b "$archive_b"
-cmp "$temporary/build-a/$runtime_name" "$temporary/build-b/$runtime_name"
-cmp "$temporary/build-a/$debug_name" "$temporary/build-b/$debug_name"
-cmp "$temporary/build-a/signal-purple-$version/build-rpm/signal-purple-$version-1.x86_64.rpm" \
-    "$temporary/build-b/signal-purple-$version/build-rpm/signal-purple-$version-1.x86_64.rpm"
+cmp "$temporary/build-a/$runtime_package_name" \
+    "$temporary/build-b/$runtime_package_name"
+cmp "$temporary/build-a/$debug_package_name" \
+    "$temporary/build-b/$debug_package_name"
+if [ "$distro_id" = debian-13 ]; then
+    cmp "$temporary/build-a/signal-purple-$version/build-rpm/signal-purple-$version-1.x86_64.rpm" \
+        "$temporary/build-b/signal-purple-$version/build-rpm/signal-purple-$version-1.x86_64.rpm"
+fi
 
 cp "$archive_a" "$output/$archive_name"
-cp "$temporary/build-a/$runtime_name" "$output/$runtime_name"
-cp "$temporary/build-a/$debug_name" "$output/$debug_name"
-cp "$temporary/build-a/signal-purple-$version/build-rpm/signal-purple-$version-1.x86_64.rpm" \
-    "$output/signal-purple-${version}-1.x86_64.rpm"
+cp "$temporary/build-a/$runtime_package_name" "$output/$runtime_asset_name"
+cp "$temporary/build-a/$debug_package_name" "$output/$debug_asset_name"
+if [ "$distro_id" = debian-13 ]; then
+    cp "$temporary/build-a/signal-purple-$version/build-rpm/signal-purple-$version-1.x86_64.rpm" \
+        "$output/signal-purple-${version}-1.x86_64.rpm"
+fi
 
 probe=$(find "$temporary/build-a/signal-purple-$version" \
     -type f -name plugin-probe -perm -u+x -print -quit)
@@ -165,5 +206,8 @@ test -n "$probe"
 mkdir "$output/.validation"
 cp "$probe" "$output/.validation/plugin-probe"
 
-sha256sum "$output/$archive_name" "$output/$runtime_name" \
-    "$output/$debug_name" "$output/signal-purple-${version}-1.x86_64.rpm"
+sha256sum "$output/$archive_name" "$output/$runtime_asset_name" \
+    "$output/$debug_asset_name"
+if [ "$distro_id" = debian-13 ]; then
+    sha256sum "$output/signal-purple-${version}-1.x86_64.rpm"
+fi

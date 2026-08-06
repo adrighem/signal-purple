@@ -3,8 +3,6 @@ name: APT repository
 on:
   workflow_call:
   workflow_dispatch:
-  release:
-    types: [released]
 
 concurrency:
   group: apt-repository-pages
@@ -17,13 +15,11 @@ jobs:
     permissions:
       contents: read
     steps:
-      - name: Reject untrusted manual or reusable invocation
+      - name: Reject untrusted invocation
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          if [ "$GITHUB_EVENT_NAME" != release ]; then
-            test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
-          fi
+          test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
 
       - name: Check out trusted repository helpers
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
@@ -36,7 +32,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install --yes --no-install-recommends apt-utils
 
-      - name: Download current and previous stable Debian packages
+      - name: Download current and previous stable packages
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -70,9 +66,9 @@ jobs:
           done < "$asset_manifest"
 
           test "$(find "$package_directory" -maxdepth 1 -type f -name '*.deb' \
-            | wc -l)" -ge 2
+            | wc -l)" -ge 4
           scripts/build-apt-repository.sh \
-            "$package_directory" "$GITHUB_WORKSPACE/site/apt" debian-13
+            "$package_directory" "$GITHUB_WORKSPACE/site/apt"
 
       - name: Upload unsigned APT repository
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -115,16 +111,18 @@ jobs:
           unexpected_type="$(find site ! -type d ! -type f -print -quit)"
           test -z "$unexpected_type"
           test ! -L site
-          release_file=site/apt/dists/debian-13/Release
-          inrelease=site/apt/dists/debian-13/InRelease
-          release_signature=site/apt/dists/debian-13/Release.gpg
           keyring=site/apt/signal-purple-archive-keyring.gpg
           fingerprint_file=site/apt/signal-purple-archive-keyring.fingerprint
-          test -s "$release_file"
-          test ! -e "$inrelease"
-          test ! -e "$release_signature"
           test ! -e "$keyring"
           test ! -e "$fingerprint_file"
+          for suite in debian-13 ubuntu-24.04; do
+            release_file="site/apt/dists/$suite/Release"
+            inrelease="site/apt/dists/$suite/InRelease"
+            release_signature="site/apt/dists/$suite/Release.gpg"
+            test -s "$release_file"
+            test ! -e "$inrelease"
+            test ! -e "$release_signature"
+          done
 
           signing_home="$RUNNER_TEMP/apt-signing-gnupg"
           test ! -e "$signing_home"
@@ -171,20 +169,32 @@ jobs:
 
           sign_release()
           {
-            output=$1
-            shift
+            input=$1
+            output=$2
+            shift 2
             printf '%s\n' "$APT_SIGNING_KEY_PASSPHRASE" \
               | gpg --batch --yes --pinentry-mode loopback \
                   --passphrase-fd 0 --local-user "$fingerprint" \
                   --digest-algo SHA512 --output "$output" \
-                  "$@" "$release_file"
+                  "$@" "$input"
           }
-          sign_release "$inrelease" --clearsign
-          sign_release "$release_signature" --armor --detach-sign
+          for suite in debian-13 ubuntu-24.04; do
+            release_file="site/apt/dists/$suite/Release"
+            inrelease="site/apt/dists/$suite/InRelease"
+            release_signature="site/apt/dists/$suite/Release.gpg"
+            sign_release "$release_file" "$inrelease" --clearsign
+            sign_release "$release_file" "$release_signature" \
+              --armor --detach-sign
+          done
           unset APT_SIGNING_KEY_PASSPHRASE
 
-          gpgv --keyring "$keyring" "$inrelease"
-          gpgv --keyring "$keyring" "$release_signature" "$release_file"
+          for suite in debian-13 ubuntu-24.04; do
+            release_file="site/apt/dists/$suite/Release"
+            inrelease="site/apt/dists/$suite/InRelease"
+            release_signature="site/apt/dists/$suite/Release.gpg"
+            gpgv --keyring "$keyring" "$inrelease"
+            gpgv --keyring "$keyring" "$release_signature" "$release_file"
+          done
           test -z "$(find site -type l -print -quit)"
 
           trap - EXIT HUP INT TERM

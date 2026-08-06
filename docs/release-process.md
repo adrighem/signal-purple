@@ -18,17 +18,16 @@ upgrade, rollback, relink, and removal guidance lives in the README's
    GitHub release for the merged `main` commit.
 7. In the same workflow graph, the artifact pipeline verifies the Release
    Please tag, commit, version, and manifest. It then reproduces the source
-   archive, Debian packages, and Fedora RPM packages twice, installs and
-   probes the package, creates the SBOM and checksums, and attests their
-   provenance.
-8. The final job uploads the verified assets and publishes the draft as a
-   GitHub prerelease without marking it as `Latest`. A failed build leaves the
-   release private and does not move or recreate its tag.
-9. After candidate validation, promote the prerelease to a full GitHub release.
-   The `released` event rebuilds the signed APT repository from the highest two
-   stable semantic versions and deploys it through GitHub Pages. If event
-   delivery or deployment fails, manually dispatch the APT repository workflow;
-   it never changes a release, tag, or asset.
+   archive, Debian 13 and Ubuntu 24.04 LTS packages, and Fedora RPM package
+   twice, installs and probes both distro packages, creates the SBOM and
+   checksums, and attests their provenance.
+8. The final artifact job uploads the verified assets and publishes the draft
+   as a stable GitHub release marked `Latest`. A failed artifact build deletes
+   only the still-private draft and its matching tag.
+9. The same workflow graph rebuilds the signed APT repository from the highest
+   two stable semantic versions and deploys its Debian 13 and Ubuntu 24.04
+   suites through GitHub Pages. If deployment fails, manually dispatch the APT
+   repository workflow; it never changes a release, tag, or asset.
 
 The workflow uses a repository-scoped installation token from the private
 Release Please GitHub App. The App has only Contents and Pull requests
@@ -65,8 +64,8 @@ environment. The non-secret `APT_SIGNING_KEY_FINGERPRINT` environment variable
 must match its uppercase primary-key fingerprint. The workflow exports only the
 public key into the Pages artifact. Enable Pages with GitHub Actions as its
 source before the first deployment. The `apt-repository` and `github-pages`
-environments must allow both the `main` branch and `v*` tags because manual runs
-use the branch while `released` events use the promoted release's tag.
+environments must allow the `main` branch. Both release-driven and manual runs
+use that protected branch.
 
 Do not publish a release from a working tree with only compilation evidence.
 

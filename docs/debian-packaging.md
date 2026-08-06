@@ -37,11 +37,11 @@ build dependencies and permits the normal command:
 ionice -c 3 nice dpkg-buildpackage --build=binary --no-sign
 ```
 
-Release evidence must come from a clean Debian 13 amd64 environment. A build on
-a newer Debian host is useful only as a development check. The current protocol
-graph requires Rust 1.94 while Debian 13 supplies Rust 1.85, so the package
-currently requires an audited Debian backport or the checksum-verified upstream
-Rust 1.95 toolchain. The clean-environment validation uses the upstream
+Release evidence must come from clean Debian 13 and Ubuntu 24.04 LTS amd64
+environments. A build on another host is useful only as a development check.
+The current protocol graph requires Rust 1.94 while both supported distributions
+supply older compilers, so release packages use the checksum-verified upstream
+Rust 1.95 toolchain. Clean-environment validation uses the upstream
 `rust-1.95.0-x86_64-unknown-linux-gnu.tar.gz` distribution with SHA-256
 `a47ac940abd12399d59ad15c877e7113fa35f2b9ec7e6a8a045d4fd8b9741dea`.
 
@@ -67,25 +67,24 @@ release build must not use `--no-check-builddeps`. The normal Debian 13 CI job
 builds, tests, and stages the CMake install on the supported userspace, but does
 not replace the vendored, offline package and reproducibility evidence.
 
-The release workflow runs the same process in the pinned Debian 13 image with
-packages selected over HTTPS from the `20260722T000000Z` Debian snapshot. A
-digest-pinned bootstrap image supplies the CA bundle needed before Debian's
-`ca-certificates` package is installed:
+The release workflow runs the same process in digest-pinned Debian 13 and Ubuntu
+24.04 LTS images. Debian packages come from the `20260722T000000Z` snapshot;
+Ubuntu packages come from the `20260805T000000Z` snapshot. A digest-pinned
+bootstrap image supplies the CA bundle before either distribution's
+`ca-certificates` package is installed. The helper verifies `/etc/os-release`
+and refuses to label a package for a different distribution, so run it only
+inside the matching pinned release image.
 
-```sh
-scripts/build-release-artifacts.sh v0.2.2 dist/release
-```
-
-The helper creates the deterministic vendored source archive twice, builds
-that archive twice with Cargo offline, compares the runtime and debug packages,
-and retains only matching outputs. In Actions, source vendoring is allowed
-network access, but both extracted package builds run in a network-disabled
-container, followed by the install/probe check in a second fresh container.
-The workflow generates a
+The helper creates the deterministic vendored source archive twice, builds that
+archive twice per distribution with Cargo offline, compares each runtime and
+debug package pair, and retains only matching outputs. In Actions, source
+vendoring is allowed network access, but extracted package builds run in
+network-disabled containers, followed by install/probe checks in fresh matching
+containers. The workflow generates a
 normalized SPDX 2.3 SBOM from the extracted vendored source, writes and verifies
 `SHA256SUMS`, creates GitHub build-provenance attestations, and uploads the
 exact allowlisted files to the Release Please draft. Only after those checks
-and uploads pass does the workflow publish it as a GitHub prerelease. The SBOM
+and uploads pass does the workflow publish it as a stable GitHub release. The SBOM
 catalogs the root `Cargo.lock` graph and excludes duplicate discovery inside
 `vendor/`; the generated DEP-5 inventory remains the licensing record for
 those vendored sources. Syft itself is downloaded as a versioned archive and
@@ -93,18 +92,18 @@ verified against its pinned SHA-256 before execution.
 
 ## Stable APT repository
 
-Promoting a GitHub prerelease to a stable release starts the dedicated APT
-repository workflow. A manual dispatch can bootstrap or republish it. The
-workflow selects the highest two semantic versions among non-draft,
-non-prerelease releases, requires each release's runtime and debug `amd64`
-packages, and verifies every download against the SHA-256 digest reported by
-GitHub.
+Stable publication calls the dedicated APT repository workflow directly. A
+manual dispatch can repair or republish it. The workflow selects the highest two
+semantic versions among non-draft, non-prerelease releases, requires both distro
+package pairs on the newest release, and verifies every download against the
+SHA-256 digest reported by GitHub. During migration, the retained predecessor
+may use the legacy unsuffixed Debian package names.
 
-The generated GitHub Pages site contains one fixed `debian-13` suite. Its
-`Packages` and reproducible `Packages.gz` indexes use SHA-256 by-hash copies to
-avoid stale-index races during a Pages deployment. `Release` deliberately has
-no `Valid-Until`: quiet projects would otherwise expire unless a scheduled
-metadata refresh kept resigning unchanged packages.
+The generated GitHub Pages site contains fixed `debian-13` and `ubuntu-24.04`
+suites. Their `Packages` and reproducible `Packages.gz` indexes use SHA-256
+by-hash copies to avoid stale-index races during a Pages deployment. `Release`
+deliberately has no `Valid-Until`: quiet projects would otherwise expire unless
+a scheduled metadata refresh kept resigning unchanged packages.
 
 Metadata preparation runs without the signing key. A separate job protected by
 the `apt-repository` environment imports the dedicated private key from the
@@ -122,10 +121,9 @@ Before the first run, enable GitHub Pages with **GitHub Actions** as its source,
 create the protected `apt-repository` environment, add those two secrets, and
 set its `APT_SIGNING_KEY_FINGERPRINT` variable to the uppercase primary-key
 fingerprint. Restrict both `apt-repository` and `github-pages` deployments to
-the `main` branch and `v*` tags: manual runs use the branch, while a stable
-release's `released` event uses its version tag. Repository automation does not
-create the key or upload credentials to GitHub. Manual dispatch publishes the
-existing stable releases after this one-time setup.
+the `main` branch. Repository automation does not create the key or upload
+credentials to GitHub. Manual dispatch publishes the existing stable releases
+after this one-time setup.
 
 Runtime dependencies include libpurple 2, GLib, GdkPixbuf, libsecret, OpenSSL,
 and the native libraries linked by the bundled SQLCipher backend. Use

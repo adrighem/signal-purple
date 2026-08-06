@@ -39,6 +39,8 @@ jobs:
       version: ${{ steps.release.outputs.version }}
     env:
       DEBIAN_SNAPSHOT: 20260722T000000Z
+      UBUNTU_SNAPSHOT: 20260805T000000Z
+      UBUNTU_BASE_IMAGE: docker.io/library/ubuntu:24.04@sha256:561618e2c15bf2397621dd04f96926663a3b5616c189cf7e38db7e82f5c538ea
       SYFT_ARCHIVE: syft_1.49.0_linux_amd64.tar.gz
       SYFT_ARCHIVE_SHA256: 7aa2f03ee92739cf643279ba3990548b9925d4e22cae13f46831ee62821147fe
     steps:
@@ -105,12 +107,20 @@ jobs:
             printf 'version=%s\n' "$version"
           } >> "$GITHUB_OUTPUT"
 
-      - name: Build pinned Debian release environment
+      - name: Build pinned release environments
         run: |
           docker build --pull \
+            --build-arg DISTRO_ID=debian-13 \
             --build-arg "DEBIAN_SNAPSHOT=$DEBIAN_SNAPSHOT" \
             --file .github/release/Dockerfile \
-            --tag "signal-purple-release:${{ steps.release.outputs.commit }}" \
+            --tag "signal-purple-release-debian:${{ steps.release.outputs.commit }}" \
+            .github/release
+          docker build --pull \
+            --build-arg "BASE_IMAGE=$UBUNTU_BASE_IMAGE" \
+            --build-arg DISTRO_ID=ubuntu-24.04-lts \
+            --build-arg "UBUNTU_SNAPSHOT=$UBUNTU_SNAPSHOT" \
+            --file .github/release/Dockerfile \
+            --tag "signal-purple-release-ubuntu:${{ steps.release.outputs.commit }}" \
             .github/release
 
       - name: Create source archives independently
@@ -119,7 +129,7 @@ jobs:
           set -euo pipefail
           commit="${{ steps.release.outputs.commit }}"
           version="${{ steps.release.outputs.version }}"
-          image="signal-purple-release:$commit"
+          image="signal-purple-release-debian:$commit"
           source_root="$RUNNER_TEMP/release-source"
           archive_name="signal-purple_${version}.orig.tar.xz"
           mkdir -p "$source_root/a" "$source_root/b"
@@ -149,49 +159,86 @@ jobs:
             "$source_root/a/$archive_name" \
             "$source_root/b/$archive_name"
 
-      - name: Build packages twice without network access
+      - name: Build distro packages twice without network access
         shell: bash
         run: |
           set -euo pipefail
           commit="${{ steps.release.outputs.commit }}"
           version="${{ steps.release.outputs.version }}"
-          image="signal-purple-release:$commit"
           source_root="$RUNNER_TEMP/release-source"
           archive_name="signal-purple_${version}.orig.tar.xz"
-          artifact_directory="$GITHUB_WORKSPACE/dist/release"
+          build_distro()
+          {
+            distro_id=$1
+            image=$2
+            artifact_directory="$GITHUB_WORKSPACE/dist/release-$distro_id"
+            mkdir -p "$artifact_directory"
+            docker run --rm --network none \
+              --env GIT_CONFIG_COUNT=1 \
+              --env GIT_CONFIG_KEY_0=safe.directory \
+              --env GIT_CONFIG_VALUE_0=/workspace \
+              --env "RELEASE_DISTRO_ID=$distro_id" \
+              --mount \
+                "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+              --mount \
+                "type=bind,src=$source_root,dst=/source,readonly" \
+              --mount \
+                "type=bind,src=$artifact_directory,dst=/output" \
+              "$image" \
+              /workspace/scripts/build-release-artifacts.sh \
+                "$commit" /output "$version-1" \
+                "/source/a/$archive_name" "/source/b/$archive_name"
+          }
+          build_distro debian-13 \
+            "signal-purple-release-debian:$commit"
+          build_distro ubuntu-24.04-lts \
+            "signal-purple-release-ubuntu:$commit"
+
+      - name: Collect release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ steps.release.outputs.version }}"
+          artifact_directory=dist/release
+          debian_directory=dist/release-debian-13
+          ubuntu_directory=dist/release-ubuntu-24.04-lts
           mkdir -p "$artifact_directory"
+          cmp \
+            "$debian_directory/signal-purple_${version}.orig.tar.xz" \
+            "$ubuntu_directory/signal-purple_${version}.orig.tar.xz"
+          install -m 0644 \
+            "$debian_directory/signal-purple_${version}.orig.tar.xz" \
+            "$debian_directory/signal-purple_${version}-1_debian-13_amd64.deb" \
+            "$debian_directory/signal-purple-dbgsym_${version}-1_debian-13_amd64.deb" \
+            "$debian_directory/signal-purple-${version}-1.x86_64.rpm" \
+            "$ubuntu_directory/signal-purple_${version}-1_ubuntu-24.04-lts_amd64.deb" \
+            "$ubuntu_directory/signal-purple-dbgsym_${version}-1_ubuntu-24.04-lts_amd64.deb" \
+            "$artifact_directory"
 
-          docker run --rm --network none \
-            --env GIT_CONFIG_COUNT=1 \
-            --env GIT_CONFIG_KEY_0=safe.directory \
-            --env GIT_CONFIG_VALUE_0=/workspace \
-            --mount \
-              "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
-            --mount \
-              "type=bind,src=$source_root,dst=/source,readonly" \
-            --mount \
-              "type=bind,src=$artifact_directory,dst=/output" \
-            "$image" \
-            /workspace/scripts/build-release-artifacts.sh \
-              "$commit" /output "$version-1" \
-              "/source/a/$archive_name" "/source/b/$archive_name"
-
-      - name: Install and probe package without network access
+      - name: Install and probe distro packages without network access
         shell: bash
         run: |
           set -euo pipefail
           commit="${{ steps.release.outputs.commit }}"
           version="${{ steps.release.outputs.version }}"
-          image="signal-purple-release:$commit"
-          artifact_directory="$GITHUB_WORKSPACE/dist/release"
-          docker run --rm --network none \
-            --mount \
-              "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
-            --mount \
-              "type=bind,src=$artifact_directory,dst=/artifacts,readonly" \
-            "$image" \
-            /workspace/scripts/smoke-test-release-package.sh \
-              "$version" /artifacts
+          probe_distro()
+          {
+            distro_id=$1
+            image=$2
+            artifact_directory="$GITHUB_WORKSPACE/dist/release-$distro_id"
+            docker run --rm --network none \
+              --mount \
+                "type=bind,src=$GITHUB_WORKSPACE,dst=/workspace,readonly" \
+              --mount \
+                "type=bind,src=$artifact_directory,dst=/artifacts,readonly" \
+              "$image" \
+              /workspace/scripts/smoke-test-release-package.sh \
+                "$version" /artifacts "$version-1" "$distro_id"
+          }
+          probe_distro debian-13 \
+            "signal-purple-release-debian:$commit"
+          probe_distro ubuntu-24.04-lts \
+            "signal-purple-release-ubuntu:$commit"
 
       - name: Extract vendored source for SBOM
         id: sbom-source
@@ -258,8 +305,10 @@ jobs:
           path: |
             dist/release/SHA256SUMS
             dist/release/signal-purple_${{ steps.release.outputs.version }}.orig.tar.xz
-            dist/release/signal-purple_${{ steps.release.outputs.version }}-1_amd64.deb
-            dist/release/signal-purple-dbgsym_${{ steps.release.outputs.version }}-1_amd64.deb
+            dist/release/signal-purple_${{ steps.release.outputs.version }}-1_debian-13_amd64.deb
+            dist/release/signal-purple-dbgsym_${{ steps.release.outputs.version }}-1_debian-13_amd64.deb
+            dist/release/signal-purple_${{ steps.release.outputs.version }}-1_ubuntu-24.04-lts_amd64.deb
+            dist/release/signal-purple-dbgsym_${{ steps.release.outputs.version }}-1_ubuntu-24.04-lts_amd64.deb
             dist/release/signal-purple-${{ steps.release.outputs.version }}-1.x86_64.rpm
             dist/release/signal-purple-${{ steps.release.outputs.version }}.spdx.json
           retention-days: 7
@@ -343,22 +392,29 @@ jobs:
           test "$(jq -r '.tag_name' <<<"$release_json")" = "$RELEASE_TAG"
           release_was_draft="$(jq -r '.draft' <<<"$release_json")"
           if [ "$release_was_draft" = false ]; then
-            test "$(jq -r '.prerelease' <<<"$release_json")" = true
+            test "$(jq -r '.prerelease' <<<"$release_json")" = false
           else
             test "$release_was_draft" = true
           fi
 
           source_name="signal-purple_${RELEASE_VERSION}.orig.tar.xz"
-          runtime_name="signal-purple_${RELEASE_VERSION}-1_amd64.deb"
-          debug_name="signal-purple-dbgsym_${RELEASE_VERSION}-1_amd64.deb"
+          debian_runtime_name="signal-purple_${RELEASE_VERSION}-1_debian-13_amd64.deb"
+          debian_debug_name="signal-purple-dbgsym_${RELEASE_VERSION}-1_debian-13_amd64.deb"
+          ubuntu_runtime_name="signal-purple_${RELEASE_VERSION}-1_ubuntu-24.04-lts_amd64.deb"
+          ubuntu_debug_name="signal-purple-dbgsym_${RELEASE_VERSION}-1_ubuntu-24.04-lts_amd64.deb"
+          rpm_name="signal-purple-${RELEASE_VERSION}-1.x86_64.rpm"
           sbom_name="signal-purple-${RELEASE_VERSION}.spdx.json"
           allowed="$(
             jq -cn \
               --arg source "$source_name" \
-              --arg runtime "$runtime_name" \
-              --arg debug "$debug_name" \
+              --arg debian_runtime "$debian_runtime_name" \
+              --arg debian_debug "$debian_debug_name" \
+              --arg ubuntu_runtime "$ubuntu_runtime_name" \
+              --arg ubuntu_debug "$ubuntu_debug_name" \
+              --arg rpm "$rpm_name" \
               --arg sbom "$sbom_name" \
-              '[$source, $runtime, $debug, $sbom, "SHA256SUMS"]'
+              '[$source, $debian_runtime, $debian_debug,
+                $ubuntu_runtime, $ubuntu_debug, $rpm, $sbom, "SHA256SUMS"]'
           )"
           unexpected="$(
             jq -r --argjson allowed "$allowed" \
@@ -420,8 +476,11 @@ jobs:
 
           artifact_directory=dist/release
           upload_asset "$artifact_directory/$source_name"
-          upload_asset "$artifact_directory/$runtime_name"
-          upload_asset "$artifact_directory/$debug_name"
+          upload_asset "$artifact_directory/$debian_runtime_name"
+          upload_asset "$artifact_directory/$debian_debug_name"
+          upload_asset "$artifact_directory/$ubuntu_runtime_name"
+          upload_asset "$artifact_directory/$ubuntu_debug_name"
+          upload_asset "$artifact_directory/$rpm_name"
           upload_asset "$artifact_directory/$sbom_name"
           upload_asset "$artifact_directory/SHA256SUMS"
 
@@ -432,9 +491,9 @@ jobs:
               gh api --method PATCH \
                 "repos/$GITHUB_REPOSITORY/releases/$release_id" \
                 -F draft=false \
-                -F prerelease=true \
-                -f make_latest=false
+                -F prerelease=false \
+                -f make_latest=true
             )"
           fi
           test "$(jq -r '.draft' <<<"$release_json")" = false
-          test "$(jq -r '.prerelease' <<<"$release_json")" = true
+          test "$(jq -r '.prerelease' <<<"$release_json")" = false

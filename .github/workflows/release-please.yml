@@ -50,3 +50,70 @@ jobs:
       release_sha: ${{ needs.release-please.outputs.release_sha }}
       release_tag: ${{ needs.release-please.outputs.release_tag }}
       release_version: ${{ needs.release-please.outputs.release_version }}
+
+  publish-apt-repository:
+    needs:
+      - release-please
+      - release-artifacts
+    if: ${{ needs.release-please.outputs.release_created == 'true' && needs.release-artifacts.result == 'success' }}
+    permissions:
+      actions: read
+      contents: read
+      pages: write
+      id-token: write
+    uses: ./.github/workflows/apt-repository.yml
+
+  cleanup-failed-release:
+    needs:
+      - release-please
+      - release-artifacts
+    if: ${{ always() && needs.release-please.outputs.release_created == 'true' && needs.release-artifacts.result != 'success' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - name: Create cleanup GitHub App token
+        id: cleanup-app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1  # v3.0.0
+        with:
+          client-id: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+
+      - name: Remove failed draft release and tag
+        env:
+          EXPECTED_COMMIT: ${{ needs.release-please.outputs.release_sha }}
+          GH_TOKEN: ${{ steps.cleanup-app-token.outputs.token }}
+          RELEASE_TAG: ${{ needs.release-please.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          get_release_json()
+          {
+            gh api --paginate \
+              "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              | jq -sce --arg tag "$RELEASE_TAG" '
+                  [add[] | select(.tag_name == $tag)]
+                  | if length == 1 then
+                      .[0]
+                    elif length == 0 then
+                      empty
+                    else
+                      error("multiple releases use the requested tag")
+                    end
+                '
+          }
+          release_json="$(
+            get_release_json
+          )"
+          if [ "$(jq -r '.draft' <<<"$release_json")" != true ]; then
+            printf 'refusing to delete published release: %s\n' \
+              "$RELEASE_TAG" >&2
+            exit 1
+          fi
+          ref_json="$(
+            gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG"
+          )"
+          test "$(jq -r '.object.type' <<<"$ref_json")" = commit
+          test "$(jq -r '.object.sha' <<<"$ref_json")" = "$EXPECTED_COMMIT"
+          gh release delete "$RELEASE_TAG" --cleanup-tag --yes \
+            --repo "$GITHUB_REPOSITORY"
