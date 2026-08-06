@@ -183,6 +183,8 @@ def validate_release_workflows() -> None:
             "/etc/os-release",
             '"$os_id" != "$expected_os_id"',
             '"$os_version" != "$expected_os_version"',
+            "debug_package_extension=ddeb",
+            'debug_package_name="signal-purple-dbgsym_${debian_version}_${architecture}.${debug_package_extension}"',
             'source_date_epoch=$(git -C "$repository" show -s --format=%ct "$commit")',
             "-ffile-prefix-map=$source_dir=/usr/src/signal-purple",
             "--remap-path-prefix=$source_dir=/usr/src/signal-purple",
