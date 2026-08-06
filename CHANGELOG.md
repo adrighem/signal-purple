@@ -4,22 +4,6 @@ All notable changes will be documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
 semantic versioning after the first stable release.
 
-## [1.2.0](https://github.com/adrighem/signal-purple/compare/v1.1.0...v1.2.0) (2026-08-06)
-
-
-### Features
-
-* add Ubuntu release packages ([#52](https://github.com/adrighem/signal-purple/issues/52)) ([7d3b9f7](https://github.com/adrighem/signal-purple/commit/7d3b9f716008ffd64216041f1af159490cd03753))
-* **release:** integrate Nix flake and Fedora RPM package generation ([75e1234](https://github.com/adrighem/signal-purple/commit/75e1234d70acd85660b8a029f0e18f7997df4146))
-* **release:** integrate Nix flake and Fedora RPM package generation ([38eef86](https://github.com/adrighem/signal-purple/commit/38eef86d55fe487c5bfc1e6dce7222a71029c503))
-
-
-### Bug Fixes
-
-* keep receipt tasks with projection state ([6d3119a](https://github.com/adrighem/signal-purple/commit/6d3119a48d1fbfbbac3a3e89da52e497f480507e))
-* retry receipts after websocket recovery ([fdf0ae4](https://github.com/adrighem/signal-purple/commit/fdf0ae422e084e3ba30018a5d6c66b08bb1b5d62))
-* retry receipts after websocket recovery ([74e34dd](https://github.com/adrighem/signal-purple/commit/74e34dd2d94ae4b600ced71f4836d7797e76929f))
-
 ## [1.1.0](https://github.com/adrighem/signal-purple/compare/v1.0.0...v1.1.0) (2026-08-01)
 
 
