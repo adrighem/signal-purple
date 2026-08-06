@@ -55,6 +55,40 @@ operating-system baselines are not supported. See the full
 
 ## Build and install
 
+### Install from the APT repository
+
+Stable releases are available for Debian 13 on amd64. Install the repository's
+dedicated signing key and deb822 source definition:
+
+```sh
+sudo apt install ca-certificates curl
+sudo install -d -m 0755 /etc/apt/keyrings
+keyring_tmp="$(mktemp)"
+curl --fail --silent --show-error --location \
+  https://adrighem.github.io/signal-purple/apt/signal-purple-archive-keyring.gpg \
+  --output "$keyring_tmp" || { rm -f "$keyring_tmp"; exit 1; }
+sudo install -m 0644 "$keyring_tmp" \
+  /etc/apt/keyrings/signal-purple-archive-keyring.gpg
+rm -f "$keyring_tmp"
+
+sudo tee /etc/apt/sources.list.d/signal-purple.sources > /dev/null <<'EOF'
+Types: deb
+URIs: https://adrighem.github.io/signal-purple/apt
+Suites: debian-13
+Components: main
+Architectures: amd64
+Signed-By: /etc/apt/keyrings/signal-purple-archive-keyring.gpg
+EOF
+
+sudo apt update
+sudo apt install signal-purple
+```
+
+The repository retains up to two stable package versions: the current release
+and its stable predecessor when one exists. A normal `sudo apt update` followed
+by `sudo apt upgrade` installs an update when one is published. Close Pidgin
+before upgrading, then follow the [upgrade checks](#upgrade).
+
 ### Dependencies
 
 On Debian 13:

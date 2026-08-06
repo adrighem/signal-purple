@@ -91,6 +91,42 @@ catalogs the root `Cargo.lock` graph and excludes duplicate discovery inside
 those vendored sources. Syft itself is downloaded as a versioned archive and
 verified against its pinned SHA-256 before execution.
 
+## Stable APT repository
+
+Promoting a GitHub prerelease to a stable release starts the dedicated APT
+repository workflow. A manual dispatch can bootstrap or republish it. The
+workflow selects the highest two semantic versions among non-draft,
+non-prerelease releases, requires each release's runtime and debug `amd64`
+packages, and verifies every download against the SHA-256 digest reported by
+GitHub.
+
+The generated GitHub Pages site contains one fixed `debian-13` suite. Its
+`Packages` and reproducible `Packages.gz` indexes use SHA-256 by-hash copies to
+avoid stale-index races during a Pages deployment. `Release` deliberately has
+no `Valid-Until`: quiet projects would otherwise expire unless a scheduled
+metadata refresh kept resigning unchanged packages.
+
+Metadata preparation runs without the signing key. A separate job protected by
+the `apt-repository` environment imports the dedicated private key from the
+`APT_SIGNING_PRIVATE_KEY` environment secret. Its single-line passphrase comes
+from `APT_SIGNING_KEY_PASSPHRASE`. The public
+`APT_SIGNING_KEY_FINGERPRINT` environment variable pins the expected primary
+key. The job derives the published `signal-purple-archive-keyring.gpg` and
+matching `.fingerprint` file, writes `InRelease` and `Release.gpg`, verifies both
+signatures, destroys its temporary keyring, and uploads only the public Pages
+artifact. The `github-pages`
+environment then deploys that artifact. The historical key under `keys/` is not
+used.
+
+Before the first run, enable GitHub Pages with **GitHub Actions** as its source,
+create the protected `apt-repository` environment, add those two secrets, and
+set its `APT_SIGNING_KEY_FINGERPRINT` variable to the uppercase primary-key
+fingerprint. Restrict both `apt-repository` and `github-pages` deployments to
+the `main` branch and `v*` tags: manual runs use the branch, while a stable
+release's `released` event uses its version tag. Repository automation does not
+create the key or upload credentials to GitHub. Manual dispatch publishes the
+existing stable releases after this one-time setup.
+
 Runtime dependencies include libpurple 2, GLib, GdkPixbuf, libsecret, OpenSSL,
 and the native libraries linked by the bundled SQLCipher backend. Use
 `dpkg-shlibdeps` on both installed shared libraries rather than maintaining that

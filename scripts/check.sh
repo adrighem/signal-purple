@@ -90,6 +90,8 @@ release_helpers()
     sh "$repository/tests/test_make_source_archive.sh"
     section "Testing release artifact helpers"
     sh "$repository/tests/test_release_artifacts.sh"
+    section "Testing the APT repository"
+    "$repository/tests/test_apt_repository.sh"
 }
 
 configure()

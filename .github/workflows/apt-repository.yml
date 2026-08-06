@@ -1,0 +1,214 @@
+name: APT repository
+
+on:
+  workflow_call:
+  workflow_dispatch:
+  release:
+    types: [released]
+
+permissions: {}
+
+concurrency:
+  group: apt-repository-pages
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - name: Reject untrusted manual or reusable invocation
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != release ]; then
+            test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"
+          fi
+
+      - name: Check out trusted repository helpers
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.repository.default_branch }}
+
+      - name: Install APT repository tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends apt-utils
+
+      - name: Download current and previous stable Debian packages
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release_json="$RUNNER_TEMP/releases.json"
+          asset_manifest="$RUNNER_TEMP/apt-assets.tsv"
+          package_directory="$RUNNER_TEMP/apt-packages"
+          mkdir -p "$package_directory"
+
+          gh api --paginate \
+            "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            | jq --slurp 'add' > "$release_json"
+          scripts/select-apt-release-assets.py "$release_json" \
+            > "$asset_manifest"
+
+          while IFS=$'\t' read -r tag name asset_id digest; do
+            test -n "$tag"
+            test -n "$name"
+            test "$asset_id" -gt 0
+            destination="$package_directory/$name"
+            gh api \
+              --header 'Accept: application/octet-stream' \
+              "repos/$GITHUB_REPOSITORY/releases/assets/$asset_id" \
+              > "$destination"
+            actual="sha256:$(sha256sum "$destination" | cut -d' ' -f1)"
+            if [ "$actual" != "$digest" ]; then
+              printf 'release asset digest mismatch: %s\n' "$name" >&2
+              exit 1
+            fi
+          done < "$asset_manifest"
+
+          test "$(find "$package_directory" -maxdepth 1 -type f -name '*.deb' \
+            | wc -l)" -ge 2
+          scripts/build-apt-repository.sh \
+            "$package_directory" "$GITHUB_WORKSPACE/site/apt" debian-13
+
+      - name: Upload unsigned APT repository
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          compression-level: 0
+          if-no-files-found: error
+          name: apt-repository-unsigned
+          overwrite: true
+          path: site
+          retention-days: 1
+
+  sign:
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: apt-repository
+    permissions:
+      actions: read
+    steps:
+      - name: Download unsigned APT repository
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: apt-repository-unsigned
+          path: site
+
+      - name: Validate, sign, and verify APT repository
+        shell: bash
+        env:
+          APT_SIGNING_KEY_FINGERPRINT: ${{ vars.APT_SIGNING_KEY_FINGERPRINT }}
+          APT_SIGNING_PRIVATE_KEY: ${{ secrets.APT_SIGNING_PRIVATE_KEY }}
+          APT_SIGNING_KEY_PASSPHRASE: ${{ secrets.APT_SIGNING_KEY_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          printf '%s\n' "$APT_SIGNING_KEY_FINGERPRINT" \
+            | grep -Eq '^[0-9A-F]{40,64}$'
+          test -n "$APT_SIGNING_PRIVATE_KEY"
+          test -n "$APT_SIGNING_KEY_PASSPHRASE"
+
+          unexpected_type="$(find site ! -type d ! -type f -print -quit)"
+          test -z "$unexpected_type"
+          test ! -L site
+          release_file=site/apt/dists/debian-13/Release
+          inrelease=site/apt/dists/debian-13/InRelease
+          release_signature=site/apt/dists/debian-13/Release.gpg
+          keyring=site/apt/signal-purple-archive-keyring.gpg
+          fingerprint_file=site/apt/signal-purple-archive-keyring.fingerprint
+          test -s "$release_file"
+          test ! -e "$inrelease"
+          test ! -e "$release_signature"
+          test ! -e "$keyring"
+          test ! -e "$fingerprint_file"
+
+          signing_home="$RUNNER_TEMP/apt-signing-gnupg"
+          test ! -e "$signing_home"
+          install -d -m 0700 "$signing_home"
+          export GNUPGHOME="$signing_home"
+          cleanup_signing_home()
+          {
+            gpgconf --kill all >/dev/null 2>&1 || true
+            if [ -e "$signing_home" ]; then
+              find "$signing_home" -depth -delete
+            fi
+          }
+          trap cleanup_signing_home EXIT
+          trap 'exit 1' HUP INT TERM
+
+          printf '%s' "$APT_SIGNING_PRIVATE_KEY" \
+            | gpg --batch --quiet --import
+          unset APT_SIGNING_PRIVATE_KEY
+          mapfile -t fingerprints < <(
+            gpg --batch --with-colons --list-secret-keys \
+              | awk -F: '
+                  $1 == "sec" { want_fingerprint = 1; next }
+                  want_fingerprint && $1 == "fpr" {
+                    print $10
+                    want_fingerprint = 0
+                  }
+                '
+          )
+          test "${#fingerprints[@]}" -eq 1
+          fingerprint=${fingerprints[0]}
+          printf '%s\n' "$fingerprint" | grep -Eq '^[0-9A-F]{40,64}$'
+          test "$fingerprint" = "$APT_SIGNING_KEY_FINGERPRINT"
+          unset APT_SIGNING_KEY_FINGERPRINT
+
+          gpg --batch --export-options export-minimal \
+            --export "$fingerprint" > "$keyring"
+          test -s "$keyring"
+          public_fingerprint="$(
+            gpg --batch --with-colons --show-keys "$keyring" \
+              | awk -F: '$1 == "fpr" { print $10; exit }'
+          )"
+          test "$public_fingerprint" = "$fingerprint"
+          printf '%s\n' "$fingerprint" > "$fingerprint_file"
+
+          sign_release()
+          {
+            output=$1
+            shift
+            printf '%s\n' "$APT_SIGNING_KEY_PASSPHRASE" \
+              | gpg --batch --yes --pinentry-mode loopback \
+                  --passphrase-fd 0 --local-user "$fingerprint" \
+                  --digest-algo SHA512 --output "$output" \
+                  "$@" "$release_file"
+          }
+          sign_release "$inrelease" --clearsign
+          sign_release "$release_signature" --armor --detach-sign
+          unset APT_SIGNING_KEY_PASSPHRASE
+
+          gpgv --keyring "$keyring" "$inrelease"
+          gpgv --keyring "$keyring" "$release_signature" "$release_file"
+          test -z "$(find site -type l -print -quit)"
+
+          trap - EXIT HUP INT TERM
+          cleanup_signing_home
+          test ! -e "$signing_home"
+
+      - name: Upload GitHub Pages artifact
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9  # v5.0.0
+        with:
+          path: site
+
+  deploy:
+    needs: sign
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    permissions:
+      id-token: write
+      pages: write
+    steps:
+      - name: Deploy APT repository to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128  # v5.0.0

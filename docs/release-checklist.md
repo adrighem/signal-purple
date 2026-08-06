@@ -79,4 +79,7 @@ Those boxes remain unchecked and are known limitations, not test passes.
 - [x] Release artifacts are reproduced, attested, smoke-tested, and attached
   before the draft is published.
 - [ ] Downloaded release assets match `SHA256SUMS`.
+- [ ] Stable promotion deploys signed APT metadata, and an isolated Debian 13
+  client selects the promoted package while retaining the prior stable version
+  when one exists.
 - [x] A rollback decision and recovery path exist before publication.
