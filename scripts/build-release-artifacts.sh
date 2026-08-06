@@ -100,7 +100,11 @@ trap 'rm -rf "$temporary"' EXIT HUP INT TERM
 
 archive_name="signal-purple_${version}.orig.tar.xz"
 runtime_package_name="signal-purple_${debian_version}_${architecture}.deb"
-debug_package_name="signal-purple-dbgsym_${debian_version}_${architecture}.deb"
+debug_package_extension=deb
+if [ "$distro_id" = ubuntu-24.04-lts ]; then
+    debug_package_extension=ddeb
+fi
+debug_package_name="signal-purple-dbgsym_${debian_version}_${architecture}.${debug_package_extension}"
 runtime_asset_name="signal-purple_${debian_version}_${distro_id}_${architecture}.deb"
 debug_asset_name="signal-purple-dbgsym_${debian_version}_${distro_id}_${architecture}.deb"
 if [ "$argument_count" -eq 5 ]; then
