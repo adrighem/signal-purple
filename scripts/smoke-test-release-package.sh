@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -eu
 
-if [ "$#" -lt 2 ] || [ "$#" -gt 3 ]; then
-    printf 'usage: %s VERSION ARTIFACT_DIRECTORY [DEBIAN_VERSION]\n' \
+if [ "$#" -lt 2 ] || [ "$#" -gt 4 ]; then
+    printf 'usage: %s VERSION ARTIFACT_DIRECTORY [DEBIAN_VERSION [DISTRO_ID]]\n' \
         "$0" >&2
     exit 2
 fi
@@ -11,7 +11,15 @@ fi
 version=$1
 artifact_directory=$2
 debian_version=${3:-"$version-1"}
-package="$artifact_directory/signal-purple_${debian_version}_amd64.deb"
+distro_id=${4:-debian-13}
+case "$distro_id" in
+    debian-13 | ubuntu-24.04-lts) ;;
+    *)
+        printf 'unsupported release distribution: %s\n' "$distro_id" >&2
+        exit 1
+        ;;
+esac
+package="$artifact_directory/signal-purple_${debian_version}_${distro_id}_amd64.deb"
 probe="$artifact_directory/.validation/plugin-probe"
 
 test -s "$package"

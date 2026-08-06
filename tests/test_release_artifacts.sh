@@ -38,11 +38,18 @@ fi
 artifacts="$temporary/artifacts"
 mkdir "$artifacts"
 printf '%s\n' source > "$artifacts/signal-purple_1.2.3.orig.tar.xz"
-printf '%s\n' runtime > "$artifacts/signal-purple_1.2.3-1_amd64.deb"
-printf '%s\n' debug > "$artifacts/signal-purple-dbgsym_1.2.3-1_amd64.deb"
+printf '%s\n' debian-runtime \
+    > "$artifacts/signal-purple_1.2.3-1_debian-13_amd64.deb"
+printf '%s\n' debian-debug \
+    > "$artifacts/signal-purple-dbgsym_1.2.3-1_debian-13_amd64.deb"
+printf '%s\n' ubuntu-runtime \
+    > "$artifacts/signal-purple_1.2.3-1_ubuntu-24.04-lts_amd64.deb"
+printf '%s\n' ubuntu-debug \
+    > "$artifacts/signal-purple-dbgsym_1.2.3-1_ubuntu-24.04-lts_amd64.deb"
+printf '%s\n' rpm > "$artifacts/signal-purple-1.2.3-1.x86_64.rpm"
 printf '%s\n' sbom > "$artifacts/signal-purple-1.2.3.spdx.json"
 "$project_root/scripts/write-release-checksums.sh" 1.2.3 "$artifacts"
-test "$(wc -l < "$artifacts/SHA256SUMS")" -eq 4
+test "$(wc -l < "$artifacts/SHA256SUMS")" -eq 7
 (cd "$artifacts" && sha256sum --check SHA256SUMS)
 
 if "$project_root/scripts/write-release-checksums.sh" 1.2 "$artifacts" \

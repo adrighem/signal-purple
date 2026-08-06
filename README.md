@@ -43,7 +43,7 @@ Signal compatibility.
 
 The supported baseline is:
 
-- Debian 13 with Pidgin and libpurple 2.14.x;
+- Debian 13 or Ubuntu 24.04 LTS with Pidgin and libpurple 2.14.x;
 - a desktop Secret Service provider accessible through libsecret;
 - an existing Signal account on a current official Android or iOS client; and
 - Rust 1.94 or newer to build the plugin (the repository pins Rust 1.95.0).
@@ -57,8 +57,8 @@ operating-system baselines are not supported. See the full
 
 ### Install from the APT repository
 
-Stable releases are available for Debian 13 on amd64. Install the repository's
-dedicated signing key and deb822 source definition:
+Stable releases are available for Debian 13 and Ubuntu 24.04 LTS on amd64.
+Install the repository's dedicated signing key:
 
 ```sh
 sudo apt install ca-certificates curl
@@ -70,16 +70,37 @@ curl --fail --silent --show-error --location \
 sudo install -m 0644 "$keyring_tmp" \
   /etc/apt/keyrings/signal-purple-archive-keyring.gpg
 rm -f "$keyring_tmp"
+```
 
-sudo tee /etc/apt/sources.list.d/signal-purple.sources > /dev/null <<'EOF'
-Types: deb
-URIs: https://adrighem.github.io/signal-purple/apt
-Suites: debian-13
-Components: main
-Architectures: amd64
-Signed-By: /etc/apt/keyrings/signal-purple-archive-keyring.gpg
-EOF
+Then install the source definition matching the system.
 
+Debian 13:
+
+```sh
+sources_tmp="$(mktemp)"
+curl --fail --silent --show-error --location \
+  https://adrighem.github.io/signal-purple/apt/signal-purple-debian-13.sources \
+  --output "$sources_tmp" || { rm -f "$sources_tmp"; exit 1; }
+sudo install -m 0644 "$sources_tmp" \
+  /etc/apt/sources.list.d/signal-purple.sources
+rm -f "$sources_tmp"
+```
+
+Ubuntu 24.04 LTS:
+
+```sh
+sources_tmp="$(mktemp)"
+curl --fail --silent --show-error --location \
+  https://adrighem.github.io/signal-purple/apt/signal-purple-ubuntu-24.04.sources \
+  --output "$sources_tmp" || { rm -f "$sources_tmp"; exit 1; }
+sudo install -m 0644 "$sources_tmp" \
+  /etc/apt/sources.list.d/signal-purple.sources
+rm -f "$sources_tmp"
+```
+
+Install signal-purple:
+
+```sh
 sudo apt update
 sudo apt install signal-purple
 ```
@@ -91,7 +112,7 @@ before upgrading, then follow the [upgrade checks](#upgrade).
 
 ### Dependencies
 
-On Debian 13:
+On Debian 13 or Ubuntu 24.04 LTS:
 
 ```sh
 sudo apt install pidgin ffmpeg git gnupg build-essential cmake ninja-build pkg-config python3 \

@@ -27,11 +27,21 @@ if [ ! -d "$artifact_directory" ]; then
 fi
 
 source_archive="signal-purple_${version}.orig.tar.xz"
-runtime="signal-purple_${version}-1_${architecture}.deb"
-debug="signal-purple-dbgsym_${version}-1_${architecture}.deb"
+debian_runtime="signal-purple_${version}-1_debian-13_${architecture}.deb"
+debian_debug="signal-purple-dbgsym_${version}-1_debian-13_${architecture}.deb"
+ubuntu_runtime="signal-purple_${version}-1_ubuntu-24.04-lts_${architecture}.deb"
+ubuntu_debug="signal-purple-dbgsym_${version}-1_ubuntu-24.04-lts_${architecture}.deb"
+rpm="signal-purple-${version}-1.x86_64.rpm"
 sbom="signal-purple-${version}.spdx.json"
 
-for artifact in "$source_archive" "$runtime" "$debug" "$sbom"; do
+for artifact in \
+    "$source_archive" \
+    "$debian_runtime" \
+    "$debian_debug" \
+    "$ubuntu_runtime" \
+    "$ubuntu_debug" \
+    "$rpm" \
+    "$sbom"; do
     if [ ! -s "$artifact_directory/$artifact" ] \
         || [ -L "$artifact_directory/$artifact" ]; then
         printf 'missing or unsafe release artifact: %s\n' "$artifact" >&2
@@ -41,7 +51,14 @@ done
 
 (
     cd "$artifact_directory"
-    sha256sum "$source_archive" "$runtime" "$debug" "$sbom" \
+    sha256sum \
+        "$source_archive" \
+        "$debian_runtime" \
+        "$debian_debug" \
+        "$ubuntu_runtime" \
+        "$ubuntu_debug" \
+        "$rpm" \
+        "$sbom" \
         > SHA256SUMS
     sha256sum --check SHA256SUMS
 )

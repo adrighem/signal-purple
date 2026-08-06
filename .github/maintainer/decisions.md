@@ -207,3 +207,20 @@
   column setting, and expose matching check and fix modes.
 - Format every C source and header under `include`, `src`, and `tests`; do not
   depend on Git metadata so the gate also works from a source archive.
+
+## 2026-08-06 - Publish verified releases and dual-distro packages directly
+
+- Supersede the prerelease and manual-promotion portion of the 2026-07-25
+  release decision. Merging the reviewed Release Please pull request remains
+  release approval; verified artifacts now publish the draft as a stable latest
+  release, then call the signed APT workflow in the same workflow graph.
+- Delete only a failed still-private draft and its matching tag. Never delete a
+  published release during cleanup, including when later APT deployment fails.
+- Build, reproduce, and probe separate Debian 13 and Ubuntu 24.04 LTS package
+  pairs. Keep distro suffixes in release asset filenames while preserving normal
+  Debian package identity metadata.
+- Retain the legacy unsuffixed Debian pair only for the first dual-distro APT
+  migration. Require both distro pairs on every new stable release.
+- Keep source reproducibility, pinned snapshots, SBOM generation, provenance
+  attestation, digest-safe retry behavior, and least-privilege job separation.
+  Include the already-built RPM in checksums, attestations, and release uploads.
