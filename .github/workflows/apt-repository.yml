@@ -6,8 +6,6 @@ on:
   release:
     types: [released]
 
-permissions: {}
-
 concurrency:
   group: apt-repository-pages
   cancel-in-progress: false
