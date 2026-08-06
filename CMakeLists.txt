@@ -228,4 +228,8 @@ set(CPACK_RPM_FILE_NAME "signal-purple-${CPACK_PACKAGE_VERSION}-${CPACK_PACKAGE_
 set(CPACK_RPM_PACKAGE_REQUIRES "pidgin, libsecret")
 set(CPACK_RPM_PACKAGE_LICENSE "GPL-3.0-or-later AND AGPL-3.0-only")
 set(CPACK_RPM_PACKAGE_GROUP "Applications/Communications")
+set(CPACK_RPM_SPEC_MORE_DEFINE
+    "%define _buildhost signal-purple-build.invalid
+%define use_source_date_epoch_as_buildtime 1
+%define build_mtime_policy clamp_to_source_date_epoch")
 include(CPack)

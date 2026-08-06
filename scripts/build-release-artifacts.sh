@@ -16,6 +16,7 @@ argument_count=$#
 repository=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 commit=$(git -C "$repository" rev-parse --verify --end-of-options \
     "$revision^{commit}")
+source_date_epoch=$(git -C "$repository" show -s --format=%ct "$commit")
 version=$(git -C "$repository" show "$commit:version.txt")
 debian_version=${3:-"$version-1"}
 architecture=$(dpkg-architecture -qDEB_HOST_ARCH)
@@ -43,6 +44,12 @@ case "$debian_version" in
     *[!0-9A-Za-z.+~-]*)
         printf 'unsupported character in Debian version: %s\n' \
             "$debian_version" >&2
+        exit 1
+        ;;
+esac
+case "$source_date_epoch" in
+    '' | *[!0-9]*)
+        printf 'invalid source date epoch: %s\n' "$source_date_epoch" >&2
         exit 1
         ;;
 esac
@@ -167,6 +174,12 @@ build_package()
     if [ "$distro_id" = debian-13 ]; then
         (
             cd "$source_dir"
+            c_path_map="-ffile-prefix-map=$source_dir=/usr/src/signal-purple"
+            rust_path_map="--remap-path-prefix=$source_dir=/usr/src/signal-purple"
+            CFLAGS="${CFLAGS:+$CFLAGS }$c_path_map"
+            RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }$rust_path_map"
+            export CFLAGS RUSTFLAGS
+            export SOURCE_DATE_EPOCH="$source_date_epoch"
             cmake -S . -B build-rpm -G Ninja \
                 -DCMAKE_BUILD_TYPE=Release \
                 -DBUILD_TESTING=OFF \
