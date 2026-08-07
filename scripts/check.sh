@@ -79,7 +79,15 @@ rust_lint()
 rust_test()
 {
     section "Testing Rust"
-    cargo test --locked --manifest-path "$manifest"
+    if [ "${SIGNAL_PURPLE_REQUIRE_FFMPEG_TEST-}" = 1 ]; then
+        converter_test=backend::tests::installed_ffmpeg_converter_produces_a_bounded_animation
+        cargo test --locked --manifest-path "$manifest" -- \
+            --skip "$converter_test"
+        cargo test --locked --manifest-path "$manifest" "$converter_test" -- \
+            --exact --test-threads=1
+    else
+        cargo test --locked --manifest-path "$manifest"
+    fi
 }
 
 release_helpers()

@@ -26,6 +26,6 @@ require_argument "check.sh" "$check_script" "c-format-fix) c_format_fix"
 require_argument "Debian CI" "$ci_workflow" "clang-format-19"
 require_argument "Debian CI" "$ci_workflow" "scripts/check.sh c-format"
 require_argument "Debian CI" "$ci_workflow" \
-    "cargo test --locked --manifest-path rust/signal-core/Cargo.toml"
+    "scripts/check.sh rust-test"
 require_argument "Debian CI" "$ci_workflow" "-DBUILD_TESTING=ON"
 require_argument "Debian CI" "$ci_workflow" "--no-tests=error"

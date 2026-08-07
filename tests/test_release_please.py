@@ -328,6 +328,16 @@ def validate_ci_workflow() -> None:
             ],
         )
 
+    for job_name in (
+        "debian-13-build-and-install",
+        "ubuntu-24-04-build-and-install",
+    ):
+        match = re.search(
+            rf"(?ms)^  {re.escape(job_name)}:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            ci_text,
+        )
+        require_fragments(match.group(1), CI_WORKFLOW, ["scripts/check.sh rust-test"])
+
     cache_uses = []
     workflow_root = PROJECT_ROOT / WORKFLOWS_DIRECTORY
     workflow_paths = sorted(workflow_root.glob("*.yml"))

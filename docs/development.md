@@ -60,6 +60,11 @@ cargo test --locked --manifest-path rust/signal-core/Cargo.toml \
   bounds_binary_events
 ```
 
+When `SIGNAL_PURPLE_REQUIRE_FFMPEG_TEST=1`, the Rust gate runs the installed
+FFmpeg converter probe separately from the parallel unit-test harness. This
+keeps the converter's production resource limits meaningful on constrained CI
+runners.
+
 The C gate requires clang-format 19 and rejects any other major version. Its
 repository-owned style preserves intentional line wrapping while normalizing
 indentation, declarations, braces, and token spacing. Use `c-format-fix` to

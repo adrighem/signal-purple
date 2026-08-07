@@ -696,10 +696,11 @@ schema.
 - Residual limit: Presage still materializes all unprojected rows in one query,
   so unusually large offline backlogs can raise peak startup memory despite the
   bounded projection window. No new live Signal 1.x validation was performed.
-- PR #60's first Debian 13 run saw one transient FFmpeg converter-probe failure.
-  The exact command and Rust test both passed in the workflow's pinned Debian
-  image. The probe now retries once, matching production's safe fallback for a
-  transient converter failure while still rejecting persistent incompatibility.
+- PR #60's first two Debian 13 runs failed the FFmpeg converter probe inside the
+  parallel Rust harness, while the exact command and isolated Rust test passed
+  in the workflow's pinned Debian image. The canonical required-FFmpeg gate now
+  runs that resource-limited process probe separately and both supported CI jobs
+  use the canonical gate.
   The user approved the commit, branch push, and PR #60 after repository rules
   rejected a direct `main` push as designed. Release creation remains owned by
   Release Please; no tag, release, or public comment is created manually.
