@@ -14,7 +14,8 @@
       {
         packages.default = pkgs.stdenv.mkDerivation {
           pname = "signal-purple";
-          version = "1.1.0";
+          version =
+            pkgs.lib.removeSuffix "\n" (builtins.readFile ./version.txt);
 
           src = ./.;
 
@@ -43,7 +44,7 @@
           meta = with pkgs.lib; {
             description = "Signal protocol plugin for libpurple 2";
             homepage = "https://github.com/adrighem/signal-purple";
-            license = licenses.gpl3Plus;
+            license = [ licenses.gpl3Plus licenses.agpl3Only ];
             maintainers = [ ];
             platforms = platforms.linux;
           };

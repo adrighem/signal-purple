@@ -133,6 +133,12 @@ install(FILES "${SIGNAL_CORE_LIBRARY}"
         DESTINATION "${SIGNAL_CORE_INSTALL_DIR}")
 install(FILES data/io.github.adrighem.signal-purple.metainfo.xml
         DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/metainfo")
+install(FILES
+        LICENSE
+        LICENSES/AGPL-3.0-only.txt
+        LICENSES/CC0-1.0.txt
+        THIRD_PARTY_LICENSES.md
+        DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/licenses/signal-purple")
 foreach(size IN ITEMS 16 22 48)
     install(FILES "${CMAKE_CURRENT_SOURCE_DIR}/data/icons/${size}/signal-purple.png"
             DESTINATION "${CMAKE_INSTALL_DATAROOTDIR}/pixmaps/pidgin/protocols/${size}")

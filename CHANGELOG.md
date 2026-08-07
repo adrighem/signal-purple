@@ -1,8 +1,8 @@
 # Changelog
 
-All notable changes will be documented here. The project follows
-[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and intends to use
-semantic versioning after the first stable release.
+All notable changes are documented here. The project follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
+[Semantic Versioning](https://semver.org/spec/v2.0.0.html) for stable releases.
 
 ## [1.2.0](https://github.com/adrighem/signal-purple/compare/v1.1.0...v1.2.0) (2026-08-06)
 
@@ -22,7 +22,10 @@ semantic versioning after the first stable release.
 * retry receipts after websocket recovery ([fdf0ae4](https://github.com/adrighem/signal-purple/commit/fdf0ae422e084e3ba30018a5d6c66b08bb1b5d62))
 * retry receipts after websocket recovery ([74e34dd](https://github.com/adrighem/signal-purple/commit/74e34dd2d94ae4b600ced71f4836d7797e76929f))
 
-## [1.1.0](https://github.com/adrighem/signal-purple/compare/v1.0.0...v1.1.0) (2026-08-01)
+## [1.1.0](https://github.com/adrighem/signal-purple/compare/v0.4.4...v1.1.0) (2026-08-01)
+
+This was the first published stable release. Version 1.0.0 was prepared but was
+not tagged or published.
 
 
 ### Features

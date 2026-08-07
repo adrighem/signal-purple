@@ -30,8 +30,12 @@ test "$(dpkg-query -W -f='${Version}' signal-purple)" = "$debian_version"
 plugin_directory=$(pkgconf --variable=plugindir purple)
 plugin="$plugin_directory/libsignal-purple.so"
 backend="$plugin_directory/signal-purple/libsignal_core.so"
+license_directory=/usr/share/licenses/signal-purple
 test -r "$plugin"
 test -r "$backend"
+for notice in LICENSE AGPL-3.0-only.txt CC0-1.0.txt THIRD_PARTY_LICENSES.md; do
+    test -s "$license_directory/$notice"
+done
 test "$(ldd "$plugin" \
     | awk '$1 == "libsignal_core.so" { print $3; exit }')" = "$backend"
 if [ "$(uname -s)" = Linux ]; then

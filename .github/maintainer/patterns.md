@@ -89,3 +89,11 @@
 - A formatting gate must pin the formatter major and share one style between
   check and fix modes. Scan source directories rather than Git state so release
   archives receive the same result as working trees.
+- A stable project contract and current third-party service compatibility are
+  different claims. Scope the former to maintained platforms and features, and
+  require revision-specific live evidence for the latter.
+- Bounded producer backpressure needs an explicit close path. Otherwise a
+  worker blocked on capacity can turn orderly shutdown into a join deadlock.
+- A fixed-capacity command queue does not bound metadata retained before
+  admission. Deduplicate and cap that owner, preserve retry eligibility, and
+  cancel its retry source before teardown.

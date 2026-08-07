@@ -2,8 +2,9 @@
 
 ## Voice and Tone
 
-- Be concise, factual, and explicit that the plugin is unofficial and alpha
-  quality.
+- Be concise and factual. Describe the plugin as stable only within its
+  documented supported scope, independent from Signal, and exposed to Signal
+  service compatibility changes.
 - Present failures as actionable user outcomes without exposing sensitive
   identifiers or protocol details.
 

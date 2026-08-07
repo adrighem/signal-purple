@@ -60,6 +60,8 @@ const SIGNAL_GIF_PRLIMIT: &str = "/usr/bin/prlimit";
 const GROUP_SYNC_RETRY_SECS: u64 = 30;
 const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
 const RECEIVE_EVENT_QUEUE_CAPACITY: usize = 16;
+const MAX_PENDING_MESSAGE_PROJECTIONS: usize = 64;
+const MAX_PENDING_DELIVERY_RECEIPTS: usize = 4096;
 const RECENT_PROJECTION_IDENTITY_LIMIT: usize = 4096;
 const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const SNAPSHOT_YIELD_INTERVAL: usize = 64;
@@ -204,6 +206,12 @@ struct MessageProjection {
     delivery_receipt_tasks: tokio::task::JoinSet<DeliveryReceiptCompletion>,
 }
 
+#[derive(Default)]
+struct MessageReplayQueue {
+    ready: VecDeque<Content>,
+    waiting_for_groups: VecDeque<Content>,
+}
+
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct ProjectionIdentity {
     sender: String,
@@ -283,6 +291,7 @@ enum DeliveryReceiptState {
 struct DeliveryReceiptQueue {
     pending: VecDeque<(PendingDeliveryReceipt, DeliveryReceiptState)>,
     identities: HashSet<DeliveryReceiptIdentity>,
+    limit_reported: bool,
 }
 
 struct DeliveryReceiptCompletion {
@@ -560,6 +569,9 @@ impl MessageProjection {
     }
 
     fn track(&mut self, content: Content) -> Option<u64> {
+        if !self.has_capacity() {
+            return None;
+        }
         if !self.identities.reserve(projection_identity(&content)) {
             return None;
         }
@@ -568,6 +580,10 @@ impl MessageProjection {
         self.pending.insert(delivery_id, content);
         self.acknowledgments.register(delivery_id);
         Some(delivery_id)
+    }
+
+    fn has_capacity(&self) -> bool {
+        self.pending.len() < MAX_PENDING_MESSAGE_PROJECTIONS
     }
 
     fn release(&mut self, delivery_id: u64) -> Option<Content> {
@@ -586,15 +602,59 @@ impl MessageProjection {
     }
 }
 
+impl MessageReplayQueue {
+    fn replace(&mut self, messages: Vec<Content>, groups_authoritative: bool) {
+        self.ready.clear();
+        self.waiting_for_groups.clear();
+        for content in messages {
+            self.push(content, groups_authoritative);
+        }
+    }
+
+    fn push(&mut self, content: Content, groups_authoritative: bool) {
+        if content_has_group_context(&content.body) && !groups_authoritative {
+            self.waiting_for_groups.push_back(content);
+        } else {
+            self.ready.push_back(content);
+        }
+    }
+
+    fn activate_groups(&mut self) {
+        self.ready.append(&mut self.waiting_for_groups);
+    }
+
+    fn pop_ready(&mut self) -> Option<Content> {
+        self.ready.pop_front()
+    }
+
+    fn can_accept_live_message(&self) -> bool {
+        self.ready
+            .len()
+            .saturating_add(self.waiting_for_groups.len())
+            < MAX_PENDING_MESSAGE_PROJECTIONS
+    }
+}
+
 impl DeliveryReceiptQueue {
-    fn enqueue(&mut self, recipient: ServiceId, message_timestamp: u64, send_timestamp: u64) {
+    fn enqueue(
+        &mut self,
+        recipient: ServiceId,
+        message_timestamp: u64,
+        send_timestamp: u64,
+    ) -> bool {
         let identity = DeliveryReceiptIdentity {
             recipient: recipient.service_id_string(),
             message_timestamp,
         };
-        if !self.identities.insert(identity.clone()) {
-            return;
+        if self.identities.contains(&identity) {
+            return false;
         }
+        if self.pending.len() >= MAX_PENDING_DELIVERY_RECEIPTS {
+            let should_report = !self.limit_reported;
+            self.limit_reported = true;
+            return should_report;
+        }
+        self.identities.insert(identity.clone());
         self.pending.push_back((
             PendingDeliveryReceipt {
                 identity,
@@ -603,6 +663,7 @@ impl DeliveryReceiptQueue {
             },
             DeliveryReceiptState::Ready,
         ));
+        false
     }
 
     fn start_next(&mut self, session_ready: bool) -> Option<PendingDeliveryReceipt> {
@@ -630,6 +691,9 @@ impl DeliveryReceiptQueue {
             .remove(index)
             .expect("delivery receipt index came from the same queue");
         self.identities.remove(&receipt.identity);
+        if self.pending.len() < MAX_PENDING_DELIVERY_RECEIPTS {
+            self.limit_reported = false;
+        }
     }
 
     fn retry(&mut self, identity: &DeliveryReceiptIdentity, immediately: bool) {
@@ -1141,6 +1205,7 @@ async fn receive_and_command_loop(
         .map_err(|error| format!("Could not initialize the encrypted outbox: {error}"))?;
     let timestamps = MessageTimestampAllocator::default();
     let mut projection = MessageProjection::new(Arc::clone(&acknowledgments));
+    let mut replay = MessageReplayQueue::default();
     let mut deferred_commands = VecDeque::new();
     let mut attachment_tasks = tokio::task::JoinSet::new();
     let mut attachment_aborts = HashMap::new();
@@ -1446,6 +1511,23 @@ async fn receive_and_command_loop(
             let session_ready = session.is_ready();
             let groups_authoritative = session.groups_authoritative();
             let groups_dirty = session.groups_dirty();
+            if groups_authoritative {
+                replay.activate_groups();
+            }
+            if projection.has_capacity()
+                && let Some(content) = replay.pop_ready()
+            {
+                await_phase_or_stop!(project_content(
+                    &mut manager,
+                    content,
+                    &sink,
+                    &mut projection,
+                    &departed_groups,
+                    groups_authoritative,
+                    &timestamps,
+                ));
+                continue;
+            }
             if projection.delivery_receipt_tasks.is_empty()
                 && let Some(receipt) = projection.delivery_receipts.start_next(session_ready)
             {
@@ -1466,7 +1548,8 @@ async fn receive_and_command_loop(
                         true,
                     ));
                 }
-                received = messages.recv() => {
+                received = messages.recv(), if projection.has_capacity()
+                    && replay.can_accept_live_message() => {
                     match received {
                         Some(Received::QueueEmpty) => {
                             if !session_ready {
@@ -1488,13 +1571,11 @@ async fn receive_and_command_loop(
                                         group_sync_retry_tick.reset();
                                     }
                                 }
-                                await_phase_or_stop!(replay_unprojected_messages(
-                                    &mut manager,
+                                await_phase_or_stop!(load_unprojected_messages(
+                                    &manager,
                                     &sink,
-                                    &mut projection,
-                                    &departed_groups,
+                                    &mut replay,
                                     session.groups_authoritative(),
-                                    &timestamps,
                                 ));
                                 await_phase_or_stop!(emit_identity_changes(&manager, &sink));
                                 await_phase_or_stop!(retry_outbox(
@@ -1531,15 +1612,7 @@ async fn receive_and_command_loop(
                         Some(Received::Content(content)) => {
                             session.note_group_content(content_has_group_context(&content.body));
                             if session_ready {
-                                await_phase_or_stop!(project_content(
-                                    &mut manager,
-                                    *content,
-                                    &sink,
-                                    &mut projection,
-                                    &departed_groups,
-                                    groups_authoritative,
-                                    &timestamps,
-                                ));
+                                replay.push(*content, groups_authoritative);
                                 await_phase_or_stop!(emit_identity_changes(&manager, &sink));
                             }
                         }
@@ -1709,14 +1782,7 @@ async fn receive_and_command_loop(
                     )) {
                         Ok(()) => {
                             session.mark_groups_authoritative();
-                            await_phase_or_stop!(replay_unprojected_messages(
-                                &mut manager,
-                                &sink,
-                                &mut projection,
-                                &departed_groups,
-                                true,
-                                &timestamps,
-                            ));
+                            replay.activate_groups();
                             await_phase_or_stop!(retry_outbox(
                                 &mut manager,
                                 &sink,
@@ -2571,13 +2637,11 @@ async fn upload_and_send_attachment(
     }
 }
 
-async fn replay_unprojected_messages(
-    manager: &mut Manager<SqliteStore, Registered>,
+async fn load_unprojected_messages(
+    manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
-    projection: &mut MessageProjection,
-    departed_groups: &DepartedGroups,
+    replay: &mut MessageReplayQueue,
     groups_authoritative: bool,
-    timestamps: &MessageTimestampAllocator,
 ) {
     let messages = match manager
         .store()
@@ -2594,18 +2658,7 @@ async fn replay_unprojected_messages(
         }
     };
 
-    for content in messages {
-        project_content(
-            manager,
-            content,
-            sink,
-            projection,
-            departed_groups,
-            groups_authoritative,
-            timestamps,
-        )
-        .await;
-    }
+    replay.replace(messages, groups_authoritative);
 }
 
 async fn project_content(
@@ -3099,8 +3152,12 @@ async fn handle_content(
                 DataMessageProjection::incoming(message, &route.peer, timestamp, delivery_id)
             };
             let disposition = emit_data_message(manager, projection, sink, departed_groups).await;
-            if content.metadata.needs_receipt {
-                delivery_receipts.enqueue(content.metadata.sender, timestamp, timestamps.next());
+            if content.metadata.needs_receipt
+                && delivery_receipts.enqueue(content.metadata.sender, timestamp, timestamps.next())
+            {
+                sink.emit(Event::transient_error(
+                    "Signal delivery-receipt backlog limit reached; excess receipts were discarded",
+                ));
             }
             return disposition;
         }
@@ -4168,6 +4225,30 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn projection_test_content(timestamp_ms: u64, group: bool) -> Content {
+        let sender = parse_recipient("11111111-1111-4111-8111-111111111111").unwrap();
+        let destination = parse_recipient("22222222-2222-4222-8222-222222222222").unwrap();
+        let timestamp = (UNIX_EPOCH + Duration::from_millis(timestamp_ms)).into();
+        Content {
+            metadata: presage::libsignal_service::content::Metadata {
+                sender,
+                destination,
+                sender_device: 1u32.try_into().unwrap(),
+                timestamp,
+                server_timestamp: timestamp,
+                needs_receipt: false,
+                unidentified_sender: false,
+                was_plaintext: false,
+                server_guid: None,
+            },
+            body: ContentBody::DataMessage(DataMessage {
+                timestamp: Some(timestamp_ms),
+                group_v2: group.then(GroupContextV2::default),
+                ..DataMessage::default()
+            }),
+        }
+    }
+
     struct DropFlag(Arc<AtomicBool>);
 
     impl Drop for DropFlag {
@@ -4960,6 +5041,10 @@ mod tests {
     #[test]
     fn installed_ffmpeg_converter_produces_a_bounded_animation() {
         if !Path::new(SIGNAL_GIF_FFMPEG).is_file() || !Path::new(SIGNAL_GIF_PRLIMIT).is_file() {
+            assert!(
+                std::env::var_os("SIGNAL_PURPLE_REQUIRE_FFMPEG_TEST").is_none(),
+                "CI requires /usr/bin/ffmpeg and /usr/bin/prlimit for converter coverage"
+            );
             return;
         }
         let source = std::process::Command::new(SIGNAL_GIF_FFMPEG)
@@ -5598,8 +5683,8 @@ mod tests {
     fn retries_closed_websocket_receipts_after_recovery_without_an_error_event() {
         let recipient = parse_recipient("11111111-1111-4111-8111-111111111111").unwrap();
         let mut receipts = DeliveryReceiptQueue::default();
-        receipts.enqueue(recipient, 42, 100);
-        receipts.enqueue(recipient, 42, 101);
+        assert!(!receipts.enqueue(recipient, 42, 100));
+        assert!(!receipts.enqueue(recipient, 42, 101));
         assert_eq!(receipts.len(), 1);
         assert!(receipts.start_next(false).is_none());
         let receipt = receipts.start_next(true).unwrap();
@@ -5627,10 +5712,30 @@ mod tests {
     }
 
     #[test]
+    fn bounds_delivery_receipt_memory_and_reports_each_saturation_episode_once() {
+        let recipient = parse_recipient("11111111-1111-4111-8111-111111111111").unwrap();
+        let mut receipts = DeliveryReceiptQueue::default();
+
+        for timestamp in 1..=MAX_PENDING_DELIVERY_RECEIPTS as u64 {
+            assert!(!receipts.enqueue(recipient, timestamp, timestamp + 10_000));
+        }
+        assert_eq!(receipts.len(), MAX_PENDING_DELIVERY_RECEIPTS);
+        assert!(receipts.enqueue(recipient, 20_000, 30_000));
+        assert!(!receipts.enqueue(recipient, 20_001, 30_001));
+        assert_eq!(receipts.len(), MAX_PENDING_DELIVERY_RECEIPTS);
+
+        let completed = receipts.start_next(true).unwrap();
+        receipts.complete(&completed.identity);
+        assert!(!receipts.enqueue(recipient, 20_002, 30_002));
+        assert_eq!(receipts.len(), MAX_PENDING_DELIVERY_RECEIPTS);
+        assert!(receipts.enqueue(recipient, 20_003, 30_003));
+    }
+
+    #[test]
     fn defers_transient_receipt_failures_without_resetting_a_healthy_socket() {
         let recipient = parse_recipient("11111111-1111-4111-8111-111111111111").unwrap();
         let mut receipts = DeliveryReceiptQueue::default();
-        receipts.enqueue(recipient, 42, 100);
+        assert!(!receipts.enqueue(recipient, 42, 100));
         let receipt = receipts.start_next(true).unwrap();
         let completion = DeliveryReceiptCompletion {
             generation: 7,
@@ -5658,7 +5763,7 @@ mod tests {
     fn reports_and_discards_permanent_delivery_receipt_failures() {
         let recipient = parse_recipient("11111111-1111-4111-8111-111111111111").unwrap();
         let mut receipts = DeliveryReceiptQueue::default();
-        receipts.enqueue(recipient, 42, 100);
+        assert!(!receipts.enqueue(recipient, 42, 100));
         let receipt = receipts.start_next(true).unwrap();
         let completion = DeliveryReceiptCompletion {
             generation: 7,
@@ -5692,7 +5797,7 @@ mod tests {
         runtime.block_on(local.run_until(async {
             let recipient = parse_recipient("11111111-1111-4111-8111-111111111111").unwrap();
             let mut receipts = DeliveryReceiptQueue::default();
-            receipts.enqueue(recipient, 42, 100);
+            assert!(!receipts.enqueue(recipient, 42, 100));
             let original = receipts.start_next(true).unwrap();
             let dropped = Arc::new(AtomicBool::new(false));
             let task_dropped = Arc::clone(&dropped);
@@ -5757,6 +5862,70 @@ mod tests {
             destination: "aci:destination".into(),
             timestamp_ms: RECENT_PROJECTION_IDENTITY_LIMIT as i64,
         }));
+    }
+
+    #[test]
+    fn bounds_pending_message_projection_memory_and_reopens_capacity() {
+        let acknowledgments = AcknowledgmentInbox::new();
+        let mut projection = MessageProjection::new(Arc::clone(&acknowledgments));
+        let mut delivery_ids = Vec::new();
+        for timestamp_ms in 1..=MAX_PENDING_MESSAGE_PROJECTIONS as u64 {
+            delivery_ids.push(
+                projection
+                    .track(projection_test_content(timestamp_ms, false))
+                    .unwrap(),
+            );
+        }
+
+        assert_eq!(projection.pending.len(), MAX_PENDING_MESSAGE_PROJECTIONS);
+        assert!(!projection.has_capacity());
+        assert!(
+            projection
+                .track(projection_test_content(
+                    MAX_PENDING_MESSAGE_PROJECTIONS as u64 + 1,
+                    false,
+                ))
+                .is_none()
+        );
+        projection.release(delivery_ids[0]).unwrap();
+        assert!(projection.has_capacity());
+        assert!(
+            projection
+                .track(projection_test_content(
+                    MAX_PENDING_MESSAGE_PROJECTIONS as u64 + 1,
+                    false,
+                ))
+                .is_some()
+        );
+        assert_eq!(projection.pending.len(), MAX_PENDING_MESSAGE_PROJECTIONS);
+    }
+
+    #[test]
+    fn replay_queue_preserves_ready_order_and_defers_groups_until_authoritative() {
+        let mut replay = MessageReplayQueue::default();
+        replay.replace(
+            vec![
+                projection_test_content(1, false),
+                projection_test_content(2, true),
+                projection_test_content(3, false),
+            ],
+            false,
+        );
+
+        assert_eq!(content_timestamp(&replay.pop_ready().unwrap()), 1);
+        assert_eq!(content_timestamp(&replay.pop_ready().unwrap()), 3);
+        assert!(replay.pop_ready().is_none());
+        replay.activate_groups();
+        assert_eq!(content_timestamp(&replay.pop_ready().unwrap()), 2);
+        assert!(replay.pop_ready().is_none());
+
+        for timestamp_ms in 1..=MAX_PENDING_MESSAGE_PROJECTIONS as u64 {
+            replay.push(projection_test_content(timestamp_ms, true), false);
+        }
+        assert!(!replay.can_accept_live_message());
+        replay.activate_groups();
+        replay.pop_ready().unwrap();
+        assert!(replay.can_accept_live_message());
     }
 
     #[test]

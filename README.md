@@ -9,6 +9,12 @@ libpurple 2. It adds synchronized Signal contacts, direct messages, and group
 conversations to Pidgin while a Rust/Presage backend handles the Signal
 protocol inside the same process.
 
+Published 1.x releases are stable within the documented supported environment
+and feature scope. Stability covers the project's release and support contract;
+it does not imply Signal endorsement, full feature parity, guaranteed
+compatibility with future Signal service changes, or an independent security
+audit.
+
 ## Current state
 
 This README distinguishes production-service evidence from automated tests:
@@ -34,10 +40,10 @@ This README distinguishes production-service evidence from automated tests:
 | Identity replacement | **Test-covered.** Verified-contact sends block until the user accepts a changed identity after out-of-band verification. |
 | Idle event handling | **Live-tested.** Descriptor-driven wakeups replaced the old polling loop; an isolated idle sample found no hot Signal thread. |
 
-The latest recorded production-service validation was on 2026-07-20. See
+Production-service evidence is revision-specific. See
 [live validation](docs/live-validation.md) for the exact scenarios, revisions,
-and outstanding checks. Passing automated tests does not establish general
-Signal compatibility.
+and outstanding checks. Stable status and passing automated tests do not
+establish general Signal compatibility.
 
 ## Supported environment
 
@@ -354,8 +360,16 @@ upload or restart.
 - Signal-specific rich content is reduced or omitted; quotes, mentions,
   stickers, reactions, edits, and similar features do not have full native
   Purple representations.
+- Typing and receipt state is best-effort and process-local. A restart can lose
+  pending state, and asynchronous read-receipt failures are reported rather
+  than durably replayed.
 - Remote leave is the only implemented group-administration action. Other
   group administration remains unavailable.
+- Presage currently materializes the durable replay result set in one database
+  query, so peak startup memory scales with a very large offline backlog. The
+  plugin limits in-flight projections, deferred live messages, and
+  event/receipt queues, but linked devices with unusually large backlogs may
+  still need extra memory.
 
 ## Security and local data
 

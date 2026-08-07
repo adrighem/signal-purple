@@ -224,3 +224,24 @@
 - Keep source reproducibility, pinned snapshots, SBOM generation, provenance
   attestation, digest-safe retry behavior, and least-privilege job separation.
   Include the already-built RPM in checksums, attestations, and release uploads.
+
+## 2026-08-07 - Define the stable support contract
+
+- Supersede active pre-alpha and future-1.0 release-gate language while keeping
+  the dated 0.x decisions as historical release records.
+- Treat v1.1.0 as the first published stable release. The prepared v1.0.0 was
+  never tagged or published; do not create historical release metadata for it.
+- Stability covers Semantic Versioning, maintained upgrades, and regressions in
+  the documented Debian 13 and Ubuntu 24.04 LTS runtime and feature scope. It
+  does not imply Signal endorsement, full feature parity, an independent
+  security audit, or compatibility with every future Signal service revision.
+- Keep production-service compatibility evidence revision-specific. Missing
+  live evidence limits the affected compatibility claim, not project maturity.
+- Treat the Fedora RPM and Nix flake as best-effort build integrations until
+  each has a native, reproducible install-and-probe gate.
+- Bound event and receipt ownership under load. Apply event-producer
+  backpressure with an explicit shutdown wake-up, limit in-flight durable
+  projections to 64, and cap exact read and delivery receipt metadata at 4096
+  entries each.
+- Record Presage's one-query durable replay allocation as a known dependency
+  limitation until its store API supports cursor pagination.

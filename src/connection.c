@@ -9,6 +9,8 @@
 #include <libsecret/secret.h>
 
 #define SIGNAL_MAX_PENDING_ATTACHMENT_BYTES (64u * 1024u * 1024u)
+#define SIGNAL_MAX_PENDING_READS 4096u
+#define SIGNAL_PENDING_READ_RETRY_MILLISECONDS 100u
 
 static gsize signal_pending_attachment_bytes;
 
@@ -21,6 +23,7 @@ typedef struct {
     char *peer_id;
     char *chat_id;
     guint64 timestamp;
+    gboolean eligible;
 } SignalPendingRead;
 
 typedef struct {
@@ -44,6 +47,7 @@ static PurpleConversation *signal_open_group(SignalConnection *connection,
 static void signal_queue_read(SignalConnection *connection,
                               PurpleConversation *conversation,
                               const SignalEvent *event);
+static void signal_flush_pending_reads(SignalConnection *connection);
 
 static void
 signal_queue_final_group_read(SignalConnection *connection,
@@ -398,33 +402,167 @@ signal_pending_read_free(gpointer data)
     g_free(read);
 }
 
+static guint
+signal_pending_read_hash(gconstpointer data)
+{
+    const SignalPendingRead *read = data;
+    guint hash = g_str_hash(read->peer_id);
+
+    hash = hash * 31u + (read->chat_id != NULL ? g_str_hash(read->chat_id) : 0u);
+    hash = hash * 31u + (guint)(read->timestamp ^ (read->timestamp >> 32));
+    return hash;
+}
+
 static gboolean
+signal_pending_read_equal(gconstpointer left, gconstpointer right)
+{
+    const SignalPendingRead *left_read = left;
+    const SignalPendingRead *right_read = right;
+
+    return left_read->timestamp == right_read->timestamp &&
+           g_strcmp0(left_read->peer_id, right_read->peer_id) == 0 &&
+           g_strcmp0(left_read->chat_id, right_read->chat_id) == 0;
+}
+
+static SignalStatus
 signal_send_read(SignalConnection *connection, const SignalPendingRead *read)
 {
-    return signal_core_mark_read(
-               connection->core, connection->next_request_id++,
-               read->peer_id, read->timestamp) == SIGNAL_STATUS_OK;
+    if (connection->core == NULL || connection->mark_read == NULL)
+        return SIGNAL_STATUS_NOT_READY;
+    return connection->mark_read(connection->core,
+                                 connection->next_request_id++, read->peer_id,
+                                 read->timestamp);
+}
+
+static gboolean
+signal_pending_read_matches(const SignalPendingRead *read,
+                            const char *direct_peer, const char *group_key)
+{
+    return read->chat_id != NULL ? g_strcmp0(read->chat_id, group_key) == 0
+                                 : g_strcmp0(read->peer_id, direct_peer) == 0;
+}
+
+static void
+signal_mark_pending_reads_eligible(SignalConnection *connection,
+                                   const char *direct_peer,
+                                   const char *group_key)
+{
+    GHashTableIter iter;
+    gpointer key;
+
+    g_hash_table_iter_init(&iter, connection->pending_reads);
+    while (g_hash_table_iter_next(&iter, &key, NULL)) {
+        SignalPendingRead *read = key;
+
+        if (signal_pending_read_matches(read, direct_peer, group_key))
+            read->eligible = TRUE;
+    }
+}
+
+static gboolean
+signal_retry_pending_reads(gpointer data)
+{
+    SignalConnection *connection = data;
+
+    connection->pending_read_retry_id = 0;
+    if (!connection->closing && connection->core != NULL)
+        signal_flush_pending_reads(connection);
+    return G_SOURCE_REMOVE;
+}
+
+static void
+signal_schedule_pending_read_retry(SignalConnection *connection)
+{
+    if (connection->pending_read_retry_id == 0 && !connection->closing &&
+        connection->core != NULL)
+        connection->pending_read_retry_id = purple_timeout_add(
+            SIGNAL_PENDING_READ_RETRY_MILLISECONDS,
+            signal_retry_pending_reads, connection);
+}
+
+static void
+signal_flush_pending_reads(SignalConnection *connection)
+{
+    GHashTableIter iter;
+    gpointer key;
+
+    g_hash_table_iter_init(&iter, connection->pending_reads);
+    while (g_hash_table_iter_next(&iter, &key, NULL)) {
+        SignalPendingRead *read = key;
+        SignalStatus status;
+
+        if (!read->eligible)
+            continue;
+        status = signal_send_read(connection, read);
+        if (status == SIGNAL_STATUS_OK) {
+            g_hash_table_iter_remove(&iter);
+            continue;
+        }
+        if (status == SIGNAL_STATUS_QUEUE_FULL) {
+            signal_schedule_pending_read_retry(connection);
+            break;
+        }
+        if (status == SIGNAL_STATUS_NOT_READY)
+            break;
+        purple_debug_warning("signal-purple",
+                             "Discarded a read receipt rejected with status %d\n",
+                             status);
+        g_hash_table_iter_remove(&iter);
+    }
+    if (g_hash_table_size(connection->pending_reads) < SIGNAL_MAX_PENDING_READS)
+        connection->pending_read_limit_warned = FALSE;
 }
 
 static void
 signal_queue_read(SignalConnection *connection, PurpleConversation *conversation,
                   const SignalEvent *event)
 {
+    SignalPendingRead lookup = { 0 };
     SignalPendingRead *read;
+    gboolean exists;
+    gboolean focused;
 
     if ((event->flags & SIGNAL_EVENT_FLAG_OUTGOING) != 0 ||
         event->peer_id == NULL || event->timestamp_ms == 0)
         return;
+    lookup.peer_id = (char *)event->peer_id;
+    lookup.chat_id = (char *)event->chat_id;
+    lookup.timestamp = event->timestamp_ms;
+    exists = g_hash_table_contains(connection->pending_reads, &lookup);
+    focused = conversation != NULL &&
+              purple_conversation_has_focus(conversation);
+    if (focused) {
+        signal_mark_pending_reads_eligible(
+            connection, event->chat_id == NULL ? event->peer_id : NULL,
+            event->chat_id);
+    }
+    if (exists) {
+        if (focused)
+            signal_flush_pending_reads(connection);
+        return;
+    }
+    if (g_hash_table_size(connection->pending_reads) >=
+        SIGNAL_MAX_PENDING_READS) {
+        signal_flush_pending_reads(connection);
+    }
+    if (g_hash_table_size(connection->pending_reads) >=
+        SIGNAL_MAX_PENDING_READS) {
+        if (!connection->pending_read_limit_warned) {
+            purple_debug_warning(
+                "signal-purple",
+                "Pending read-receipt limit reached; dropping excess metadata\n");
+            connection->pending_read_limit_warned = TRUE;
+        }
+        return;
+    }
     read = g_new0(SignalPendingRead, 1);
     read->peer_id = g_strdup(event->peer_id);
     read->chat_id = g_strdup(event->chat_id);
     read->timestamp = event->timestamp_ms;
-    if (purple_conversation_has_focus(conversation) &&
-        signal_send_read(connection, read)) {
-        signal_pending_read_free(read);
-        return;
-    }
-    g_ptr_array_add(connection->pending_reads, read);
+    read->eligible = focused;
+    g_hash_table_add(connection->pending_reads, read);
+    if (focused)
+        signal_flush_pending_reads(connection);
 }
 
 static void
@@ -534,13 +672,17 @@ static void
 signal_remove_group_pending_reads(SignalConnection *connection,
                                   const char *group_key)
 {
-    for (guint index = connection->pending_reads->len; index > 0; index--) {
-        SignalPendingRead *read = g_ptr_array_index(connection->pending_reads,
-                                                    index - 1);
+    GHashTableIter iter;
+    gpointer key;
 
+    g_hash_table_iter_init(&iter, connection->pending_reads);
+    while (g_hash_table_iter_next(&iter, &key, NULL)) {
+        SignalPendingRead *read = key;
         if (g_strcmp0(read->chat_id, group_key) == 0)
-            g_ptr_array_remove_index(connection->pending_reads, index - 1);
+            g_hash_table_iter_remove(&iter);
     }
+    if (g_hash_table_size(connection->pending_reads) < SIGNAL_MAX_PENDING_READS)
+        connection->pending_read_limit_warned = FALSE;
 }
 
 static void
@@ -1107,15 +1249,8 @@ signal_conversation_updated(PurpleConversation *conversation,
             group_key = conversation_name;
     }
 
-    for (guint index = connection->pending_reads->len; index > 0; index--) {
-        SignalPendingRead *read = g_ptr_array_index(
-            connection->pending_reads, index - 1);
-        gboolean matches = read->chat_id != NULL
-                               ? g_strcmp0(read->chat_id, group_key) == 0
-                               : g_strcmp0(read->peer_id, direct_peer) == 0;
-        if (matches && signal_send_read(connection, read))
-            g_ptr_array_remove_index(connection->pending_reads, index - 1);
-    }
+    signal_mark_pending_reads_eligible(connection, direct_peer, group_key);
+    signal_flush_pending_reads(connection);
 }
 
 static void
@@ -1213,6 +1348,7 @@ signal_dispatch_event(SignalConnection *connection, const SignalEvent *event,
         purple_connection_update_progress(connection->gc,
                                           "Signal messages synchronized", 2, 3);
         purple_connection_set_state(connection->gc, PURPLE_CONNECTED);
+        signal_flush_pending_reads(connection);
         break;
     case SIGNAL_EVENT_RECOVERING:
         connection->group_snapshot_complete = FALSE;
@@ -1409,6 +1545,7 @@ signal_connection_new(PurpleConnection *gc, const char *store_path)
     connection = g_new0(SignalConnection, 1);
     connection->gc = gc;
     connection->send_group_message = signal_core_send_group_message;
+    connection->mark_read = signal_core_mark_read;
     connection->start_xfer = purple_xfer_start;
     connection->store_path = g_strdup(store_path);
     connection->group_ids_by_key = g_hash_table_new_full(
@@ -1433,8 +1570,9 @@ signal_connection_new(PurpleConnection *gc, const char *store_path)
         g_int64_hash, g_int64_equal, g_free, (GDestroyNotify)purple_xfer_unref);
     connection->outgoing_attachment_contexts =
         g_hash_table_new(g_direct_hash, g_direct_equal);
-    connection->pending_reads = g_ptr_array_new_with_free_func(
-        signal_pending_read_free);
+    connection->pending_reads = g_hash_table_new_full(
+        signal_pending_read_hash, signal_pending_read_equal,
+        signal_pending_read_free, NULL);
     connection->group_leave_requests = g_ptr_array_new_with_free_func(
         signal_group_leave_request_free);
     signal_contact_sync_init(&connection->contact_sync);
@@ -1454,6 +1592,10 @@ signal_connection_free(SignalConnection *connection)
         g_source_destroy(connection->poll_source);
         g_source_unref(connection->poll_source);
     }
+    if (connection->pending_read_retry_id != 0) {
+        purple_timeout_remove(connection->pending_read_retry_id);
+        connection->pending_read_retry_id = 0;
+    }
     if (connection->core != NULL)
         signal_core_free(connection->core);
 
@@ -1469,7 +1611,7 @@ signal_connection_free(SignalConnection *connection)
     g_hash_table_unref(connection->pending_identity_changes);
     g_hash_table_unref(connection->outgoing_attachments);
     g_hash_table_unref(connection->outgoing_attachment_contexts);
-    g_ptr_array_unref(connection->pending_reads);
+    g_hash_table_unref(connection->pending_reads);
     g_ptr_array_unref(connection->group_leave_requests);
     signal_contact_sync_clear(&connection->contact_sync);
     signal_contact_sync_clear(&connection->group_sync);

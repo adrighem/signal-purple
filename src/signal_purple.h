@@ -15,6 +15,9 @@
 typedef SignalStatus (*SignalSendGroupMessageFunc)(
     SignalCore *core, uint64_t request_id, const char *group_key,
     const char *message);
+typedef SignalStatus (*SignalMarkReadFunc)(SignalCore *core, uint64_t request_id,
+                                           const char *recipient,
+                                           uint64_t timestamp);
 typedef void (*SignalStartXferFunc)(PurpleXfer *xfer, int fd, const char *ip,
                                     unsigned int port);
 
@@ -31,6 +34,7 @@ struct _SignalConnection {
     PurpleConnection *gc;
     SignalCore *core;
     SignalSendGroupMessageFunc send_group_message;
+    SignalMarkReadFunc mark_read;
     SignalStartXferFunc start_xfer;
     GSource *poll_source;
     GHashTable *group_ids_by_key;
@@ -44,7 +48,7 @@ struct _SignalConnection {
     GHashTable *pending_identity_changes;
     GHashTable *outgoing_attachments;
     GHashTable *outgoing_attachment_contexts;
-    GPtrArray *pending_reads;
+    GHashTable *pending_reads;
     GPtrArray *group_leave_requests;
     SignalContactSync contact_sync;
     SignalContactSync group_sync;
@@ -60,7 +64,9 @@ struct _SignalConnection {
     guint group_sync_created;
     guint group_sync_removed;
     guint64 next_request_id;
+    guint pending_read_retry_id;
     gboolean group_snapshot_complete;
+    gboolean pending_read_limit_warned;
     gboolean closing;
 };
 

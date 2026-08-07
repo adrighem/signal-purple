@@ -67,8 +67,9 @@ user-facing local storage, not diagnostic output.
   calls C or Purple. Interrupted projections and undrained acknowledgements
   remain eligible for replay, and interrupted outbox attempts retain their
   encrypted rows.
-- Backend events use a bounded queue; overflow fails visibly and reconnects
-  rather than allowing unbounded process memory growth.
+- Backend events use a bounded queue. Count and aggregate-byte pressure block
+  the producer until Purple drains capacity; teardown wakes blocked producers.
+  A single event above the 64 MiB byte budget fails visibly and reconnects.
 - Attachments are capped at 25 MiB each and 50 MiB per incoming message.
   The C adapter rejects non-regular and known-oversized outgoing files before
   allocating their contents, rejects empty files, and enforces the same limit
@@ -108,8 +109,13 @@ user-facing local storage, not diagnostic output.
   acknowledgements use a coalescing inbox bounded by pending projection IDs,
   retry local store failures, and drain on orderly shutdown.
 - Read receipts are emitted only after Purple reports focus. Pending receipt
-  metadata is held in process memory and is not written to Purple's plaintext
-  configuration.
+  metadata is deduplicated by exact recipient, group, and timestamp, capped at
+  4096 entries, retried after synchronous queue pressure or backend readiness,
+  and held only in process memory. Delivery-receipt metadata has the same 4096
+  entry bound. Neither queue is restart-persistent, and read-receipt failures
+  after backend admission are reported rather than durably replayed. Excess
+  receipt metadata is discarded with a rate-limited warning rather than
+  permitting unbounded memory growth.
 - Unsent message bodies, recipients, timestamps, and retry counters remain in
   the SQLCipher outbox. Purple receives errors at the first failure and at
   bounded later attempts, and those error events omit the message body.
@@ -122,11 +128,16 @@ user-facing local storage, not diagnostic output.
 ## Known gaps
 
 - No independent security audit has occurred.
+- The pinned Presage store API reads the full unprojected-message result set in
+  one query. signal-purple performs that read once per connection and limits
+  acknowledgement-pending projections and separately deferred live messages to
+  64 each, but peak replay-query memory still scales with the durable backlog
+  until Presage exposes cursor pagination.
 - Live direct-message, contact-sync, group-discovery, and earlier membership
   projection paths have been verified. Controlled production-service tests of
-  authoritative pruning and remote leave are still pending. The full
-  supported-client and failure-mode matrix, including startup backlog
-  exactly-once behavior, remains a release gate.
+  authoritative pruning, remote leave, startup backlog, and exactly-once
+  behavior remain compatibility-evidence gaps. They gate claims for those
+  service/client scenarios, not stable project status.
 - Purple does not display or compare the numeric safety number. Acceptance is
   therefore a confirmation that the user completed verification through
   another trusted channel, not an in-plugin cryptographic comparison. This

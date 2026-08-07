@@ -4,10 +4,17 @@
 import json
 import pathlib
 import re
+import tomllib
+import xml.etree.ElementTree as ET
 
 
 PROJECT_ROOT = pathlib.Path(__file__).resolve().parents[1]
+CI_WORKFLOW = pathlib.PurePosixPath(".github/workflows/ci.yml")
+WORKFLOWS_DIRECTORY = pathlib.PurePosixPath(".github/workflows")
+CARGO_MANIFEST = pathlib.PurePosixPath("rust/signal-core/Cargo.toml")
 LOCK_PATH = pathlib.PurePosixPath("rust/signal-core/Cargo.lock")
+DEPENDENCY_POLICY = pathlib.PurePosixPath("docs/dependency-policy.md")
+THIRD_PARTY_LICENSES = pathlib.PurePosixPath("THIRD_PARTY_LICENSES.md")
 MARKER = "# x-release-please-version"
 RELEASE_ARTIFACTS_WORKFLOW = pathlib.PurePosixPath(
     ".github/workflows/release-artifacts.yml"
@@ -15,12 +22,17 @@ RELEASE_ARTIFACTS_WORKFLOW = pathlib.PurePosixPath(
 APT_REPOSITORY_WORKFLOW = pathlib.PurePosixPath(
     ".github/workflows/apt-repository.yml"
 )
+APPSTREAM_METADATA = pathlib.PurePosixPath(
+    "data/io.github.adrighem.signal-purple.metainfo.xml"
+)
 RELEASE_PLEASE_WORKFLOW = pathlib.PurePosixPath(
     ".github/workflows/release-please.yml"
 )
 RELEASE_BUILDER = pathlib.PurePosixPath("scripts/build-release-artifacts.sh")
 RELEASE_DOCKERFILE = pathlib.PurePosixPath(".github/release/Dockerfile")
 CMAKE_CONFIG = pathlib.PurePosixPath("CMakeLists.txt")
+NIX_FLAKE = pathlib.PurePosixPath("flake.nix")
+EXPECTED_CACHE_ACTION_SHA = "0057852bfaa89a56745cba8c7296529d2fc39830"
 
 
 def fail(message: str) -> None:
@@ -293,6 +305,72 @@ def validate_release_workflows() -> None:
     )
 
 
+def validate_ci_workflow() -> None:
+    ci_text = (PROJECT_ROOT / CI_WORKFLOW).read_text(encoding="utf-8")
+    for job_name in (
+        "build-and-test",
+        "debian-13-build-and-install",
+        "ubuntu-24-04-build-and-install",
+    ):
+        match = re.search(
+            rf"(?ms)^  {re.escape(job_name)}:\n(.*?)(?=^  [A-Za-z0-9_-]+:\n|\Z)",
+            ci_text,
+        )
+        if match is None:
+            fail(f"{CI_WORKFLOW} is missing required job: {job_name}")
+        require_fragments(
+            match.group(1),
+            CI_WORKFLOW,
+            [
+                'SIGNAL_PURPLE_REQUIRE_FFMPEG_TEST: "1"',
+                "ffmpeg",
+                "util-linux",
+            ],
+        )
+
+    cache_uses = []
+    workflow_root = PROJECT_ROOT / WORKFLOWS_DIRECTORY
+    workflow_paths = sorted(workflow_root.glob("*.yml"))
+    workflow_paths.extend(sorted(workflow_root.glob("*.yaml")))
+    for workflow_path in workflow_paths:
+        relative_path = pathlib.PurePosixPath(
+            workflow_path.relative_to(PROJECT_ROOT).as_posix()
+        )
+        for line_number, line in enumerate(
+            workflow_path.read_text(encoding="utf-8").splitlines(), start=1
+        ):
+            if "actions/cache@" not in line:
+                continue
+            match = re.fullmatch(
+                r"\s*uses:\s*actions/cache@([^\s#]+)\s*(?:#\s*(.*))?", line
+            )
+            if match is None:
+                fail(
+                    f"{relative_path}:{line_number} has an invalid actions/cache "
+                    "declaration"
+                )
+            reference = match.group(1)
+            if re.fullmatch(r"[0-9a-f]{40}", reference) is None:
+                fail(
+                    f"{relative_path}:{line_number} uses mutable actions/cache "
+                    f"reference: {reference}"
+                )
+            cache_uses.append(
+                (relative_path, reference, (match.group(2) or "").strip())
+            )
+
+    expected_cache_uses = [
+        (CI_WORKFLOW, EXPECTED_CACHE_ACTION_SHA, "v4.3.0"),
+        (CI_WORKFLOW, EXPECTED_CACHE_ACTION_SHA, "v4.3.0"),
+        (CI_WORKFLOW, EXPECTED_CACHE_ACTION_SHA, "v4.3.0"),
+    ]
+    if cache_uses != expected_cache_uses:
+        fail(
+            "GitHub workflows must contain exactly three actions/cache v4.3.0 "
+            f"uses pinned to {EXPECTED_CACHE_ACTION_SHA}"
+        )
+
+
 def validate_lock_marker() -> None:
     version = (PROJECT_ROOT / "version.txt").read_text(encoding="utf-8").strip()
     lock_text = (PROJECT_ROOT / LOCK_PATH).read_text(encoding="utf-8")
@@ -317,10 +395,99 @@ def validate_lock_marker() -> None:
         )
 
 
+def validate_presage_revision() -> None:
+    manifest = tomllib.loads(
+        (PROJECT_ROOT / CARGO_MANIFEST).read_text(encoding="utf-8")
+    )
+    presage_dependencies = [
+        manifest["dependencies"]["presage"],
+        manifest["dependencies"]["presage-store-sqlite"],
+    ]
+    revisions = {dependency.get("rev") for dependency in presage_dependencies}
+    repositories = {dependency.get("git") for dependency in presage_dependencies}
+    if len(revisions) != 1 or None in revisions:
+        fail("Presage dependencies must use one exact Git revision")
+    if repositories != {"https://github.com/adrighem/presage.git"}:
+        fail("Presage dependencies must use the documented public fork")
+    revision = revisions.pop()
+    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
+        fail("Presage dependencies must use a full 40-character Git revision")
+
+    lock = tomllib.loads((PROJECT_ROOT / LOCK_PATH).read_text(encoding="utf-8"))
+    expected_source = (
+        "git+https://github.com/adrighem/presage.git"
+        f"?rev={revision}#{revision}"
+    )
+    for package_name in ("presage", "presage-store-sqlite"):
+        packages = [
+            package
+            for package in lock["package"]
+            if package.get("name") == package_name
+        ]
+        if len(packages) != 1 or packages[0].get("source") != expected_source:
+            fail(f"Cargo.lock does not pin {package_name} to {revision}")
+
+    policy_text = (PROJECT_ROOT / DEPENDENCY_POLICY).read_text(encoding="utf-8")
+    policy_revision = re.search(
+        r"The Presage dependency.*?revision `([0-9a-f]{40})`", policy_text, re.DOTALL
+    )
+    if policy_revision is None or policy_revision.group(1) != revision:
+        fail("dependency policy Presage revision does not match Cargo.toml")
+    licenses_text = (PROJECT_ROOT / THIRD_PARTY_LICENSES).read_text(encoding="utf-8")
+    if f"| `{revision}` (fork base:" not in licenses_text:
+        fail("third-party license Presage revision does not match Cargo.toml")
+
+
+def validate_nix_version_source() -> None:
+    flake_text = (PROJECT_ROOT / NIX_FLAKE).read_text(encoding="utf-8")
+    require_fragments(
+        flake_text,
+        NIX_FLAKE,
+        ["pkgs.lib.removeSuffix", "builtins.readFile ./version.txt"],
+    )
+    if re.search(r'(?m)^\s*version\s*=\s*"[0-9]+\.[0-9]+\.[0-9]+";', flake_text):
+        fail("flake.nix must derive the package version from version.txt")
+    if re.search(
+        r"(?m)^\s*license\s*=\s*\[\s*licenses\.gpl3Plus\s+"
+        r"licenses\.agpl3Only\s*\];\s*$",
+        flake_text,
+    ) is None:
+        fail("flake.nix must declare both the GPL adapter and AGPL backend")
+
+
+def validate_appstream_metadata() -> None:
+    root = ET.parse(PROJECT_ROOT / APPSTREAM_METADATA).getroot()
+    description = " ".join(root.find("description").itertext()).split()
+    description_text = " ".join(description)
+    require_fragments(
+        description_text,
+        APPSTREAM_METADATA,
+        [
+            "independent linked-device Signal protocol plugin",
+            "Published 1.x releases are stable",
+            "Debian 13 and Ubuntu 24.04 LTS scope",
+            "not supported by Signal",
+        ],
+    )
+    developer = root.find("developer")
+    if (
+        developer is None
+        or developer.get("id") != "io.github.adrighem"
+        or developer.findtext("name") != "signal-purple contributors"
+    ):
+        fail(f"{APPSTREAM_METADATA} must identify the project developer")
+    if root.find("developer_name") is not None:
+        fail(f"{APPSTREAM_METADATA} must not use deprecated developer_name")
+
+
 def main() -> None:
     validate_release_config()
     validate_release_workflows()
+    validate_ci_workflow()
     validate_lock_marker()
+    validate_presage_revision()
+    validate_nix_version_source()
+    validate_appstream_metadata()
 
 
 if __name__ == "__main__":

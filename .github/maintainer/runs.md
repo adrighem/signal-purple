@@ -662,3 +662,40 @@ schema.
 - Matched Rust 1.95 formatting and warning-as-error Clippy, all 96 Rust tests,
   release-helper checks, the warning-as-error C build, all six C/Purple tests,
   and the staged install/plugin-load probe pass locally with the new format gate.
+
+## 2026-08-07 - Scoped stable declaration
+
+- Declared the maintained 1.x line stable for the documented Debian 13 and
+  Ubuntu 24.04 LTS packages. Fedora RPM and Nix remain best-effort build
+  outputs, and the feature exclusions and live-validation dates remain explicit.
+- Replaced stale pre-alpha and future-1.0 guidance in active documentation,
+  recorded that v1.1.0 was the first published stable release, aligned
+  Conductor context, and made the release checklist reusable for stable
+  maintenance. Historical records remain unchanged.
+- Changed the event queue from fatal aggregate overflow to bounded producer
+  backpressure with shutdown wakeup. Startup replay now fetches the unprojected
+  set once per connection, admits at most 64 projections concurrently, and
+  applies receive-side backpressure after 64 deferred live messages.
+  Delivery- and read-receipt metadata are deduplicated and capped at 4096;
+  read receipts retry synchronous queue pressure and readiness transitions.
+- Installed all project and third-party license texts in staged packages,
+  aligned the Nix version and dual-license metadata, pinned cache actions by
+  commit, required the FFmpeg path in both supported CI jobs, and verified the
+  recorded Presage revision across dependency documents. Shipped AppStream
+  metadata now carries the same scoped stable declaration and passes both XML
+  and offline AppStream validation.
+- The sanitized full gate passed clang-format 19, Rust formatting,
+  warning-as-error Clippy, all 105 Rust tests including required FFmpeg
+  conversion, release and APT helpers, the warning-as-error C build, all six
+  C/Purple tests, and the staged install/plugin-load probe. A C-only GCC
+  AddressSanitizer/UndefinedBehaviorSanitizer build also passed all six tests
+  with LeakSanitizer disabled for libpurple's process-global registries.
+- Public GitHub inspection found no open issues, pull requests, Dependabot,
+  code-scanning, or secret-scanning alerts. The latest v1.2.0 release is
+  published as the non-prerelease Latest release with its expected assets.
+- Residual limit: Presage still materializes all unprojected rows in one query,
+  so unusually large offline backlogs can raise peak startup memory despite the
+  bounded projection window. No new live Signal 1.x validation was performed.
+  The user approved a direct commit and push to `main`. Release creation remains
+  owned by Release Please; no pull request, tag, release, or public comment is
+  created manually.
