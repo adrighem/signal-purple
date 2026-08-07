@@ -696,6 +696,10 @@ schema.
 - Residual limit: Presage still materializes all unprojected rows in one query,
   so unusually large offline backlogs can raise peak startup memory despite the
   bounded projection window. No new live Signal 1.x validation was performed.
-  The user approved a direct commit and push to `main`. Release creation remains
-  owned by Release Please; no pull request, tag, release, or public comment is
-  created manually.
+- PR #60's first Debian 13 run saw one transient FFmpeg converter-probe failure.
+  The exact command and Rust test both passed in the workflow's pinned Debian
+  image. The probe now retries once, matching production's safe fallback for a
+  transient converter failure while still rejecting persistent incompatibility.
+  The user approved the commit, branch push, and PR #60 after repository rules
+  rejected a direct `main` push as designed. Release creation remains owned by
+  Release Please; no tag, release, or public comment is created manually.

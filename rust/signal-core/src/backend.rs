@@ -5080,7 +5080,14 @@ mod tests {
         assert!(source.status.success());
         assert!(mp4_file_type_box_matches(&source.stdout));
 
-        let gif = transcode_signal_gif_video_blocking(source.stdout)
+        // Production preserves the original MP4 after a transient converter
+        // failure. Retry this environment probe once so only persistent tool
+        // incompatibility fails the platform gate.
+        let gif = transcode_signal_gif_video_blocking(source.stdout.clone())
+            .or_else(|| {
+                std::thread::sleep(Duration::from_millis(100));
+                transcode_signal_gif_video_blocking(source.stdout)
+            })
             .expect("installed FFmpeg did not produce a bounded GIF");
         assert!(bounded_inline_gif(&gif));
         assert!(gif.starts_with(b"GIF89a"));
