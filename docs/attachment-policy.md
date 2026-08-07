@@ -21,7 +21,7 @@ checks the decrypted length again. Missing or understated sender metadata
 therefore cannot turn either limit into an unbounded allocation.
 
 Signal GIF-style conversion additionally runs with a cleared environment,
-pipe-only FFmpeg input and output, one codec thread, a 512 MiB address-space
+pipe-only FFmpeg input and output, one codec thread, a 1 GiB address-space
 limit, a 10-second soft and 12-second hard CPU limit, a 15-second wall limit,
 and 64 file descriptors. Generated GIFs must pass the same structure, byte,
 dimension, frame-area, and aggregate message-presentation budgets as native

@@ -696,11 +696,13 @@ schema.
 - Residual limit: Presage still materializes all unprojected rows in one query,
   so unusually large offline backlogs can raise peak startup memory despite the
   bounded projection window. No new live Signal 1.x validation was performed.
-- PR #60's first two Debian 13 runs failed the FFmpeg converter probe inside the
-  parallel Rust harness, while the exact command and isolated Rust test passed
-  in the workflow's pinned Debian image. The canonical required-FFmpeg gate now
-  runs that resource-limited process probe separately and both supported CI jobs
-  use the canonical gate.
+- PR #60's first three Debian 13 runs failed the FFmpeg converter probe.
+  Fixture-only diagnostics identified `EAGAIN` in FFmpeg 7.1.5's filter graph
+  under the 512 MiB virtual-address cap. The cap is now 1 GiB while the 128 MiB
+  single-allocation, 8 MiB I/O, concurrency, thread, CPU, and descriptor limits
+  remain. Test builds expose converter stderr only when required coverage is
+  enabled; production continues to discard it. Both supported CI jobs use the
+  canonical Rust gate.
   The user approved the commit, branch push, and PR #60 after repository rules
   rejected a direct `main` push as designed. Release creation remains owned by
   Release Please; no tag, release, or public comment is created manually.

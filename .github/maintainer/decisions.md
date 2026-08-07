@@ -245,3 +245,7 @@
   entries each.
 - Record Presage's one-query durable replay allocation as a known dependency
   limitation until its store API supports cursor pagination.
+- Give the optional FFmpeg child a 1 GiB virtual-address cap so Debian 13's
+  filter graph can initialize. Retain the 128 MiB single-allocation cap, 8 MiB
+  input/output bounds, one global process, one codec/filter thread, and CPU and
+  descriptor limits.

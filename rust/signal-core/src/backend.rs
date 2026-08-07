@@ -57,6 +57,7 @@ const SIGNAL_GIF_TRANSCODE_POLL_INTERVAL: Duration = Duration::from_millis(20);
 const SIGNAL_GIF_TRANSCODE_TIMEOUT: Duration = Duration::from_secs(15);
 const SIGNAL_GIF_FFMPEG: &str = "/usr/bin/ffmpeg";
 const SIGNAL_GIF_PRLIMIT: &str = "/usr/bin/prlimit";
+const SIGNAL_GIF_ADDRESS_SPACE_LIMIT: &str = "--as=1073741824:1073741824";
 const GROUP_SYNC_RETRY_SECS: u64 = 30;
 const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
 const RECEIVE_EVENT_QUEUE_CAPACITY: usize = 16;
@@ -3552,7 +3553,7 @@ fn transcode_signal_gif_video_blocking(input: Vec<u8>) -> Option<Vec<u8>> {
     // prlimit execs FFmpeg in the same child, so kill and wait cover both.
     let mut child = std::process::Command::new(SIGNAL_GIF_PRLIMIT)
         .args([
-            "--as=536870912:536870912",
+            SIGNAL_GIF_ADDRESS_SPACE_LIMIT,
             "--cpu=10:12",
             "--nofile=64:64",
             "--",
