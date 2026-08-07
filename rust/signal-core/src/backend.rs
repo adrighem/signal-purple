@@ -3534,6 +3534,14 @@ fn read_transcode_output(mut output: impl Read) -> Option<Vec<u8>> {
     }
 }
 
+fn signal_gif_transcode_stderr() -> std::process::Stdio {
+    #[cfg(test)]
+    if std::env::var_os("SIGNAL_PURPLE_REQUIRE_FFMPEG_TEST").is_some() {
+        return std::process::Stdio::inherit();
+    }
+    std::process::Stdio::null()
+}
+
 fn transcode_signal_gif_video_blocking(input: Vec<u8>) -> Option<Vec<u8>> {
     let _permit = SIGNAL_GIF_TRANSCODE_LOCK.try_lock().ok()?;
     if !Path::new(SIGNAL_GIF_FFMPEG).is_file() || !Path::new(SIGNAL_GIF_PRLIMIT).is_file() {
@@ -3592,7 +3600,7 @@ fn transcode_signal_gif_video_blocking(input: Vec<u8>) -> Option<Vec<u8>> {
         ])
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::null())
+        .stderr(signal_gif_transcode_stderr())
         .env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("LANG", "C")
