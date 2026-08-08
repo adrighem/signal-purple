@@ -722,3 +722,22 @@ schema.
   live tag verification, dispatch identity polling, moving-branch protection,
   and positive and negative regression coverage. The sanitized release gate,
   shell checks, workflow parsing, and live read-only gates passed.
+
+## 2026-08-08 - Post-release maintenance and backlog shaping
+
+- Confirmed zero open pull requests and security alerts, green current-main CI,
+  CodeQL and APT publication, immutable stable tags, private vulnerability
+  reporting, and public Debian 13 and Ubuntu 24.04 package suites containing
+  v1.2.0 and v1.2.1.
+- Enabled repository-level full-SHA enforcement after verifying every external
+  workflow action already used a 40-character commit. Preserved the existing
+  policy allowing all actions.
+- Opened ISSUE:66 for current stable live Signal validation, ISSUE:67 for
+  cursor-paginated durable replay, and contributor-ready ISSUE:68 for literal
+  persisted-identifier coverage.
+- Prepared release-evidence, candidate-tracker, contributor-review, pull-request
+  template, and bug-intake guidance with contract checks in the existing release
+  validator. Rust formatting, warning-as-error Clippy, all 105 Rust tests,
+  release and APT helpers, the warning-as-error C build, all six C/Purple tests,
+  and the staged install probe passed. The pinned C formatter was unavailable
+  locally; no C source changed and CI remains authoritative for that gate.

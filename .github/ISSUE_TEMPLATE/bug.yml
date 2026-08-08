@@ -18,6 +18,12 @@ body:
     validations:
       required: true
   - type: input
+    id: last_working_version
+    attributes:
+      label: Last known working version
+      description: For a regression, give the most recent version or revision where this worked.
+      placeholder: Version or commit, or "Never worked / unknown"
+  - type: input
     id: environment
     attributes:
       label: Environment
@@ -29,11 +35,25 @@ body:
     attributes:
       label: Installation scope
       options:
+        - Debian 13 APT package
+        - Ubuntu 24.04 LTS APT package
         - System-wide source install
         - Per-user source install
         - Isolated Pidgin profile
-        - Debian package
+        - Fedora RPM (best effort)
+        - Nix flake (best effort)
         - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: regression_context
+    attributes:
+      label: Regression context
+      options:
+        - Fresh installation
+        - Upgrade from a working version
+        - Existing installation; same version previously worked
+        - Not installation-related or unknown
     validations:
       required: true
   - type: textarea

@@ -262,3 +262,18 @@
   commit. Keep a no-input manual dispatch as the idempotent repair path.
 - Execute workflow helpers from the commit selected when the protected `main`
   dispatch was created, not from a later moving branch tip.
+
+## 2026-08-08 - Make stable release evidence self-contained
+
+- Use each published GitHub release as the landing page for its final tag and
+  commit, candidate tracker, verified artifacts, supported-package probes, APT
+  state, and explicit Signal compatibility claim or non-claim.
+- Require the candidate tracker to record pass, fail, or not-applicable status
+  for every stable-checklist section. Keep release evidence distinct from
+  revision-specific production-service evidence.
+- Treat a manual APT repair as distribution recovery, not proof that the parent
+  release workflow can dispatch and await its exact child. Keep the next
+  candidate open until both paths succeed in the same release graph.
+- Enforce full-SHA GitHub Action references at repository level. Keep required
+  human approval disabled until a second trusted maintainer can prevent review
+  deadlock.

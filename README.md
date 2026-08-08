@@ -408,8 +408,8 @@ pidgin --config="$HOME/.local/state/signal-purple-pidgin" \
 Debug output can still contain private metadata. Never publish raw logs,
 message text, phone numbers, service identifiers, QR provisioning data, keys,
 or database secrets. Follow the [troubleshooting guide](docs/troubleshooting.md)
-and include the plugin revision, Debian version, Pidgin/libpurple versions,
-build command, and sanitized output in a report.
+and include the plugin revision, distribution and version, Pidgin/libpurple
+versions, build command, and sanitized output in a report.
 
 Use [GitHub issues](https://github.com/adrighem/signal-purple/issues) for
 reproducible bugs and feature proposals, [SUPPORT.md](SUPPORT.md) for support

@@ -30,6 +30,14 @@ upgrade, rollback, relink, and removal guidance lives in the README's
    Debian 13 and Ubuntu 24.04 suites through GitHub Pages. If deployment fails,
    manually dispatch the APT workflow without inputs; it never changes a
    release, tag, or asset.
+10. Keep the candidate tracker open until the parent release run and its exact
+    dispatched APT child both succeed. A manual repair can restore package
+    distribution, but it does not prove the parent dispatch-and-wait path.
+11. Add a concise evidence section to the published GitHub release without
+    changing its generated changelog notes. Link the candidate tracker, final
+    tag and commit, supported-package probes, checksums, SBOM, attestations, APT
+    publication, and live-validation status. State explicitly when the release
+    makes no new Signal service compatibility claim.
 
 The workflow uses a repository-scoped installation token from the private
 Release Please GitHub App. The App has only Contents and Pull requests
@@ -86,10 +94,14 @@ Do not publish a release from a working tree with only compilation evidence.
 ## Candidate validation tracker
 
 Use one issue as the evidence index for each release candidate and link it from
-the release pull request. Record the release pull-request revision, build images
-or environments, Signal client versions and test date, artifact hashes, and
-links to sanitized evidence. Keep the issue open through packaging and
-publication; a release pull request must not close it automatically.
+the release pull request and published GitHub release. Record pass, fail, or
+not-applicable status for every stable-checklist section, plus the release
+pull-request revision, final tag and commit, build environments,
+supported-package probes, checksums, SBOM, attestations, APT publication, and
+either the tested Signal clients and date or an explicit statement that the
+release makes no new Signal service compatibility claim. Keep the issue open
+through packaging and publication; a release pull request must not close it
+automatically.
 
 Evidence counts only for the recorded release pull-request tree. If runtime,
 storage, dependency, or packaging inputs change, update the candidate revision
