@@ -18,7 +18,9 @@ lower per-file or per-message download cap.
 Incoming downloads use Presage's standard attachment API. Signal decides which
 encrypted attachment sizes the service accepts. The plugin rejects empty data
 and download or decryption failures, but does not enforce sender-declared or
-decrypted byte limits of its own.
+decrypted byte limits of its own. Sender-declared plaintext size is cleared
+before download so it cannot drive allocation, then applied only after
+authenticated decryption to remove Signal privacy padding.
 
 Signal GIF-style conversion additionally runs with a cleared environment,
 pipe-only FFmpeg input and output, one codec thread, a 1 GiB address-space

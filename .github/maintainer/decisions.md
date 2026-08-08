@@ -291,3 +291,7 @@
   echoes remain visible. Filtered events are acknowledged without read receipts.
 - Queue direct and group read receipts only from the final projection event, so
   captions and multi-attachment messages read once after final presentation.
+- Follow Signal's network limits for incoming attachment bytes, but never use
+  sender-declared plaintext size for allocation. Clear that hint for Presage's
+  standard download call, then apply it only to remove privacy padding after
+  authenticated decryption.

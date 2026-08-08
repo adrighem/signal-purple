@@ -73,6 +73,8 @@ user-facing local storage, not diagnostic output.
 - Incoming attachment size follows Signal's network policy without a lower
   plugin per-file or per-message cap. Incoming data and unresolved Purple
   receive prompts remain in memory, including temporary handoff copies.
+  Sender-declared plaintext size cannot drive download allocation; it is used
+  only after authenticated decryption to remove Signal privacy padding.
   Outgoing attachments are capped at 25 MiB. The C adapter rejects non-regular
   and known-oversized outgoing files before allocating their contents, rejects
   empty files, and enforces the same limit while reading from the already

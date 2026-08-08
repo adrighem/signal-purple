@@ -3676,6 +3676,24 @@ fn regular_message_attachments(message: &DataMessage) -> &[AttachmentPointer] {
     &message.attachments
 }
 
+fn attachment_pointer_without_sender_size_hint(
+    attachment: &AttachmentPointer,
+) -> AttachmentPointer {
+    // The sender controls this field, and Presage otherwise uses it as the
+    // initial allocation before reading the authenticated network body.
+    let mut download_pointer = attachment.clone();
+    download_pointer.size = None;
+    download_pointer
+}
+
+fn truncate_attachment_to_sender_size(attachment: &AttachmentPointer, data: &mut Vec<u8>) {
+    if let Some(size) = attachment.size.and_then(|size| size.try_into().ok()) {
+        // Preserve Presage's post-decryption privacy-padding behavior without
+        // trusting the sender-provided size for allocation.
+        data.truncate(size);
+    }
+}
+
 fn projected_data_message_text<'a>(
     mut text: String,
     attachments: impl IntoIterator<Item = (Option<&'a str>, bool)>,
@@ -3772,16 +3790,23 @@ async fn emit_data_message(
     let mut downloaded = Vec::new();
     if !outgoing {
         for (attachment_index, attachment) in attachments.iter().enumerate() {
-            match manager.get_attachment(attachment).await {
-                Ok(data) if data.is_empty() => sink.emit(Event::error(
-                    "Could not download a Signal attachment: decrypted attachment was empty",
-                    false,
-                )),
-                Ok(data) => downloaded.push(DownloadedAttachment::new(
-                    attachment_index,
-                    attachment,
-                    data,
-                )),
+            let download_pointer = attachment_pointer_without_sender_size_hint(attachment);
+            match manager.get_attachment(&download_pointer).await {
+                Ok(mut data) => {
+                    truncate_attachment_to_sender_size(attachment, &mut data);
+                    if data.is_empty() {
+                        sink.emit(Event::error(
+                            "Could not download a Signal attachment: decrypted attachment was empty",
+                            false,
+                        ));
+                    } else {
+                        downloaded.push(DownloadedAttachment::new(
+                            attachment_index,
+                            attachment,
+                            data,
+                        ));
+                    }
+                }
                 Err(error) => sink.emit(Event::error(
                     format!("Could not download a Signal attachment: {error}"),
                     false,
@@ -5867,5 +5892,44 @@ mod tests {
                 .as_deref(),
             Some("actual.pdf")
         );
+    }
+
+    #[test]
+    fn sender_attachment_size_truncates_only_after_download() {
+        let attachment = AttachmentPointer {
+            size: Some(3),
+            content_type: Some("application/octet-stream".into()),
+            ..AttachmentPointer::default()
+        };
+        let download_pointer = attachment_pointer_without_sender_size_hint(&attachment);
+        assert_eq!(download_pointer.size, None);
+        assert_eq!(download_pointer.content_type, attachment.content_type);
+
+        let mut padded = vec![1, 2, 3, 4, 5];
+        truncate_attachment_to_sender_size(&attachment, &mut padded);
+        assert_eq!(padded, vec![1, 2, 3]);
+
+        let mut exact = vec![1, 2, 3];
+        truncate_attachment_to_sender_size(&attachment, &mut exact);
+        assert_eq!(exact, vec![1, 2, 3]);
+
+        let larger = AttachmentPointer {
+            size: Some(8),
+            ..AttachmentPointer::default()
+        };
+        let mut shorter = vec![1, 2, 3];
+        truncate_attachment_to_sender_size(&larger, &mut shorter);
+        assert_eq!(shorter, vec![1, 2, 3]);
+
+        let missing = AttachmentPointer::default();
+        truncate_attachment_to_sender_size(&missing, &mut shorter);
+        assert_eq!(shorter, vec![1, 2, 3]);
+
+        let empty = AttachmentPointer {
+            size: Some(0),
+            ..AttachmentPointer::default()
+        };
+        truncate_attachment_to_sender_size(&empty, &mut shorter);
+        assert!(shorter.is_empty());
     }
 }
