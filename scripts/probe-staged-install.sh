@@ -26,9 +26,13 @@ esac
 plugin_directory=$(dirname -- "$plugin")
 backend="$plugin_directory/signal-purple/libsignal_core.so"
 probe="$build_directory/plugin-probe"
+license_directory="$stage/share/licenses/signal-purple"
 test -r "$plugin"
 test -r "$backend"
 test -x "$probe"
+for notice in LICENSE AGPL-3.0-only.txt CC0-1.0.txt THIRD_PARTY_LICENSES.md; do
+    test -s "$license_directory/$notice"
+done
 
 if [ "$(uname -s)" = Linux ]; then
     if ! readelf -d "$backend" | grep -Fq NODELETE; then

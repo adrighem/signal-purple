@@ -12,6 +12,18 @@
 Purple 3 is a different API and is not supported. Primary-device desktop
 registration is not supported.
 
+## Stability contract
+
+Published 1.x releases are stable for the supported baseline and documented
+feature scope. The project follows Semantic Versioning and treats regressions in
+that scope as bugs. Stable status describes signal-purple's maintenance and
+release contract; it does not guarantee uninterrupted compatibility with
+Signal's changing service.
+
+The Debian 13 and Ubuntu 24.04 LTS packages are the supported binary
+distributions. The Fedora RPM release asset and Nix flake are best-effort build
+integrations, not supported runtime baselines.
+
 ## Signal service drift
 
 Signal's specifications are public, but its production service is not a stable

@@ -3,7 +3,7 @@ use std::io::{self, Read, Write};
 use std::os::fd::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Condvar, Mutex, mpsc};
 
 use crate::event::Event;
 
@@ -12,8 +12,11 @@ const MAX_QUEUED_EVENT_BYTES: usize = 64 * 1024 * 1024;
 struct EventQueueState {
     notification_pending: AtomicBool,
     overflowed: AtomicBool,
+    closed: AtomicBool,
     queued_bytes: AtomicUsize,
+    waiting_producers: AtomicUsize,
     serial: Mutex<()>,
+    space_available: Condvar,
     max_queued_bytes: usize,
 }
 
@@ -45,6 +48,12 @@ fn event_queue_with_byte_limit(
     capacity: usize,
     max_queued_bytes: usize,
 ) -> io::Result<(EventSink, EventQueue)> {
+    if capacity == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "event queue capacity must be positive",
+        ));
+    }
     let (sender, receiver) = mpsc::sync_channel(capacity);
     let (notification_reader, notification_writer) = UnixStream::pair()?;
     notification_reader.set_nonblocking(true)?;
@@ -52,8 +61,11 @@ fn event_queue_with_byte_limit(
     let state = Arc::new(EventQueueState {
         notification_pending: AtomicBool::new(false),
         overflowed: AtomicBool::new(false),
+        closed: AtomicBool::new(false),
         queued_bytes: AtomicUsize::new(0),
+        waiting_producers: AtomicUsize::new(0),
         serial: Mutex::new(()),
+        space_available: Condvar::new(),
         max_queued_bytes,
     });
     Ok((
@@ -101,46 +113,73 @@ impl EventSink {
     }
 
     pub(crate) fn emit(&self, event: Event) {
-        if self.state.overflowed.load(Ordering::Acquire) {
-            return;
-        }
         let event_bytes = event.data.len();
-        if event_bytes > 0
-            && self
-                .state
-                .queued_bytes
-                .fetch_update(Ordering::AcqRel, Ordering::Acquire, |queued| {
-                    queued
-                        .checked_add(event_bytes)
-                        .filter(|total| *total <= self.state.max_queued_bytes)
-                })
-                .is_err()
-        {
-            let _notification_guard = self
-                .state
-                .serial
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            self.state.overflowed.store(true, Ordering::Release);
-            self.notify_locked();
-            return;
-        }
-        let _notification_guard = self
+        let mut event = event;
+        let mut guard = self
             .state
             .serial
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match self.sender.try_send(event) {
-            Ok(()) => self.notify_locked(),
-            Err(error) => {
-                if event_bytes > 0 {
-                    self.state
-                        .queued_bytes
-                        .fetch_sub(event_bytes, Ordering::AcqRel);
-                }
-                if matches!(error, mpsc::TrySendError::Full(_)) {
-                    self.state.overflowed.store(true, Ordering::Release);
+
+        if event_bytes > self.state.max_queued_bytes {
+            if self.state.closed.load(Ordering::Acquire) {
+                return;
+            }
+            self.state.overflowed.store(true, Ordering::Release);
+            self.notify_locked();
+            return;
+        }
+
+        loop {
+            if self.state.closed.load(Ordering::Acquire) {
+                return;
+            }
+            let queued_bytes = self.state.queued_bytes.load(Ordering::Acquire);
+            if queued_bytes
+                .checked_add(event_bytes)
+                .is_none_or(|total| total > self.state.max_queued_bytes)
+            {
+                self.state.waiting_producers.fetch_add(1, Ordering::AcqRel);
+                guard = self
+                    .state
+                    .space_available
+                    .wait(guard)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                self.state.waiting_producers.fetch_sub(1, Ordering::AcqRel);
+                continue;
+            }
+            if event_bytes > 0 {
+                self.state
+                    .queued_bytes
+                    .fetch_add(event_bytes, Ordering::AcqRel);
+            }
+            match self.sender.try_send(event) {
+                Ok(()) => {
                     self.notify_locked();
+                    return;
+                }
+                Err(mpsc::TrySendError::Full(returned)) => {
+                    if event_bytes > 0 {
+                        self.state
+                            .queued_bytes
+                            .fetch_sub(event_bytes, Ordering::AcqRel);
+                    }
+                    event = returned;
+                    self.state.waiting_producers.fetch_add(1, Ordering::AcqRel);
+                    guard = self
+                        .state
+                        .space_available
+                        .wait(guard)
+                        .unwrap_or_else(|poisoned| poisoned.into_inner());
+                    self.state.waiting_producers.fetch_sub(1, Ordering::AcqRel);
+                }
+                Err(mpsc::TrySendError::Disconnected(_)) => {
+                    if event_bytes > 0 {
+                        self.state
+                            .queued_bytes
+                            .fetch_sub(event_bytes, Ordering::AcqRel);
+                    }
+                    return;
                 }
             }
         }
@@ -150,6 +189,21 @@ impl EventSink {
 impl EventQueue {
     pub(crate) fn event_fd(&self) -> RawFd {
         self.notification_reader.as_raw_fd()
+    }
+
+    pub(crate) fn close(&self) {
+        let _guard = self
+            .state
+            .serial
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        self.state.closed.store(true, Ordering::Release);
+        self.state.space_available.notify_all();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn waiting_producers(&self) -> usize {
+        self.state.waiting_producers.load(Ordering::Acquire)
     }
 
     pub(crate) fn poll(&self) -> EventPoll {
@@ -172,6 +226,7 @@ impl EventQueue {
                         .queued_bytes
                         .fetch_sub(event.data.len(), Ordering::AcqRel);
                 }
+                self.state.space_available.notify_all();
                 EventPoll::Event(event)
             }
             Err(error) => {
@@ -190,11 +245,19 @@ impl EventQueue {
     }
 }
 
+impl Drop for EventQueue {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::event::{EVENT_GROUP_MESSAGE, EVENT_MESSAGE};
     use std::net::Shutdown;
+    use std::thread;
+    use std::time::Duration;
 
     fn queue(capacity: usize, max_queued_bytes: usize) -> (EventSink, EventQueue) {
         event_queue_with_byte_limit(capacity, max_queued_bytes).unwrap()
@@ -230,8 +293,19 @@ mod tests {
         );
     }
 
+    fn assert_producer_waiting(queue: &EventQueue) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(1);
+        while queue.waiting_producers() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "producer did not enter event-queue backpressure"
+            );
+            thread::yield_now();
+        }
+    }
+
     #[test]
-    fn reports_count_overflow_without_growing_the_queue() {
+    fn applies_count_backpressure_without_losing_events() {
         let (sink, queue) = queue(1, 16);
 
         sink.emit(Event {
@@ -239,34 +313,36 @@ mod tests {
             data: vec![0; 4],
             ..Event::default()
         });
-        sink.emit(Event {
-            kind: EVENT_GROUP_MESSAGE,
-            data: vec![0; 4],
-            ..Event::default()
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let blocked_sink = sink.clone();
+        let producer = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            blocked_sink.emit(Event {
+                kind: EVENT_GROUP_MESSAGE,
+                data: vec![0; 4],
+                ..Event::default()
+            });
+            finished_tx.send(()).unwrap();
         });
-        sink.emit(Event::default());
 
-        assert_notification_readable(&queue, &sink);
-        assert!(matches!(queue.poll(), EventPoll::Overflow));
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_producer_waiting(&queue);
+        assert!(matches!(
+            finished_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
         assert_notification_readable(&queue, &sink);
         assert_eq!(queue.state.queued_bytes.load(Ordering::Acquire), 4);
         assert_event(queue.poll(), EVENT_MESSAGE);
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
         assert_notification_readable(&queue, &sink);
-        assert!(matches!(queue.poll(), EventPoll::Empty));
-        assert_notification_empty(&queue);
-        assert_eq!(queue.state.queued_bytes.load(Ordering::Acquire), 0);
-
-        sink.emit(Event {
-            kind: EVENT_MESSAGE,
-            data: vec![0; 4],
-            ..Event::default()
-        });
-        assert_notification_readable(&queue, &sink);
-        assert_event(queue.poll(), EVENT_MESSAGE);
+        assert_event(queue.poll(), EVENT_GROUP_MESSAGE);
+        producer.join().unwrap();
     }
 
     #[test]
-    fn bounds_binary_events_with_a_small_test_budget() {
+    fn applies_byte_backpressure_without_losing_events() {
         let (sink, queue) = queue(4, 8);
 
         sink.emit(Event {
@@ -274,16 +350,31 @@ mod tests {
             data: vec![0; 8],
             ..Event::default()
         });
-        sink.emit(Event {
-            kind: EVENT_MESSAGE,
-            data: vec![0],
-            ..Event::default()
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let producer = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            sink.emit(Event {
+                kind: EVENT_GROUP_MESSAGE,
+                data: vec![0],
+                ..Event::default()
+            });
+            finished_tx.send(()).unwrap();
         });
 
-        assert!(matches!(queue.poll(), EventPoll::Overflow));
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_producer_waiting(&queue);
+        assert!(matches!(
+            finished_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
         assert_eq!(assert_event(queue.poll(), EVENT_MESSAGE).data.len(), 8);
-        assert!(matches!(queue.poll(), EventPoll::Empty));
-        assert_eq!(queue.state.queued_bytes.load(Ordering::Acquire), 0);
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            assert_event(queue.poll(), EVENT_GROUP_MESSAGE).data.len(),
+            1
+        );
+        producer.join().unwrap();
     }
 
     #[test]
@@ -298,6 +389,38 @@ mod tests {
 
         assert!(matches!(queue.poll(), EventPoll::Overflow));
         assert!(matches!(queue.poll(), EventPoll::Empty));
+    }
+
+    #[test]
+    fn close_unblocks_a_backpressured_producer() {
+        let (sink, queue) = queue(1, 8);
+        sink.emit(Event {
+            kind: EVENT_MESSAGE,
+            ..Event::default()
+        });
+        let blocked_sink = sink.clone();
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let producer = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            blocked_sink.emit(Event {
+                kind: EVENT_GROUP_MESSAGE,
+                ..Event::default()
+            });
+            finished_tx.send(()).unwrap();
+        });
+
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_producer_waiting(&queue);
+        assert!(matches!(
+            finished_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        queue.close();
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_event(queue.poll(), EVENT_MESSAGE);
+        assert!(matches!(queue.poll(), EventPoll::Empty));
+        producer.join().unwrap();
     }
 
     #[test]

@@ -32,9 +32,10 @@ drift which separate C-only and Rust-only assertions cannot detect.
 
 - C strings passed into a command are validated and copied before return.
 - Rust owns all event strings and blobs until `signal_event_free`.
-- The event queue is bounded at 4096 entries. Overflow produces a fatal event
-  and requires reconnecting so data is resynchronized instead of silently
-  dropping an arbitrary message.
+- The event queue is bounded at 4096 entries and 64 MiB. Count and aggregate-byte
+  pressure apply producer backpressure; shutdown explicitly wakes a blocked
+  producer. A single event larger than the byte budget produces a fatal event
+  and reconnects rather than silently dropping an arbitrary message.
 - Ordinary outbound work uses a bounded command queue. Display acknowledgements
   use a separate coalescing inbox whose registered IDs are bounded by pending
   projections, so queue pressure cannot lose durable UI acceptance. Attachment
@@ -114,6 +115,11 @@ drift which separate C-only and Rust-only assertions cannot detect.
    refreshed snapshot when the primary device responds. If group refresh fails,
    the account still connects for direct messaging, but group operations stay
    unavailable while an in-session retry runs on a bounded interval.
+9. The durable unprojected-message set is loaded once after the initial queue
+   drain. The ready actor replays it through at most 64 acknowledgement-pending
+   projections, interleaving acknowledgements and control work instead of
+   emitting an unbounded startup burst. Receive-side backpressure also caps
+   live messages deferred while group authority is unavailable at 64.
 
 This ordering prevents sends before queued profile, session, and sender-key
 updates have been applied. The queue contains envelopes addressed to this
@@ -153,13 +159,20 @@ direct messaging remains available.
 - Incoming text is markup-escaped. Outgoing Purple markup is stripped.
 - Own-device `SynchronizeMessage` values render as outgoing messages.
 - Delivery receipts are queued when Presage marks an envelope as needing one.
+  The deduplicated process-memory queue holds at most 4096 exact message
+  timestamps; overload drops excess receipt metadata with one transient warning
+  per saturation episode rather than growing without bound.
   Transient websocket-close failures enter the normal connection recovery path
   without a user notification, then retry the same logical receipt and allocated
   send timestamp after the replacement stream is ready. Permanent failures are
   reported and discarded.
 - Read receipts are held until Purple reports that the direct or group
-  conversation is focused. Background delivery and notification rendering do
-  not mark a message read.
+  conversation is focused. Exact `(recipient, group, timestamp)` entries are
+  deduplicated and capped at 4096. Command-queue pressure is retried by one owned
+  GLib timer, backend readiness retries on `READY`, and teardown cancels the
+  timer. Background delivery and notification rendering do not mark a message
+  read. Once admitted to the backend, a read receipt is best-effort: an
+  asynchronous send failure is reported but not durably replayed.
 - Direct and group sends are written to an encrypted outbox before network
   submission. Failed entries retain their original Signal timestamp and retry
   with bounded exponential backoff across reconnects. Accepting a verified
@@ -291,8 +304,8 @@ presence API, synchronized contacts are marked reachable while the account is
 connected. Contact names and synchronized phone numbers are used as aliases;
 when an observed contact has no synchronized name, a cached or freshly fetched
 Signal profile name is used without overwriting an address-book name. Proactive
-profile enrichment for untouched contacts and group-only members is not
-implemented yet.
+profile enrichment for untouched contacts and group-only members is outside the
+current supported scope.
 The registered account's own Signal profile name is retrieved as a fallback
 for group participant display when no local Purple account alias is set. For
 groups, signal-purple's pinned Presage fork adds authoritative Storage Service
@@ -302,7 +315,7 @@ only active memberships.
 
 ## Deliberate boundaries
 
-The first version does not implement in-plugin safety-number comparison,
+The supported scope does not include in-plugin safety-number comparison,
 primary registration, contact discovery, calls, or official backup
 compatibility. It also does not project disappearing timers or remote deletion
 into Purple.

@@ -4,23 +4,23 @@ This is the maintainer release and publication procedure. User-facing install,
 upgrade, rollback, relink, and removal guidance lives in the README's
 [installation lifecycle](../README.md#installation-lifecycle).
 
-1. Confirm the roadmap scope and identify the applicable release-checklist
-   gates.
+1. Confirm the supported scope and identify the applicable stable-release
+   requirements.
 2. Land every intended runtime, storage, dependency, packaging, CI, and release
    hardening change before freezing the candidate.
 3. Open one candidate-validation issue to record the environment, evidence,
    and blockers. Leave its candidate revision pending at this stage.
 4. Let release-please create or update the version and changelog pull request.
 5. Review every dependency and generated-file change, then merge the release
-   pull request only after every applicable release gate and its checks pass.
+   pull request only after every applicable release requirement passes.
    Merging this pull request is the release approval.
 6. Release Please creates the canonical `vMAJOR.MINOR.PATCH` tag and a draft
    GitHub release for the merged `main` commit.
 7. In the same workflow graph, the artifact pipeline verifies the Release
    Please tag, commit, version, and manifest. It then reproduces the source
-   archive, Debian 13 and Ubuntu 24.04 LTS packages, and Fedora RPM package
-   twice, installs and probes both distro packages, creates the SBOM and
-   checksums, and attests their provenance.
+   archive, Debian 13 and Ubuntu 24.04 LTS packages, and best-effort Fedora RPM
+   package twice, installs and probes both supported distro packages, creates
+   the SBOM and checksums, and attests their provenance.
 8. The final artifact job uploads the verified assets and publishes the draft
    as a stable GitHub release marked `Latest`. A failed artifact build deletes
    only the still-private draft and its matching tag.
@@ -71,13 +71,11 @@ Do not publish a release from a working tree with only compilation evidence.
 
 ## Candidate validation tracker
 
-Use one issue as the evidence index for each release candidate. The 0.2.0
-pre-release candidate is tracked in
-[issue #5](https://github.com/adrighem/signal-purple/issues/5).
-Record the release pull-request revision, Debian image or environment, official
-Signal client versions and test date, artifact hashes, and links to sanitized
-evidence. Keep the issue open through packaging and publication; a release
-pull request must not close it automatically.
+Use one issue as the evidence index for each release candidate and link it from
+the release pull request. Record the release pull-request revision, build images
+or environments, Signal client versions and test date, artifact hashes, and
+links to sanitized evidence. Keep the issue open through packaging and
+publication; a release pull request must not close it automatically.
 
 Evidence counts only for the recorded release pull-request tree. If runtime,
 storage, dependency, or packaging inputs change, update the candidate revision

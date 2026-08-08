@@ -62,8 +62,8 @@ Before requesting review, run the complete local gate:
 scripts/check.sh full
 ```
 
-The Debian 13 CI job remains the authoritative clean-platform build and install
-probe. Document any check that cannot run locally and why.
+The Debian 13 and Ubuntu 24.04 LTS CI jobs are the authoritative clean-platform
+build and install probes. Document any check that cannot run locally and why.
 
 Do not use real account identifiers, message text, provisioning URIs, or key
 material in tests, fixtures, logs, issues, or pull requests.

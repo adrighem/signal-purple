@@ -9,12 +9,16 @@
   <project_license>GPL-3.0-or-later AND AGPL-3.0-only</project_license>
   <description>
     <p>
-      An unofficial linked-device Signal protocol plugin for Pidgin and other
-      libpurple 2 clients. The bundled backend also carries AGPL-3.0-only
-      obligations; see the project licensing documentation.
+      An independent linked-device Signal protocol plugin for Pidgin and other
+      libpurple 2 clients. Published 1.x releases are stable for the documented
+      Debian 13 and Ubuntu 24.04 LTS scope. The project is not supported by
+      Signal. The bundled backend also carries AGPL-3.0-only obligations; see
+      the project licensing documentation.
     </p>
   </description>
   <url type="homepage">https://github.com/adrighem/signal-purple</url>
   <url type="bugtracker">https://github.com/adrighem/signal-purple/issues</url>
-  <developer_name>signal-purple contributors</developer_name>
+  <developer id="io.github.adrighem">
+    <name>signal-purple contributors</name>
+  </developer>
 </component>

@@ -27,6 +27,6 @@ Package: signal-purple
 Architecture: amd64
 Depends: ${misc:Depends}, ${shlibs:Depends}
 Recommends: ffmpeg, pidgin, util-linux
-Description: experimental Signal protocol plugin for libpurple 2
+Description: Signal linked-device protocol plugin for libpurple 2
  signal-purple links an existing Signal account as an additional device and
  exposes messaging through libpurple 2 clients such as Pidgin.

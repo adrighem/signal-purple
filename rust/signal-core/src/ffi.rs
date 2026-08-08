@@ -736,7 +736,7 @@ pub unsafe extern "C" fn signal_core_poll_event(
         match core.events.poll() {
             EventPoll::Overflow => {
                 let overflow = Event::error(
-                    "Signal event queue overflowed; reconnect to resynchronize messages",
+                    "A Signal event exceeded the event queue byte limit; reconnect to resynchronize messages",
                     true,
                 );
                 // SAFETY: checked above; event ownership transfers to C.
@@ -785,6 +785,7 @@ pub unsafe extern "C" fn signal_core_shutdown(core: *mut SignalCore) {
     let core = unsafe { &*core };
     core.ready.store(false, Ordering::Release);
     core.attachments.cancel_all();
+    core.events.close();
     let _ = core.shutdown.send(true);
     let join = match core.join.lock() {
         Ok(mut guard) => guard.take(),
@@ -964,7 +965,7 @@ mod tests {
     }
 
     #[test]
-    fn overflow_event_does_not_consume_a_real_event_notification() {
+    fn event_backpressure_preserves_order_without_synthesizing_overflow() {
         let (mut core, sink) = event_test_core(1);
         enqueue_test_event(
             &sink,
@@ -974,24 +975,28 @@ mod tests {
                 ..Event::default()
             },
         );
-        enqueue_test_event(
-            &sink,
-            Event {
-                kind: crate::event::EVENT_MESSAGE,
-                request_id: 8,
-                ..Event::default()
-            },
-        );
+        let producer_sink = sink.clone();
+        let producer = std::thread::spawn(move || {
+            enqueue_test_event(
+                &producer_sink,
+                Event {
+                    kind: crate::event::EVENT_MESSAGE,
+                    request_id: 8,
+                    ..Event::default()
+                },
+            );
+        });
 
         let mut event = std::ptr::null_mut();
         // SAFETY: the core and output pointer remain live for each call.
         assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 1);
-        assert_eq!(unsafe { (*event).kind }, crate::event::EVENT_ERROR);
+        assert_eq!(unsafe { (*event).request_id }, 7);
         // SAFETY: this test uniquely owns the returned event.
         unsafe { signal_event_free(event) };
+        producer.join().unwrap();
         // SAFETY: the core and output pointer remain live for each call.
         assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 1);
-        assert_eq!(unsafe { (*event).request_id }, 7);
+        assert_eq!(unsafe { (*event).request_id }, 8);
         // SAFETY: this test uniquely owns the returned event.
         unsafe { signal_event_free(event) };
         // SAFETY: the core and output pointer remain live for each call.
@@ -1382,6 +1387,58 @@ mod tests {
         unsafe { signal_core_shutdown(core) };
         assert!(stopped.load(Ordering::Acquire));
         assert!(attachment.is_cancelled());
+        // SAFETY: shutdown is idempotent and this test uniquely owns `core`.
+        unsafe { signal_core_free(core) };
+    }
+
+    #[test]
+    fn shutdown_unblocks_a_worker_waiting_for_event_capacity() {
+        let (commands, _command_receiver) = tokio_mpsc::channel(1);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let (sink, events) = event_queue(1).unwrap();
+        sink.emit(Event::default());
+        let blocked_sink = sink.clone();
+        let (started_tx, started_rx) = std::sync::mpsc::channel();
+        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let worker_stopped = Arc::clone(&stopped);
+        let join = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            blocked_sink.emit(Event::default());
+            worker_stopped.store(true, Ordering::Release);
+            finished_tx.send(()).unwrap();
+        });
+        started_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+        while events.waiting_producers() == 0 {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "worker did not enter event-queue backpressure"
+            );
+            std::thread::yield_now();
+        }
+        assert!(matches!(
+            finished_rx.try_recv(),
+            Err(std::sync::mpsc::TryRecvError::Empty)
+        ));
+        let core = Box::into_raw(Box::new(SignalCore {
+            commands,
+            acknowledgments: AcknowledgmentInbox::new(),
+            shutdown,
+            events,
+            ready: Arc::new(AtomicBool::new(true)),
+            attachments: AttachmentAdmission::new(),
+            join: Mutex::new(Some(join)),
+        }));
+
+        // SAFETY: this test uniquely owns the core allocation until free.
+        unsafe { signal_core_shutdown(core) };
+        finished_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .unwrap();
+        assert!(stopped.load(Ordering::Acquire));
         // SAFETY: shutdown is idempotent and this test uniquely owns `core`.
         unsafe { signal_core_free(core) };
     }

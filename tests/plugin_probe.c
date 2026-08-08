@@ -157,6 +157,41 @@ typedef struct {
     char *message;
 } FakeGroupSender;
 
+typedef struct {
+    SignalStatus status;
+    guint calls;
+    guint64 request_id;
+    guint64 timestamp;
+    char *recipient;
+} FakeReadMarker;
+
+static gboolean read_conversation_focused;
+
+static gboolean
+read_has_focus(PurpleConversation *conversation)
+{
+    (void)conversation;
+    return read_conversation_focused;
+}
+
+static PurpleConversationUiOps read_conversation_ops = {
+    .has_focus = read_has_focus,
+};
+
+static SignalStatus
+fake_mark_read(SignalCore *core, uint64_t request_id, const char *recipient,
+               uint64_t timestamp)
+{
+    FakeReadMarker *marker = (FakeReadMarker *)core;
+
+    marker->calls++;
+    marker->request_id = request_id;
+    marker->timestamp = timestamp;
+    g_free(marker->recipient);
+    marker->recipient = g_strdup(recipient);
+    return marker->status;
+}
+
 static guint group_echo_writes;
 static PurpleConversation *group_echo_conversation;
 static char *group_echo_who;
@@ -1234,6 +1269,166 @@ test_standard_conversation_logging(PurplePlugin *plugin,
 }
 
 static void
+test_pending_read_receipt_admission(PurplePlugin *plugin,
+                                    PurplePluginProtocolInfo *protocol)
+{
+    union {
+        gpointer pointer;
+        SignalDispatchEventFunc function;
+    } dispatch_event = { 0 };
+    PurpleAccount *account =
+        purple_account_new("pending-read-admission", SIGNAL_PLUGIN_ID);
+    PurpleConnection gc = {
+        .prpl = plugin,
+        .state = PURPLE_CONNECTED,
+        .account = account,
+    };
+    FakeReadMarker marker = {
+        .status = SIGNAL_STATUS_OK,
+    };
+    SignalConnection *connection;
+    PurpleConversation *conversation;
+    SignalEvent message = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_MESSAGE,
+        .peer_id = "aci:pending-read-contact",
+        .text = "pending read probe",
+        .timestamp_ms = 100,
+    };
+    SignalEvent ready = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_READY,
+    };
+    gboolean accepted = FALSE;
+    guint retry_source;
+
+    g_assert_true(g_module_symbol((GModule *)plugin->handle,
+                                  "signal_dispatch_event",
+                                  &dispatch_event.pointer));
+    purple_account_set_connection(account, &gc);
+    connection = new_transfer_connection(&gc);
+    connection->core = (SignalCore *)&marker;
+    connection->mark_read = fake_mark_read;
+
+    read_conversation_focused = FALSE;
+    g_assert_true(dispatch_event.function(connection, &message, &accepted));
+    g_assert_true(accepted);
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 1);
+    g_assert_cmpuint(marker.calls, ==, 0);
+    g_assert_true(dispatch_event.function(connection, &message, &accepted));
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 1);
+
+    conversation = purple_find_conversation_with_account(
+        PURPLE_CONV_TYPE_IM, message.peer_id, account);
+    g_assert_nonnull(conversation);
+    purple_conversation_set_ui_ops(conversation, &read_conversation_ops);
+    read_conversation_focused = TRUE;
+    marker.status = SIGNAL_STATUS_QUEUE_FULL;
+    message.timestamp_ms = 101;
+    g_assert_true(dispatch_event.function(connection, &message, &accepted));
+    g_assert_cmpuint(marker.calls, ==, 1);
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 2);
+    g_assert_cmpuint(connection->pending_read_retry_id, !=, 0);
+
+    marker.status = SIGNAL_STATUS_OK;
+    gint64 deadline = g_get_monotonic_time() + G_TIME_SPAN_SECOND;
+    while (g_hash_table_size(connection->pending_reads) != 0 &&
+           g_get_monotonic_time() < deadline)
+        g_main_context_iteration(NULL, FALSE);
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 0);
+    g_assert_cmpuint(marker.calls, ==, 3);
+    g_assert_cmpuint(connection->pending_read_retry_id, ==, 0);
+
+    marker.status = SIGNAL_STATUS_NOT_READY;
+    message.timestamp_ms = 102;
+    g_assert_true(dispatch_event.function(connection, &message, &accepted));
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 1);
+    g_assert_cmpuint(connection->pending_read_retry_id, ==, 0);
+    guint calls_before_ready = marker.calls;
+    marker.status = SIGNAL_STATUS_OK;
+    g_assert_true(dispatch_event.function(connection, &ready, &accepted));
+    g_assert_cmpuint(marker.calls, ==, calls_before_ready + 1);
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 0);
+
+    read_conversation_focused = FALSE;
+    message.timestamp_ms = 103;
+    g_assert_true(dispatch_event.function(connection, &message, &accepted));
+    guint calls_before_unfocused_ready = marker.calls;
+    g_assert_true(dispatch_event.function(connection, &ready, &accepted));
+    g_assert_cmpuint(marker.calls, ==, calls_before_unfocused_ready);
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 1);
+
+    read_conversation_focused = TRUE;
+    marker.status = SIGNAL_STATUS_QUEUE_FULL;
+    message.timestamp_ms = 104;
+    g_assert_true(dispatch_event.function(connection, &message, &accepted));
+    retry_source = connection->pending_read_retry_id;
+    g_assert_cmpuint(retry_source, !=, 0);
+    connection->core = NULL;
+    protocol->close(&gc);
+    g_assert_null(g_main_context_find_source_by_id(NULL, retry_source));
+
+    purple_conversation_set_ui_ops(conversation, NULL);
+    purple_conversation_destroy(conversation);
+    purple_account_set_connection(account, NULL);
+    purple_account_destroy(account);
+    g_clear_pointer(&marker.recipient, g_free);
+    read_conversation_focused = FALSE;
+}
+
+static void
+test_pending_read_receipt_limit(PurplePlugin *plugin,
+                                PurplePluginProtocolInfo *protocol)
+{
+    union {
+        gpointer pointer;
+        SignalDispatchEventFunc function;
+    } dispatch_event = { 0 };
+    PurpleAccount *account =
+        purple_account_new("pending-read-limit", SIGNAL_PLUGIN_ID);
+    PurpleConnection gc = {
+        .prpl = plugin,
+        .state = PURPLE_CONNECTED,
+        .account = account,
+    };
+    SignalConnection *connection;
+    PurpleConversation *conversation;
+    SignalEvent message = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_MESSAGE,
+        .peer_id = "aci:pending-read-limit-contact",
+        .text = "pending read limit probe",
+    };
+    gboolean accepted = FALSE;
+
+    g_assert_true(g_module_symbol((GModule *)plugin->handle,
+                                  "signal_dispatch_event",
+                                  &dispatch_event.pointer));
+    purple_account_set_connection(account, &gc);
+    connection = new_transfer_connection(&gc);
+    read_conversation_focused = FALSE;
+
+    for (guint64 timestamp = 1; timestamp <= 5000; timestamp++) {
+        message.timestamp_ms = timestamp;
+        g_assert_true(dispatch_event.function(connection, &message, &accepted));
+        g_assert_true(accepted);
+    }
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 4096);
+    g_assert_true(connection->pending_read_limit_warned);
+
+    conversation = purple_find_conversation_with_account(
+        PURPLE_CONV_TYPE_IM, message.peer_id, account);
+    g_assert_nonnull(conversation);
+    purple_conversation_destroy(conversation);
+    protocol->close(&gc);
+    purple_account_set_connection(account, NULL);
+    purple_account_destroy(account);
+}
+
+static void
 test_pending_transfer_disconnect(PurplePluginProtocolInfo *protocol,
                                  const char *user_dir)
 {
@@ -1538,6 +1733,8 @@ main(int argc, char **argv)
     g_assert_nonnull(protocol->get_cb_alias);
     test_connection_owned_resource_cleanup(protocol);
     test_standard_conversation_logging(plugin, protocol);
+    test_pending_read_receipt_admission(plugin, protocol);
+    test_pending_read_receipt_limit(plugin, protocol);
     test_pending_transfer_disconnect(protocol, user_dir);
     test_synchronous_start_failure(protocol, user_dir);
     test_started_transfer_disconnect(protocol);

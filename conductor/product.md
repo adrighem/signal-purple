@@ -8,9 +8,16 @@ an owned Rust ABI.
 
 ## Target Users
 
-- Debian 13 users who need Signal messaging inside Pidgin.
+- Debian 13 and Ubuntu 24.04 LTS users who need Signal messaging inside Pidgin.
 - Maintainers who need explicit ownership, recovery, and compatibility
   boundaries around an unsupported third-party Signal stack.
+
+## Product Status
+
+- Published 1.x releases are stable within the documented environment and
+  feature scope.
+- Stable status is a maintenance and versioning contract, not a claim of Signal
+  endorsement, full feature parity, or permanent service compatibility.
 
 ## Goals
 

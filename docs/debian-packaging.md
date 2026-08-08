@@ -130,5 +130,6 @@ and the native libraries linked by the bundled SQLCipher backend. Use
 `dpkg-shlibdeps` on both installed shared libraries rather than maintaining that
 list manually.
 
-The reproducibility evidence and artifact hashes for the current audited run
-are recorded in [live-validation.md](live-validation.md).
+Historical local reproducibility evidence and artifact hashes are recorded in
+[live-validation.md](live-validation.md). Each current stable release also
+publishes GitHub artifact attestations and SHA-256 digests for its exact assets.

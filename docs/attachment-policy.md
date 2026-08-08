@@ -8,7 +8,7 @@ different ownership stages independently and may change without a C ABI bump.
 | Incoming or outgoing file | 25 MiB per file | Rust core and C adapter | Reject the file |
 | Decrypted incoming files | 50 MiB per Signal message | Rust backend | Reject remaining attachments |
 | Admitted outgoing files | 2 files and 50 MiB total per account | Rust core | Retryable queue-full result |
-| Queued binary events | 64 MiB | Rust event queue | Visible overflow and reconnect |
+| Queued binary events | 64 MiB aggregate | Rust event queue | Producer backpressure; a larger single event fails visibly and reconnects |
 | Unresolved receive prompts | 64 MiB | C adapter | Ask the user to resolve existing prompts |
 | Inline group JPEG/PNG | 8192 pixels per edge and 16 megapixels | C image decoder | Fall back to a file prompt |
 | Inline group GIF | 8 MiB and 8 million cumulative canvas pixel-frames | C GIF parser and image decoder | Fall back to a file prompt |
@@ -21,7 +21,7 @@ checks the decrypted length again. Missing or understated sender metadata
 therefore cannot turn either limit into an unbounded allocation.
 
 Signal GIF-style conversion additionally runs with a cleared environment,
-pipe-only FFmpeg input and output, one codec thread, a 512 MiB address-space
+pipe-only FFmpeg input and output, one codec thread, a 1 GiB address-space
 limit, a 10-second soft and 12-second hard CPU limit, a 15-second wall limit,
 and 64 file descriptors. Generated GIFs must pass the same structure, byte,
 dimension, frame-area, and aggregate message-presentation budgets as native

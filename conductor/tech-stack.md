@@ -25,7 +25,7 @@
 
 ## Constraints and Decisions
 
-- Debian 13 and Rust 1.95.0 are the supported build baseline.
+- Debian 13, Ubuntu 24.04 LTS, and Rust 1.95.0 are the tested build baseline.
 - Purple calls remain on the GLib main thread.
 - Presage work remains on the Rust backend actor.
 - The C/Rust boundary uses owned values and opaque handles only.

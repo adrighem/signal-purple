@@ -74,10 +74,10 @@ compiled into the export-dynamic probe executable cannot preempt the loaded
 module's own implementations, and every direct probe invocation has a hard
 timeout. The Rust tests cover ABI values and owned payloads, FFI error outputs,
 acknowledgement and cancellation pressure, timestamp allocation, bounded
-shutdown, credential lifetime, event overflow, QR PNG generation, group-key
-validation, group-image projection, and optional bounded Signal GIF-style
-conversion. The staged-install probe also verifies the Linux backend's ELF
-`NODELETE` contract.
+shutdown, credential lifetime, event backpressure and oversize handling, QR PNG
+generation, group-key validation, group-image projection, and optional bounded
+Signal GIF-style conversion. The staged-install probe also verifies the Linux
+backend's ELF `NODELETE` contract.
 Live compatibility tests require dedicated non-production Signal accounts and
 are not run for untrusted pull requests.
 

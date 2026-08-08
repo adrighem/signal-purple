@@ -1,18 +1,16 @@
-# 1.0 release checklist
+# Stable release checklist
 
-This checklist is the release contract. A box is complete only when its result
-is linked from the release issue or release pull request. Candidate-specific
-evidence for the 0.2.0 pre-release belongs in
-[validation tracker #5](https://github.com/adrighem/signal-purple/issues/5).
+This document defines requirements for every stable release. One candidate
+issue records pass, fail, or not-applicable status and links evidence for each
+requirement. This file states the contract; it does not claim that a particular
+candidate passed. Historical evidence and known gaps remain in
+[live-validation.md](live-validation.md).
+
 The candidate is the reviewed release pull-request tree. Merging that pull
-request is the release approval: Release Please tags the resulting `main`
-commit, creates a draft, and publishes only after the automated artifact gates
-pass.
-
-For the explicitly labelled 0.2.0 pre-alpha, the release owner waived
-exact-candidate live interoperability, network recovery, idle/diagnostic, and
-soak evidence because dedicated non-production accounts were unavailable.
-Those boxes remain unchecked and are known limitations, not test passes.
+request is release approval: Release Please tags the resulting `main` commit,
+creates a draft, and publishes it only after the automated artifact gates pass.
+Stable status covers the supported project scope. It does not turn an untested
+Signal service scenario into a compatibility claim.
 
 ## Supported scope
 
@@ -33,59 +31,59 @@ Those boxes remain unchecked and are known limitations, not test passes.
 
 ## Build and supply chain
 
-- [x] Release inputs are pinned and available without mutable Git references.
-- [x] Primary CI passes formatting, warnings, tests, and ABI/module-load checks.
-- [x] The candidate passes the clean Debian 13 build, test, and staged-install
-  job.
-- [ ] The candidate passes the clean Ubuntu 24.04 build, test, and
-  staged-install job, then both release packages pass their matching distro
-  probe.
-- [x] The candidate's vendored source archive produces installable Debian 13
-  and Fedora RPM packages twice with identical contents.
-- [ ] The candidate's vendored source archive produces installable Ubuntu
-  24.04 LTS packages twice with identical contents.
-- [ ] The source archive, dual-distribution packages, checksums, SBOM, and
-  provenance attestation agree.
-- [x] No known unresolved release-blocking vulnerability remains.
+- Release inputs and executable workflow actions are pinned or otherwise
+  covered by an explicit trust decision.
+- Primary CI passes formatting, warnings, tests, cross-language ABI checks, and
+  the staged module-load probe.
+- Clean Debian 13 and Ubuntu 24.04 LTS jobs build, test, install, and probe the
+  candidate.
+- The vendored source archive produces the supported distro packages and the
+  best-effort Fedora RPM twice with identical contents.
+- Source archive, packages, checksums, SBOM, and provenance attestations agree.
+- No known unresolved release-blocking vulnerability remains.
+- Every product-version consumer agrees with `version.txt` or derives from it.
 
 ## Interoperability
 
-- [ ] Direct messages work both ways with supported Signal clients.
-- [ ] Messages sent while signal-purple is offline arrive exactly once.
-- [ ] Contact add, update, remove, and restart synchronization work.
-- [ ] Group discovery, creation, membership changes, deduplication, and messages
-  work across reconnects.
-- [ ] Typing, delivery, read, failure, and retry states are accurate.
-- [ ] Identity replacement blocks safely, warns, and resumes after acceptance.
-- [ ] Attachment success, cancellation, rejection, and corruption are tested.
+- Review changes since the previous stable release against the complete matrix
+  in [compatibility.md](compatibility.md).
+- Run affected live scenarios for protocol, storage, and Signal-stack changes
+  with dedicated non-production accounts.
+- Record the tested Signal clients, date, candidate revision, results, and every
+  untested scenario without sensitive account or message data.
+- Keep deterministic coverage for direct messages, offline replay, contact and
+  group synchronization, typing and receipts, identity replacement, and bounded
+  attachments.
+- Do not claim compatibility for a service/client scenario without
+  revision-specific evidence.
 
 ## Resilience and safety
 
-- [ ] Network loss, reconnect, rate limits, and remote protocol errors recover.
-- [x] Corrupt state, unavailable key storage, and full disk fail safely.
-- [ ] An idle connected account has no recurring backend poll wakeups or hot
-  Pidgin/`signal-purple-core` thread.
-- [ ] Sensitive values never appear in logs, crashes, or generated diagnostics.
-- [x] ABI inputs have focused malformed-input coverage.
-- [x] The candidate C adapter passes AddressSanitizer and
-  UndefinedBehaviorSanitizer.
-- [ ] Upgrade and rollback procedures preserve or explicitly migrate state.
-- [ ] The release candidate completes its soak with no unresolved regression.
+- Exercise recovery paths affected by the candidate, including network loss,
+  reconnects, storage faults, queue pressure, and remote protocol errors.
+- Confirm corrupt state, unavailable key storage, and full disk fail safely.
+- Confirm idle operation has no recurring backend poll wakeups or hot
+  Pidgin/`signal-purple-core` thread when scheduling changes.
+- Review diagnostics for credentials, message content, and private identifiers.
+- Keep focused malformed-input coverage at the C/Rust ABI.
+- Run AddressSanitizer and UndefinedBehaviorSanitizer for affected C ownership
+  and lifecycle changes.
+- Exercise upgrade and rollback when storage, packaging, or installation paths
+  change.
+- Complete a proportionate soak with no unresolved release-blocking regression.
 
 ## Documentation and release
 
-- [x] The user-facing [installation lifecycle](../README.md#installation-lifecycle)
-  documents upgrade, rollback, relinking, and removal.
-- [ ] Candidate install, load, upgrade, rollback, and uninstall paths pass for
-  every advertised installation scope.
-- [x] Security boundaries, data retention, limitations, and support are current.
-- [x] The release-please pull request matches the audited changelog and version.
-- [x] The Release Please tag identifies the merged release commit.
-- [x] Release artifacts are reproduced, attested, smoke-tested, and attached
-  before the draft is published as stable.
-- [ ] Downloaded release assets match `SHA256SUMS`.
-- [ ] Stable publication deploys signed APT metadata, and isolated Debian 13 and
-  Ubuntu 24.04 clients select their matching promoted packages. Debian retains
-  the legacy predecessor during the first dual-distro release; later suites
-  retain the prior stable version when one exists.
-- [x] A rollback decision and recovery path exist before publication.
+- User installation, upgrade, rollback, relink, removal, compatibility,
+  security, data-retention, and support documentation matches the candidate.
+- Candidate install, load, upgrade, rollback, and uninstall paths pass for each
+  advertised installation scope affected by the release.
+- The release pull request matches the audited changelog and product version.
+- The Release Please tag identifies the merged release commit.
+- Artifacts are reproduced, attested, smoke-tested, and attached before the
+  draft is published as stable.
+- Downloaded release assets match `SHA256SUMS`.
+- Stable publication deploys signed APT metadata, and isolated Debian 13 and
+  Ubuntu 24.04 clients select their matching packages while the repository
+  retains the supported predecessor.
+- A rollback decision and recovery path exist before publication.
