@@ -13,7 +13,9 @@ const BACKEND_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 use crate::acknowledgment::AcknowledgmentInbox;
 use crate::attachment::{AttachmentAdmission, AttachmentAdmissionError, MAX_ATTACHMENT_BYTES};
 use crate::backend::{self, Command, Config, StorePassphrase, WorkerContext};
-use crate::event::{self, ABI_VERSION, Event, OwnedEvent, SignalEvent};
+#[cfg(test)]
+use crate::event::Event;
+use crate::event::{self, ABI_VERSION, OwnedEvent, SignalEvent};
 #[cfg(test)]
 use crate::event_queue::EventSink;
 use crate::event_queue::{EventPoll, EventQueue, event_queue};
@@ -734,15 +736,6 @@ pub unsafe extern "C" fn signal_core_poll_event(
         // SAFETY: checked above; C serializes poll/free with core teardown.
         let core = unsafe { &*core };
         match core.events.poll() {
-            EventPoll::Overflow => {
-                let overflow = Event::error(
-                    "A Signal event exceeded the event queue byte limit; reconnect to resynchronize messages",
-                    true,
-                );
-                // SAFETY: checked above; event ownership transfers to C.
-                unsafe { *out_event = OwnedEvent::into_raw(overflow) };
-                1
-            }
             EventPoll::Event(event) => {
                 // SAFETY: checked above; event ownership transfers to C.
                 unsafe { *out_event = OwnedEvent::into_raw(event) };

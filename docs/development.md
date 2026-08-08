@@ -21,8 +21,8 @@ the SQLCipher/OpenSSL build used here.
 
 `ffmpeg` and `prlimit` from `util-linux` are optional at runtime. When both are
 available at their Debian paths, the receive worker can convert strictly
-eligible Signal GIF-style MP4 attachments to bounded inline GIFs. Missing
-helpers leave the original receive-file behavior intact.
+eligible direct and group Signal GIF-style MP4 attachments to bounded inline
+GIFs. Missing helpers leave the original receive-file behavior intact.
 
 ## Standard checks
 
@@ -75,9 +75,9 @@ module's own implementations, and every direct probe invocation has a hard
 timeout. The Rust tests cover ABI values and owned payloads, FFI error outputs,
 acknowledgement and cancellation pressure, timestamp allocation, bounded
 shutdown, credential lifetime, event backpressure and oversize handling, QR PNG
-generation, group-key validation, group-image projection, and optional bounded
-Signal GIF-style conversion. The staged-install probe also verifies the Linux
-backend's ELF `NODELETE` contract.
+generation, group-key validation, direct/group image projection, and optional
+bounded Signal GIF-style conversion. The staged-install probe also verifies the
+Linux backend's ELF `NODELETE` contract.
 Live compatibility tests require dedicated non-production Signal accounts and
 are not run for untrusted pull requests.
 

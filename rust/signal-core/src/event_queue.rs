@@ -11,7 +11,6 @@ const MAX_QUEUED_EVENT_BYTES: usize = 64 * 1024 * 1024;
 
 struct EventQueueState {
     notification_pending: AtomicBool,
-    overflowed: AtomicBool,
     closed: AtomicBool,
     queued_bytes: AtomicUsize,
     waiting_producers: AtomicUsize,
@@ -35,7 +34,6 @@ pub(crate) struct EventQueue {
 
 pub(crate) enum EventPoll {
     Event(Event),
-    Overflow,
     Empty,
     Disconnected,
 }
@@ -60,7 +58,6 @@ fn event_queue_with_byte_limit(
     notification_writer.set_nonblocking(true)?;
     let state = Arc::new(EventQueueState {
         notification_pending: AtomicBool::new(false),
-        overflowed: AtomicBool::new(false),
         closed: AtomicBool::new(false),
         queued_bytes: AtomicUsize::new(0),
         waiting_producers: AtomicUsize::new(0),
@@ -121,23 +118,15 @@ impl EventSink {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        if event_bytes > self.state.max_queued_bytes {
-            if self.state.closed.load(Ordering::Acquire) {
-                return;
-            }
-            self.state.overflowed.store(true, Ordering::Release);
-            self.notify_locked();
-            return;
-        }
-
         loop {
             if self.state.closed.load(Ordering::Acquire) {
                 return;
             }
             let queued_bytes = self.state.queued_bytes.load(Ordering::Acquire);
-            if queued_bytes
-                .checked_add(event_bytes)
-                .is_none_or(|total| total > self.state.max_queued_bytes)
+            if queued_bytes != 0
+                && queued_bytes
+                    .checked_add(event_bytes)
+                    .is_none_or(|total| total > self.state.max_queued_bytes)
             {
                 self.state.waiting_producers.fetch_add(1, Ordering::AcqRel);
                 guard = self
@@ -212,9 +201,6 @@ impl EventQueue {
             .serial
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if self.state.overflowed.swap(false, Ordering::AcqRel) {
-            return EventPoll::Overflow;
-        }
         let events = match self.receiver.lock() {
             Ok(events) => events,
             Err(_) => return EventPoll::Disconnected,
@@ -378,17 +364,42 @@ mod tests {
     }
 
     #[test]
-    fn notifies_when_binary_overflow_happens_before_any_enqueue() {
-        let (sink, queue) = queue(1, 8);
+    fn admits_one_event_larger_than_the_byte_budget() {
+        let (sink, queue) = queue(2, 8);
 
         sink.emit(Event {
             kind: EVENT_MESSAGE,
             data: vec![0; 9],
             ..Event::default()
         });
+        let (started_tx, started_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let blocked_sink = sink.clone();
+        let producer = thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            blocked_sink.emit(Event {
+                kind: EVENT_GROUP_MESSAGE,
+                data: vec![0],
+                ..Event::default()
+            });
+            finished_tx.send(()).unwrap();
+        });
 
-        assert!(matches!(queue.poll(), EventPoll::Overflow));
+        started_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_producer_waiting(&queue);
+        assert!(matches!(
+            finished_rx.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+        assert_eq!(queue.state.queued_bytes.load(Ordering::Acquire), 9);
+        assert_eq!(assert_event(queue.poll(), EVENT_MESSAGE).data.len(), 9);
+        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert_eq!(
+            assert_event(queue.poll(), EVENT_GROUP_MESSAGE).data.len(),
+            1
+        );
         assert!(matches!(queue.poll(), EventPoll::Empty));
+        producer.join().unwrap();
     }
 
     #[test]

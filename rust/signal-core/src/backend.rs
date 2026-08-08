@@ -47,8 +47,7 @@ use crate::event::{
 use crate::event_queue::EventSink;
 
 const MESSAGE_PROJECTION_CLIENT: &str = "signal-purple-v1";
-const MAX_MESSAGE_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
-const MAX_INLINE_GIF_BYTES: usize = 8 * 1024 * 1024;
+const MAX_INLINE_MEDIA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INLINE_GIF_EDGE: usize = 8192;
 const MAX_INLINE_GIF_PIXELS: usize = 16 * 1000 * 1000;
 const MAX_INLINE_GIF_PIXEL_FRAMES: usize = 8 * 1000 * 1000;
@@ -68,10 +67,6 @@ const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const SNAPSHOT_YIELD_INTERVAL: usize = 64;
 
 static SIGNAL_GIF_TRANSCODE_LOCK: Mutex<()> = Mutex::new(());
-
-fn incoming_attachment_download_limit(downloaded_bytes: usize) -> usize {
-    MAX_ATTACHMENT_BYTES.min(MAX_MESSAGE_ATTACHMENT_BYTES.saturating_sub(downloaded_bytes))
-}
 
 #[derive(Clone, Default)]
 struct MessageTimestampAllocator {
@@ -3267,7 +3262,10 @@ impl<'a> DataMessageProjection<'a> {
     }
 }
 
-fn inline_group_image_matches(content_type: Option<&str>, data: &[u8]) -> bool {
+fn inline_image_matches(content_type: Option<&str>, data: &[u8]) -> bool {
+    if data.len() > MAX_INLINE_MEDIA_BYTES {
+        return false;
+    }
     match content_type {
         Some(content_type) if content_type.eq_ignore_ascii_case("image/jpeg") => {
             data.starts_with(&[0xff, 0xd8, 0xff])
@@ -3282,13 +3280,8 @@ fn inline_group_image_matches(content_type: Option<&str>, data: &[u8]) -> bool {
     }
 }
 
-fn should_inline_group_image(
-    outgoing: bool,
-    group: bool,
-    content_type: Option<&str>,
-    data: Option<&[u8]>,
-) -> bool {
-    !outgoing && group && data.is_some_and(|data| inline_group_image_matches(content_type, data))
+fn should_inline_image(outgoing: bool, content_type: Option<&str>, data: Option<&[u8]>) -> bool {
+    !outgoing && data.is_some_and(|data| inline_image_matches(content_type, data))
 }
 
 fn gif_u16(data: &[u8], offset: usize) -> Option<usize> {
@@ -3320,7 +3313,7 @@ fn skip_gif_sub_blocks(data: &[u8], offset: &mut usize) -> bool {
 
 fn bounded_inline_gif(data: &[u8]) -> bool {
     if data.len() < 13
-        || data.len() > MAX_INLINE_GIF_BYTES
+        || data.len() > MAX_INLINE_MEDIA_BYTES
         || !(data.starts_with(b"GIF87a") || data.starts_with(b"GIF89a"))
     {
         return false;
@@ -3435,9 +3428,8 @@ fn mp4_file_type_box_matches(data: &[u8]) -> bool {
     (16..=data.len()).contains(&box_size)
 }
 
-fn signal_gif_video_matches(group: bool, attachment: &AttachmentPointer, data: &[u8]) -> bool {
-    group
-        && data.len() <= MAX_INLINE_GIF_BYTES
+fn signal_gif_video_matches(attachment: &AttachmentPointer, data: &[u8]) -> bool {
+    data.len() <= MAX_INLINE_MEDIA_BYTES
         && attachment
             .content_type
             .as_deref()
@@ -3474,13 +3466,8 @@ struct DownloadedAttachment {
 }
 
 impl DownloadedAttachment {
-    fn new(
-        attachment_index: usize,
-        attachment: &AttachmentPointer,
-        data: Vec<u8>,
-        group: bool,
-    ) -> Self {
-        let signal_gif_filename = signal_gif_video_matches(group, attachment, &data)
+    fn new(attachment_index: usize, attachment: &AttachmentPointer, data: Vec<u8>) -> Self {
+        let signal_gif_filename = signal_gif_video_matches(attachment, &data)
             .then(|| signal_gif_inline_filename(attachment));
         Self {
             attachment_index,
@@ -3491,26 +3478,18 @@ impl DownloadedAttachment {
         }
     }
 
-    fn apply_signal_gif(&mut self, gif: Vec<u8>, presentation_bytes: &mut usize) -> bool {
+    fn apply_signal_gif(&mut self, gif: Vec<u8>) -> bool {
         let Some(filename) = self.signal_gif_filename.clone() else {
             return false;
         };
         if !bounded_inline_gif(&gif) {
             return false;
         }
-        let Some(next_bytes) = presentation_bytes
-            .checked_sub(self.data.len())
-            .and_then(|bytes| bytes.checked_add(gif.len()))
-            .filter(|bytes| *bytes <= MAX_MESSAGE_ATTACHMENT_BYTES)
-        else {
-            return false;
-        };
 
         self.filename = filename;
         self.signal_gif_filename = None;
         self.content_type = Some("image/gif".to_owned());
         self.data = gif;
-        *presentation_bytes = next_bytes;
         true
     }
 }
@@ -3528,7 +3507,7 @@ fn read_transcode_output(mut output: impl Read) -> Option<Vec<u8>> {
         if read == 0 {
             return Some(collected);
         }
-        if read > MAX_INLINE_GIF_BYTES.saturating_sub(collected.len()) {
+        if read > MAX_INLINE_MEDIA_BYTES.saturating_sub(collected.len()) {
             return None;
         }
         collected.extend_from_slice(&chunk[..read]);
@@ -3697,6 +3676,24 @@ fn regular_message_attachments(message: &DataMessage) -> &[AttachmentPointer] {
     &message.attachments
 }
 
+fn attachment_pointer_without_sender_size_hint(
+    attachment: &AttachmentPointer,
+) -> AttachmentPointer {
+    // The sender controls this field, and Presage otherwise uses it as the
+    // initial allocation before reading the authenticated network body.
+    let mut download_pointer = attachment.clone();
+    download_pointer.size = None;
+    download_pointer
+}
+
+fn truncate_attachment_to_sender_size(attachment: &AttachmentPointer, data: &mut Vec<u8>) {
+    if let Some(size) = attachment.size.and_then(|size| size.try_into().ok()) {
+        // Preserve Presage's post-decryption privacy-padding behavior without
+        // trusting the sender-provided size for allocation.
+        data.truncate(size);
+    }
+}
+
 fn projected_data_message_text<'a>(
     mut text: String,
     attachments: impl IntoIterator<Item = (Option<&'a str>, bool)>,
@@ -3791,48 +3788,25 @@ async fn emit_data_message(
     };
     let flags = if outgoing { FLAG_OUTGOING } else { 0 };
     let mut downloaded = Vec::new();
-    let mut downloaded_bytes = 0usize;
     if !outgoing {
         for (attachment_index, attachment) in attachments.iter().enumerate() {
-            let declared_size = attachment.size.unwrap_or_default() as usize;
-            let remaining_message_bytes =
-                MAX_MESSAGE_ATTACHMENT_BYTES.saturating_sub(downloaded_bytes);
-            let attachment_limit = incoming_attachment_download_limit(downloaded_bytes);
-            if declared_size > MAX_ATTACHMENT_BYTES
-                || declared_size > remaining_message_bytes
-                || attachment_limit == 0
-            {
-                sink.emit(Event::error(
-                    "Rejected a Signal attachment which exceeded its per-attachment or per-message size limit",
-                    false,
-                ));
-                continue;
-            }
-            match manager
-                .get_attachment_with_size_limit(attachment, attachment_limit)
-                .await
-            {
-                Ok(data) if data.is_empty() => sink.emit(Event::error(
-                    "Could not download a Signal attachment: decrypted attachment was empty",
-                    false,
-                )),
-                Ok(data)
-                    if data.len() <= MAX_ATTACHMENT_BYTES
-                        && downloaded_bytes.saturating_add(data.len())
-                            <= MAX_MESSAGE_ATTACHMENT_BYTES =>
-                {
-                    downloaded_bytes += data.len();
-                    downloaded.push(DownloadedAttachment::new(
-                        attachment_index,
-                        attachment,
-                        data,
-                        group_key.is_some(),
-                    ));
+            let download_pointer = attachment_pointer_without_sender_size_hint(attachment);
+            match manager.get_attachment(&download_pointer).await {
+                Ok(mut data) => {
+                    truncate_attachment_to_sender_size(attachment, &mut data);
+                    if data.is_empty() {
+                        sink.emit(Event::error(
+                            "Could not download a Signal attachment: decrypted attachment was empty",
+                            false,
+                        ));
+                    } else {
+                        downloaded.push(DownloadedAttachment::new(
+                            attachment_index,
+                            attachment,
+                            data,
+                        ));
+                    }
                 }
-                Ok(_) => sink.emit(Event::error(
-                    "Rejected a Signal attachment which exceeded its size limit after decryption",
-                    false,
-                )),
                 Err(error) => sink.emit(Event::error(
                     format!("Could not download a Signal attachment: {error}"),
                     false,
@@ -3841,7 +3815,6 @@ async fn emit_data_message(
         }
     }
 
-    let mut presentation_bytes = downloaded_bytes;
     let mut signal_gif_transcodes = 0usize;
     for attachment in &mut downloaded {
         if signal_gif_transcodes >= MAX_SIGNAL_GIF_TRANSCODES_PER_MESSAGE {
@@ -3852,16 +3825,15 @@ async fn emit_data_message(
         }
         signal_gif_transcodes += 1;
         if let Some(gif) = transcode_signal_gif_video(&attachment.data).await {
-            attachment.apply_signal_gif(gif, &mut presentation_bytes);
+            attachment.apply_signal_gif(gif);
         }
     }
 
     let inline_attachment_indexes: HashSet<usize> = downloaded
         .iter()
         .filter_map(|attachment| {
-            should_inline_group_image(
+            should_inline_image(
                 outgoing,
-                group_key.is_some(),
                 attachment.content_type.as_deref(),
                 Some(&attachment.data),
             )
@@ -4293,31 +4265,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
-    }
-
-    #[test]
-    fn incoming_attachment_limit_respects_per_file_and_message_budgets() {
-        assert_eq!(incoming_attachment_download_limit(0), MAX_ATTACHMENT_BYTES);
-        assert_eq!(
-            incoming_attachment_download_limit(MAX_ATTACHMENT_BYTES),
-            MAX_ATTACHMENT_BYTES
-        );
-        assert_eq!(
-            incoming_attachment_download_limit(MAX_ATTACHMENT_BYTES + 1),
-            MAX_ATTACHMENT_BYTES - 1
-        );
-        assert_eq!(
-            incoming_attachment_download_limit(MAX_MESSAGE_ATTACHMENT_BYTES - 1),
-            1
-        );
-        assert_eq!(
-            incoming_attachment_download_limit(MAX_MESSAGE_ATTACHMENT_BYTES),
-            0
-        );
-        assert_eq!(
-            incoming_attachment_download_limit(MAX_MESSAGE_ATTACHMENT_BYTES + 1),
-            0
-        );
     }
 
     #[test]
@@ -5000,19 +4947,18 @@ mod tests {
         };
         let mp4 = signal_gif_mp4();
 
-        assert!(signal_gif_video_matches(true, &animation, &mp4));
-        assert!(signal_gif_video_matches(true, &uppercase, &mp4));
-        assert!(!signal_gif_video_matches(false, &animation, &mp4));
-        assert!(!signal_gif_video_matches(true, &video, &mp4));
-        assert!(!signal_gif_video_matches(true, &animation, b"not an mp4"));
+        assert!(signal_gif_video_matches(&animation, &mp4));
+        assert!(signal_gif_video_matches(&uppercase, &mp4));
+        assert!(!signal_gif_video_matches(&video, &mp4));
+        assert!(!signal_gif_video_matches(&animation, b"not an mp4"));
 
         let mut invalid_box = mp4.clone();
         invalid_box[..4].copy_from_slice(&u32::MAX.to_be_bytes());
-        assert!(!signal_gif_video_matches(true, &animation, &invalid_box));
+        assert!(!signal_gif_video_matches(&animation, &invalid_box));
 
-        let mut oversized = vec![0u8; MAX_INLINE_GIF_BYTES + 1];
+        let mut oversized = vec![0u8; MAX_INLINE_MEDIA_BYTES + 1];
         oversized[..mp4.len()].copy_from_slice(&mp4);
-        assert!(!signal_gif_video_matches(true, &animation, &oversized));
+        assert!(!signal_gif_video_matches(&animation, &oversized));
     }
 
     #[test]
@@ -5022,7 +4968,7 @@ mod tests {
         let mut truncated = gif.clone();
         truncated.pop();
         let mut oversized = gif.clone();
-        oversized.resize(MAX_INLINE_GIF_BYTES + 1, 0);
+        oversized.resize(MAX_INLINE_MEDIA_BYTES + 1, 0);
 
         assert!(bounded_inline_gif(&gif));
         assert!(!bounded_inline_gif(&excessive_frames));
@@ -5041,7 +4987,7 @@ mod tests {
         assert!(
             read_transcode_output(std::io::Read::take(
                 std::io::repeat(0),
-                (MAX_INLINE_GIF_BYTES + 1) as u64
+                (MAX_INLINE_MEDIA_BYTES + 1) as u64
             ))
             .is_none()
         );
@@ -5096,7 +5042,7 @@ mod tests {
     }
 
     #[test]
-    fn applies_only_valid_in_budget_signal_gif_presentations() {
+    fn applies_only_valid_signal_gif_presentations() {
         let attachment = AttachmentPointer {
             file_name: Some("../../shared.MP4".into()),
             content_type: Some("video/mp4".into()),
@@ -5105,34 +5051,24 @@ mod tests {
         };
         let original = signal_gif_mp4();
         let gif = encoded_gif(1, 1, 2);
-        let mut downloaded = DownloadedAttachment::new(3, &attachment, original.clone(), true);
-        let mut presentation_bytes = original.len();
+        let mut downloaded = DownloadedAttachment::new(3, &attachment, original.clone());
 
         assert_eq!(
             downloaded.signal_gif_filename.as_deref(),
             Some("shared.gif")
         );
-        assert!(downloaded.apply_signal_gif(gif.clone(), &mut presentation_bytes));
+        assert!(downloaded.apply_signal_gif(gif.clone()));
         assert_eq!(downloaded.filename, "shared.gif");
         assert_eq!(downloaded.content_type.as_deref(), Some("image/gif"));
         assert_eq!(downloaded.data, gif);
-        assert_eq!(presentation_bytes, downloaded.data.len());
 
-        let mut invalid = DownloadedAttachment::new(4, &attachment, original.clone(), true);
-        let mut invalid_bytes = original.len();
-        assert!(!invalid.apply_signal_gif(b"GIF89a".to_vec(), &mut invalid_bytes));
+        let mut invalid = DownloadedAttachment::new(4, &attachment, original.clone());
+        assert!(!invalid.apply_signal_gif(b"GIF89a".to_vec()));
         assert_eq!(invalid.data, original);
         assert_eq!(invalid.content_type.as_deref(), Some("video/mp4"));
 
-        let mut over_budget = DownloadedAttachment::new(5, &attachment, signal_gif_mp4(), true);
-        let original_data = over_budget.data.clone();
-        let mut full_budget = MAX_MESSAGE_ATTACHMENT_BYTES;
-        assert!(!over_budget.apply_signal_gif(encoded_gif(1, 1, 2), &mut full_budget));
-        assert_eq!(over_budget.data, original_data);
-        assert_eq!(full_budget, MAX_MESSAGE_ATTACHMENT_BYTES);
-
-        let direct = DownloadedAttachment::new(6, &attachment, signal_gif_mp4(), false);
-        assert!(direct.signal_gif_filename.is_none());
+        let direct = DownloadedAttachment::new(6, &attachment, signal_gif_mp4());
+        assert_eq!(direct.signal_gif_filename.as_deref(), Some("shared.gif"));
     }
 
     #[test]
@@ -5142,58 +5078,40 @@ mod tests {
         let gif87a = b"GIF87arest";
         let gif89a = b"GIF89arest";
 
-        assert!(inline_group_image_matches(Some("image/jpeg"), &jpeg));
-        assert!(inline_group_image_matches(Some("IMAGE/JPEG"), &jpeg));
-        assert!(inline_group_image_matches(Some("image/png"), png));
-        assert!(inline_group_image_matches(Some("IMAGE/PNG"), png));
-        assert!(inline_group_image_matches(Some("image/gif"), gif87a));
-        assert!(inline_group_image_matches(Some("IMAGE/GIF"), gif89a));
+        assert!(inline_image_matches(Some("image/jpeg"), &jpeg));
+        assert!(inline_image_matches(Some("IMAGE/JPEG"), &jpeg));
+        assert!(inline_image_matches(Some("image/png"), png));
+        assert!(inline_image_matches(Some("IMAGE/PNG"), png));
+        assert!(inline_image_matches(Some("image/gif"), gif87a));
+        assert!(inline_image_matches(Some("IMAGE/GIF"), gif89a));
 
-        assert!(!inline_group_image_matches(Some("image/png"), &jpeg));
-        assert!(!inline_group_image_matches(Some("image/jpeg"), png));
-        assert!(!inline_group_image_matches(Some("image/png"), b"\x89PNG"));
-        assert!(!inline_group_image_matches(Some("image/gif"), b"GIF89"));
-        assert!(!inline_group_image_matches(
+        assert!(!inline_image_matches(Some("image/png"), &jpeg));
+        assert!(!inline_image_matches(Some("image/jpeg"), png));
+        assert!(!inline_image_matches(Some("image/png"), b"\x89PNG"));
+        assert!(!inline_image_matches(Some("image/gif"), b"GIF89"));
+        assert!(!inline_image_matches(
             Some("image/jpeg; charset=binary"),
             &jpeg
         ));
-        assert!(!inline_group_image_matches(None, &jpeg));
+        assert!(!inline_image_matches(None, &jpeg));
+
+        let mut oversized = vec![0u8; MAX_INLINE_MEDIA_BYTES + 1];
+        oversized[..jpeg.len()].copy_from_slice(&jpeg);
+        assert!(!inline_image_matches(Some("image/jpeg"), &oversized));
     }
 
     #[test]
-    fn inlines_only_downloaded_incoming_group_images() {
+    fn inlines_downloaded_images_in_every_incoming_conversation() {
         let jpeg = [0xff, 0xd8, 0xff, 0xe0];
 
-        assert!(should_inline_group_image(
+        assert!(should_inline_image(false, Some("image/jpeg"), Some(&jpeg)));
+        assert!(!should_inline_image(true, Some("image/jpeg"), Some(&jpeg)));
+        assert!(!should_inline_image(
             false,
-            true,
-            Some("image/jpeg"),
-            Some(&jpeg)
-        ));
-        assert!(!should_inline_group_image(
-            false,
-            false,
-            Some("image/jpeg"),
-            Some(&jpeg)
-        ));
-        assert!(!should_inline_group_image(
-            true,
-            true,
-            Some("image/jpeg"),
-            Some(&jpeg)
-        ));
-        assert!(!should_inline_group_image(
-            false,
-            true,
             Some("application/octet-stream"),
             Some(&jpeg)
         ));
-        assert!(!should_inline_group_image(
-            false,
-            true,
-            Some("image/jpeg"),
-            None
-        ));
+        assert!(!should_inline_image(false, Some("image/jpeg"), None));
     }
 
     #[test]
@@ -5974,5 +5892,44 @@ mod tests {
                 .as_deref(),
             Some("actual.pdf")
         );
+    }
+
+    #[test]
+    fn sender_attachment_size_truncates_only_after_download() {
+        let attachment = AttachmentPointer {
+            size: Some(3),
+            content_type: Some("application/octet-stream".into()),
+            ..AttachmentPointer::default()
+        };
+        let download_pointer = attachment_pointer_without_sender_size_hint(&attachment);
+        assert_eq!(download_pointer.size, None);
+        assert_eq!(download_pointer.content_type, attachment.content_type);
+
+        let mut padded = vec![1, 2, 3, 4, 5];
+        truncate_attachment_to_sender_size(&attachment, &mut padded);
+        assert_eq!(padded, vec![1, 2, 3]);
+
+        let mut exact = vec![1, 2, 3];
+        truncate_attachment_to_sender_size(&attachment, &mut exact);
+        assert_eq!(exact, vec![1, 2, 3]);
+
+        let larger = AttachmentPointer {
+            size: Some(8),
+            ..AttachmentPointer::default()
+        };
+        let mut shorter = vec![1, 2, 3];
+        truncate_attachment_to_sender_size(&larger, &mut shorter);
+        assert_eq!(shorter, vec![1, 2, 3]);
+
+        let missing = AttachmentPointer::default();
+        truncate_attachment_to_sender_size(&missing, &mut shorter);
+        assert_eq!(shorter, vec![1, 2, 3]);
+
+        let empty = AttachmentPointer {
+            size: Some(0),
+            ..AttachmentPointer::default()
+        };
+        truncate_attachment_to_sender_size(&empty, &mut shorter);
+        assert!(shorter.is_empty());
     }
 }

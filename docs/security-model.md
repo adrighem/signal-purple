@@ -69,12 +69,17 @@ user-facing local storage, not diagnostic output.
   encrypted rows.
 - Backend events use a bounded queue. Count and aggregate-byte pressure block
   the producer until Purple drains capacity; teardown wakes blocked producers.
-  A single event above the 64 MiB byte budget fails visibly and reconnects.
-- Attachments are capped at 25 MiB each and 50 MiB per incoming message.
-  The C adapter rejects non-regular and known-oversized outgoing files before
-  allocating their contents, rejects empty files, and enforces the same limit
-  while reading from the already inspected descriptor. Every outgoing Purple
-  transfer is registered from creation. Start callbacks are protected by a
+  One event larger than the normal 64 MiB aggregate budget is admitted alone.
+- Incoming attachment size follows Signal's network policy without a lower
+  plugin per-file or per-message cap. Incoming data and unresolved Purple
+  receive prompts remain in memory, including temporary handoff copies.
+  Sender-declared plaintext size cannot drive download allocation; it is used
+  only after authenticated decryption to remove Signal privacy padding.
+  Outgoing attachments are capped at 25 MiB. The C adapter rejects non-regular
+  and known-oversized outgoing files before allocating their contents, rejects
+  empty files, and enforces the same limit while reading from the already
+  inspected descriptor. Every outgoing Purple transfer is registered from
+  creation. Start callbacks are protected by a
   temporary reference, started transfers are cancelled on disconnect, and all
   remaining contexts are detached before connection state is freed.
   Outgoing queued, recovery-deferred, and active attachments share a per-account
@@ -82,22 +87,25 @@ user-facing local storage, not diagnostic output.
   are released together on every terminal path. Cancellation is stored on the
   admitted request rather than submitted through the bounded work queue, so it
   remains effective under queue pressure and before task startup. Binary
-  backend events and unresolved receive prompts each have separate 64 MiB
-  ceilings; see the
-  [attachment policy](attachment-policy.md). Group images are eligible for
-  inline display only when a JPEG, PNG, or GIF MIME type agrees with its file
-  signature and the complete payload decodes. JPEG and PNG dimensions are no
-  larger than 8192 pixels per edge or 16 megapixels total. GIFs are limited to
-  8 MiB and 8 million cumulative canvas pixel-frames; their block structure is
-  checked before decoder allocation. Decoder validation is chunked, and
-  rejected dimensions are scaled down before allocation. A Signal GIF-flagged
-  group MP4 may be converted to a GIF by a pipe-only FFmpeg child with a cleared
-  environment and fixed arguments. `prlimit` applies a 1 GiB address-space cap
+  backend events normally have a 64 MiB aggregate ceiling; see the
+  [attachment policy](attachment-policy.md). Direct and group images are
+  eligible for inline display only when a JPEG, PNG, or GIF MIME type agrees
+  with its file signature, the encoded payload is no larger than 8 MiB, and the
+  complete payload decodes. Dimensions are no larger than 8192 pixels per edge
+  or 16 megapixels total. GIFs are additionally limited to 8 million cumulative
+  canvas pixel-frames; their block structure is checked before decoder
+  allocation. Decoder validation is chunked, and rejected dimensions are
+  scaled down before allocation. A Signal GIF-flagged direct or group MP4 may be
+  converted to a GIF by a pipe-only FFmpeg child with a cleared environment and
+  fixed arguments. `prlimit` applies a 1 GiB address-space cap
   plus CPU and file-descriptor limits; the worker separately bounds
   source/output bytes, wall time, threads, dimensions, frame rate, cumulative
   frame area, attempts, and concurrency. Invalid output and all conversion
   failures preserve the original receive prompt. Ordinary video and other data
-  also use that prompt.
+  also use that prompt. One incoming-presentation gate applies Purple's direct
+  privacy and group-ignore rules to text, inline media, and transfer fallback.
+  Filtered events are acknowledged without presentation or a read receipt;
+  outgoing linked-device echoes remain visible.
   Decrypted
   incoming bytes remain in memory until the displayed image is released, saved,
   or rejected; the plugin creates no plaintext attachment cache. Remote

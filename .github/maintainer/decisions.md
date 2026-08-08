@@ -277,3 +277,21 @@
 - Enforce full-SHA GitHub Action references at repository level. Keep required
   human approval disabled until a second trusted maintainer can prevent review
   deadlock.
+
+## 2026-08-08 - Inline media in both Purple conversation types
+
+- Route validated JPEG, PNG, and genuine GIF attachments through Purple's image
+  store in direct and group conversations. Apply one 8 MiB encoded-size boundary
+  before decoder admission; preserve the original transfer fallback.
+- Extend bounded Signal GIF-style MP4 conversion to direct conversations.
+  Ordinary video remains a transfer because Purple 2 has no native inline-video
+  representation and silent GIF replacement would discard audio and fidelity.
+- Apply direct privacy and group-ignore rules through one incoming-presentation
+  gate before text, inline media, or transfer fallback. Outgoing linked-device
+  echoes remain visible. Filtered events are acknowledged without read receipts.
+- Queue direct and group read receipts only from the final projection event, so
+  captions and multi-attachment messages read once after final presentation.
+- Follow Signal's network limits for incoming attachment bytes, but never use
+  sender-declared plaintext size for allocation. Clear that hint for Presage's
+  standard download call, then apply it only to remove privacy padding after
+  authenticated decryption.

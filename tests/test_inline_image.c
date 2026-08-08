@@ -200,6 +200,14 @@ capture_image(PurpleConnection *gc, int chat_id, const char *sender,
 }
 
 static void
+capture_direct_image(PurpleConnection *gc, const char *sender,
+                     const char *message, PurpleMessageFlags flags,
+                     time_t timestamp)
+{
+    capture_image(gc, -1, sender, flags, message, timestamp);
+}
+
+static void
 observe_image_without_ref(PurpleConnection *gc, int chat_id,
                           const char *sender, PurpleMessageFlags flags,
                           const char *message, time_t timestamp)
@@ -285,6 +293,10 @@ test_supported_formats(void)
     g_assert_false(signal_inline_image_is_supported(
         "image/png", oversized_png, oversized_png_size));
 
+    g_assert_false(signal_inline_image_size_is_supported(0));
+    g_assert_true(signal_inline_image_size_is_supported(8u * 1024u * 1024u));
+    g_assert_false(
+        signal_inline_image_size_is_supported(8u * 1024u * 1024u + 1u));
     g_assert_true(signal_inline_image_dimensions_are_supported(1, 1));
     g_assert_true(signal_inline_image_dimensions_are_supported(4000, 4000));
     g_assert_true(signal_inline_image_dimensions_are_supported(8000, 2000));
@@ -306,7 +318,7 @@ test_group_delivery(void)
     const time_t timestamp = (time_t)1721400000;
 
     png = encoded_image("png", 2, 2, &png_size);
-    g_assert_true(signal_inline_image_deliver_with_writer(
+    g_assert_true(signal_inline_image_deliver_group_with_writer(
         &connection, chat_id, "Peter", "shared-image.png", "image/png", png,
         png_size, timestamp, capture_image));
 
@@ -331,18 +343,53 @@ test_group_delivery(void)
     purple_imgstore_unref(g_steal_pointer(&received.image));
     g_assert_null(purple_imgstore_find_by_id(received.image_id));
 
-    g_assert_false(signal_inline_image_deliver_with_writer(
+    g_assert_false(signal_inline_image_deliver_group_with_writer(
         &connection, chat_id, "Peter", "spoofed.png", "image/png",
         (const guint8 *)"not a png", strlen("not a png"), timestamp,
         capture_image));
     g_assert_cmpuint(received.calls, ==, 1);
 
     unretained_image_id = 0;
-    g_assert_false(signal_inline_image_deliver_with_writer(
+    g_assert_false(signal_inline_image_deliver_group_with_writer(
         &connection, chat_id, "Peter", "unretained.png", "image/png", png,
         png_size, timestamp, observe_image_without_ref));
     g_assert_cmpint(unretained_image_id, >, 0);
     g_assert_null(purple_imgstore_find_by_id(unretained_image_id));
+    reset_received();
+}
+
+static void
+test_direct_delivery(void)
+{
+    PurpleConnection connection = { 0 };
+    PurpleStoredImage *stored;
+    g_autofree guint8 *jpeg = NULL;
+    gsize jpeg_size = 0;
+    const time_t timestamp = (time_t)1721400001;
+
+    jpeg = encoded_image("jpeg", 2, 2, &jpeg_size);
+    g_assert_true(signal_inline_image_deliver_direct_with_writer(
+        &connection, "Peter", "direct-image.jpg", "image/jpeg", jpeg,
+        jpeg_size, timestamp, capture_direct_image));
+
+    g_assert_cmpuint(received.calls, ==, 1);
+    g_assert_true(received.gc == &connection);
+    g_assert_cmpint(received.chat_id, ==, -1);
+    g_assert_cmpstr(received.sender, ==, "Peter");
+    g_assert_cmpint(received.timestamp, ==, timestamp);
+    g_assert_cmpuint(received.flags, ==,
+                     PURPLE_MESSAGE_RECV | PURPLE_MESSAGE_IMAGES);
+
+    stored = purple_imgstore_find_by_id(received.image_id);
+    g_assert_true(stored == received.image);
+    g_assert_cmpuint(purple_imgstore_get_size(stored), ==, jpeg_size);
+    g_assert_cmpmem(purple_imgstore_get_data(stored),
+                    purple_imgstore_get_size(stored), jpeg, jpeg_size);
+    g_assert_cmpstr(purple_imgstore_get_filename(stored), ==,
+                    "direct-image.jpg");
+
+    purple_imgstore_unref(g_steal_pointer(&received.image));
+    g_assert_null(purple_imgstore_find_by_id(received.image_id));
     reset_received();
 }
 
@@ -355,11 +402,11 @@ test_group_gif_delivery(void)
     gconstpointer gif_data;
     gsize gif_size = 0;
     const int chat_id = 74;
-    const time_t timestamp = (time_t)1721400001;
+    const time_t timestamp = (time_t)1721400002;
 
     gif = encoded_gif(1, 1, 2);
     gif_data = g_bytes_get_data(gif, &gif_size);
-    g_assert_true(signal_inline_image_deliver_with_writer(
+    g_assert_true(signal_inline_image_deliver_group_with_writer(
         &connection, chat_id, "Peter", "shared-animation.gif", "image/gif",
         gif_data, gif_size, timestamp, capture_image));
 
@@ -398,6 +445,7 @@ main(void)
     g_assert_true(purple_core_init("signal-purple-inline-image-tests"));
     test_supported_formats();
     test_group_delivery();
+    test_direct_delivery();
     test_group_gif_delivery();
     purple_core_quit();
     remove_tree(user_dir);
