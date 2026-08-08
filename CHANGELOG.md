@@ -4,6 +4,13 @@ All notable changes are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for stable releases.
 
+## [1.2.1](https://github.com/adrighem/signal-purple/compare/v1.2.0...v1.2.1) (2026-08-08)
+
+
+### Bug Fixes
+
+* harden the stable release contract ([#60](https://github.com/adrighem/signal-purple/issues/60)) ([3e136f8](https://github.com/adrighem/signal-purple/commit/3e136f863317970342b4d79bdec2a58618bd5e0f))
+
 ## [1.2.0](https://github.com/adrighem/signal-purple/compare/v1.1.0...v1.2.0) (2026-08-06)
 
 
