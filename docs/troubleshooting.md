@@ -164,14 +164,14 @@ not accept merely to clear the warning.
 
 ## An attachment is rejected or fails
 
-Each attachment is limited to 25 MiB, and one incoming message may contain at
-most 50 MiB. Save or reject existing receive prompts before retrying if Purple
-reports that 64 MiB is already waiting for a destination. Remote filenames are
-sanitized and decrypted bytes are held in memory rather than a plugin-managed
-temporary cache. At most two outgoing files totaling 50 MiB can be queued or
-active per account; wait for or cancel a transfer before retrying when that
-limit is reached. Outgoing uploads are not kept in the persistent text-message
-outbox, so send the file again after a restart or failed upload.
+Incoming attachment size follows Signal's network policy; the plugin adds no
+lower per-file or per-message cap. Remote filenames are sanitized and decrypted
+bytes are held in memory rather than a plugin-managed temporary cache. Save or
+reject receive prompts to release that memory. Outgoing files remain limited to
+25 MiB, with at most two files totaling 50 MiB queued or active per account;
+wait for or cancel a transfer before retrying when that limit is reached.
+Outgoing uploads are not kept in the persistent text-message outbox, so send the
+file again after a restart or failed upload.
 
 Incoming direct and group JPEG, PNG, and genuine GIF images are shown inline
 when their MIME type and file signature agree and the complete image passes its

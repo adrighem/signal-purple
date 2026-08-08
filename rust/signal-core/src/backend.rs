@@ -47,7 +47,6 @@ use crate::event::{
 use crate::event_queue::EventSink;
 
 const MESSAGE_PROJECTION_CLIENT: &str = "signal-purple-v1";
-const MAX_MESSAGE_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 const MAX_INLINE_MEDIA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INLINE_GIF_EDGE: usize = 8192;
 const MAX_INLINE_GIF_PIXELS: usize = 16 * 1000 * 1000;
@@ -68,10 +67,6 @@ const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const SNAPSHOT_YIELD_INTERVAL: usize = 64;
 
 static SIGNAL_GIF_TRANSCODE_LOCK: Mutex<()> = Mutex::new(());
-
-fn incoming_attachment_download_limit(downloaded_bytes: usize) -> usize {
-    MAX_ATTACHMENT_BYTES.min(MAX_MESSAGE_ATTACHMENT_BYTES.saturating_sub(downloaded_bytes))
-}
 
 #[derive(Clone, Default)]
 struct MessageTimestampAllocator {
@@ -3483,26 +3478,18 @@ impl DownloadedAttachment {
         }
     }
 
-    fn apply_signal_gif(&mut self, gif: Vec<u8>, presentation_bytes: &mut usize) -> bool {
+    fn apply_signal_gif(&mut self, gif: Vec<u8>) -> bool {
         let Some(filename) = self.signal_gif_filename.clone() else {
             return false;
         };
         if !bounded_inline_gif(&gif) {
             return false;
         }
-        let Some(next_bytes) = presentation_bytes
-            .checked_sub(self.data.len())
-            .and_then(|bytes| bytes.checked_add(gif.len()))
-            .filter(|bytes| *bytes <= MAX_MESSAGE_ATTACHMENT_BYTES)
-        else {
-            return false;
-        };
 
         self.filename = filename;
         self.signal_gif_filename = None;
         self.content_type = Some("image/gif".to_owned());
         self.data = gif;
-        *presentation_bytes = next_bytes;
         true
     }
 }
@@ -3783,46 +3770,17 @@ async fn emit_data_message(
     };
     let flags = if outgoing { FLAG_OUTGOING } else { 0 };
     let mut downloaded = Vec::new();
-    let mut downloaded_bytes = 0usize;
     if !outgoing {
         for (attachment_index, attachment) in attachments.iter().enumerate() {
-            let declared_size = attachment.size.unwrap_or_default() as usize;
-            let remaining_message_bytes =
-                MAX_MESSAGE_ATTACHMENT_BYTES.saturating_sub(downloaded_bytes);
-            let attachment_limit = incoming_attachment_download_limit(downloaded_bytes);
-            if declared_size > MAX_ATTACHMENT_BYTES
-                || declared_size > remaining_message_bytes
-                || attachment_limit == 0
-            {
-                sink.emit(Event::error(
-                    "Rejected a Signal attachment which exceeded its per-attachment or per-message size limit",
-                    false,
-                ));
-                continue;
-            }
-            match manager
-                .get_attachment_with_size_limit(attachment, attachment_limit)
-                .await
-            {
+            match manager.get_attachment(attachment).await {
                 Ok(data) if data.is_empty() => sink.emit(Event::error(
                     "Could not download a Signal attachment: decrypted attachment was empty",
                     false,
                 )),
-                Ok(data)
-                    if data.len() <= MAX_ATTACHMENT_BYTES
-                        && downloaded_bytes.saturating_add(data.len())
-                            <= MAX_MESSAGE_ATTACHMENT_BYTES =>
-                {
-                    downloaded_bytes += data.len();
-                    downloaded.push(DownloadedAttachment::new(
-                        attachment_index,
-                        attachment,
-                        data,
-                    ));
-                }
-                Ok(_) => sink.emit(Event::error(
-                    "Rejected a Signal attachment which exceeded its size limit after decryption",
-                    false,
+                Ok(data) => downloaded.push(DownloadedAttachment::new(
+                    attachment_index,
+                    attachment,
+                    data,
                 )),
                 Err(error) => sink.emit(Event::error(
                     format!("Could not download a Signal attachment: {error}"),
@@ -3832,7 +3790,6 @@ async fn emit_data_message(
         }
     }
 
-    let mut presentation_bytes = downloaded_bytes;
     let mut signal_gif_transcodes = 0usize;
     for attachment in &mut downloaded {
         if signal_gif_transcodes >= MAX_SIGNAL_GIF_TRANSCODES_PER_MESSAGE {
@@ -3843,7 +3800,7 @@ async fn emit_data_message(
         }
         signal_gif_transcodes += 1;
         if let Some(gif) = transcode_signal_gif_video(&attachment.data).await {
-            attachment.apply_signal_gif(gif, &mut presentation_bytes);
+            attachment.apply_signal_gif(gif);
         }
     }
 
@@ -4283,31 +4240,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
-    }
-
-    #[test]
-    fn incoming_attachment_limit_respects_per_file_and_message_budgets() {
-        assert_eq!(incoming_attachment_download_limit(0), MAX_ATTACHMENT_BYTES);
-        assert_eq!(
-            incoming_attachment_download_limit(MAX_ATTACHMENT_BYTES),
-            MAX_ATTACHMENT_BYTES
-        );
-        assert_eq!(
-            incoming_attachment_download_limit(MAX_ATTACHMENT_BYTES + 1),
-            MAX_ATTACHMENT_BYTES - 1
-        );
-        assert_eq!(
-            incoming_attachment_download_limit(MAX_MESSAGE_ATTACHMENT_BYTES - 1),
-            1
-        );
-        assert_eq!(
-            incoming_attachment_download_limit(MAX_MESSAGE_ATTACHMENT_BYTES),
-            0
-        );
-        assert_eq!(
-            incoming_attachment_download_limit(MAX_MESSAGE_ATTACHMENT_BYTES + 1),
-            0
-        );
     }
 
     #[test]
@@ -5085,7 +5017,7 @@ mod tests {
     }
 
     #[test]
-    fn applies_only_valid_in_budget_signal_gif_presentations() {
+    fn applies_only_valid_signal_gif_presentations() {
         let attachment = AttachmentPointer {
             file_name: Some("../../shared.MP4".into()),
             content_type: Some("video/mp4".into()),
@@ -5095,30 +5027,20 @@ mod tests {
         let original = signal_gif_mp4();
         let gif = encoded_gif(1, 1, 2);
         let mut downloaded = DownloadedAttachment::new(3, &attachment, original.clone());
-        let mut presentation_bytes = original.len();
 
         assert_eq!(
             downloaded.signal_gif_filename.as_deref(),
             Some("shared.gif")
         );
-        assert!(downloaded.apply_signal_gif(gif.clone(), &mut presentation_bytes));
+        assert!(downloaded.apply_signal_gif(gif.clone()));
         assert_eq!(downloaded.filename, "shared.gif");
         assert_eq!(downloaded.content_type.as_deref(), Some("image/gif"));
         assert_eq!(downloaded.data, gif);
-        assert_eq!(presentation_bytes, downloaded.data.len());
 
         let mut invalid = DownloadedAttachment::new(4, &attachment, original.clone());
-        let mut invalid_bytes = original.len();
-        assert!(!invalid.apply_signal_gif(b"GIF89a".to_vec(), &mut invalid_bytes));
+        assert!(!invalid.apply_signal_gif(b"GIF89a".to_vec()));
         assert_eq!(invalid.data, original);
         assert_eq!(invalid.content_type.as_deref(), Some("video/mp4"));
-
-        let mut over_budget = DownloadedAttachment::new(5, &attachment, signal_gif_mp4());
-        let original_data = over_budget.data.clone();
-        let mut full_budget = MAX_MESSAGE_ATTACHMENT_BYTES;
-        assert!(!over_budget.apply_signal_gif(encoded_gif(1, 1, 2), &mut full_budget));
-        assert_eq!(over_budget.data, original_data);
-        assert_eq!(full_budget, MAX_MESSAGE_ATTACHMENT_BYTES);
 
         let direct = DownloadedAttachment::new(6, &attachment, signal_gif_mp4());
         assert_eq!(direct.signal_gif_filename.as_deref(), Some("shared.gif"));

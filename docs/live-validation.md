@@ -191,7 +191,7 @@ service, and an isolated temporary Pidgin profile.
 | Group master-key confinement | Passed; persisted chats contained opaque `group-id` values and no raw group master keys |
 | Group send/receive | Not exercised |
 | Typing and receipts | Direct typing, delivery receipts, and focus-gated direct/group read receipts are implemented and unit/build tested; not exercised against another live client |
-| Attachments | Direct/group JPEG/PNG/GIF routing, privacy filtering, decoder/size/dimension validation, image-store ownership, UI-retention fallback, placeholder suppression, and direct attachment read admission pass focused C/Rust tests; live direct and group inline checks remain pending. One incoming group H.264 MP4 was delivered through the bounded Purple transfer flow. That saved 480x480, 1.87-second sample converts through the implemented limits to a 28-frame inline-eligible GIF without a plaintext file, but the stored MP4 cannot prove Signal's GIF flag and live inline conversion still needs validation |
+| Attachments | Direct/group JPEG/PNG/GIF routing, privacy filtering, decoder/size/dimension validation, image-store ownership, UI-retention fallback, placeholder suppression, and direct attachment read admission pass focused C/Rust tests; live direct and group inline checks remain pending. One incoming group H.264 MP4 was delivered through the Purple transfer flow. That saved 480x480, 1.87-second sample converts through the implemented limits to a 28-frame inline-eligible GIF without a plaintext file, but the stored MP4 cannot prove Signal's GIF flag and live inline conversion still needs validation |
 | Second linked-device synchronization | Not exercised |
 
 The installed plugin also passed the headless module probe. The live run proved

@@ -325,7 +325,7 @@ not implemented.
 
 ### Attachments
 
-Valid, within-limit incoming and outgoing files use Purple's transfer UI.
+Valid incoming and within-limit outgoing files use Purple's transfer UI.
 Incoming direct and group JPEG, PNG, and genuine GIF images render inline only
 when their MIME type, signature, complete decode, 8 MiB encoded-size limit, and
 bounded dimensions agree. Animated GIFs also have a cumulative decoded-frame
@@ -334,19 +334,20 @@ converted through bounded, process-isolated FFmpeg pipes and presented as GIFs
 when the optional `ffmpeg` and `prlimit` helpers are installed. Ordinary video
 and any failed, unavailable, oversized, or invalid conversion retains the
 original MP4 transfer prompt because Purple 2 has no native inline-video API.
-Unnamed common media receives a usable type-specific filename. Empty,
-over-limit, or resource-exhausting content is rejected visibly. Each file is
-limited to 25 MiB and one incoming message to 50 MiB. At most two outgoing files
-totaling 50 MiB are admitted per account; retry after another transfer finishes
-or is cancelled when that queue is full.
+Unnamed common media receives a usable type-specific filename. Empty or failed
+incoming downloads are rejected visibly. Incoming transfer size follows
+Signal's network policy without a lower plugin per-file or per-message cap.
+Outgoing files are limited to 25 MiB. At most two outgoing files totaling 50 MiB
+are admitted per account; retry after another transfer finishes or is cancelled
+when that queue is full.
 The [attachment policy](docs/attachment-policy.md) records the ownership and
 memory bounds.
 
-The plugin does not create a plaintext attachment cache. Inline images remain
-in memory while displayed; an accepted transfer is written as plaintext to the
-destination selected by the user. Outgoing file uploads are cancellable but,
-unlike text messages, are not retained for automatic retry after a failed
-upload or restart.
+The plugin does not create a plaintext attachment cache. Inline images and
+unresolved receive prompts remain in memory; an accepted transfer is written as
+plaintext to the destination selected by the user. Outgoing file uploads are
+cancellable but, unlike text messages, are not retained for automatic retry
+after a failed upload or restart.
 
 ## Important limitations
 

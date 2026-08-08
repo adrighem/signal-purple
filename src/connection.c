@@ -8,11 +8,8 @@
 #include <gio/gio.h>
 #include <libsecret/secret.h>
 
-#define SIGNAL_MAX_PENDING_ATTACHMENT_BYTES (64u * 1024u * 1024u)
 #define SIGNAL_MAX_PENDING_READS 4096u
 #define SIGNAL_PENDING_READ_RETRY_MILLISECONDS 100u
-
-static gsize signal_pending_attachment_bytes;
 
 typedef struct {
     char *peer_id;
@@ -255,8 +252,6 @@ signal_attachment_free(PurpleXfer *xfer)
         return;
     attachment = xfer->data;
     xfer->data = NULL;
-    g_assert(signal_pending_attachment_bytes >= attachment->size);
-    signal_pending_attachment_bytes -= attachment->size;
     g_clear_pointer(&attachment->bytes, g_bytes_unref);
     g_free(attachment);
 }
@@ -344,14 +339,6 @@ signal_deliver_attachment(SignalConnection *connection,
         return TRUE;
     }
 
-    if (event->data_len > SIGNAL_CORE_MAX_ATTACHMENT_BYTES) {
-        purple_notify_error(
-            connection, "Signal attachment rejected",
-            "The Signal attachment exceeds the 25 MiB size limit",
-            "Ask the sender to resend a smaller attachment.");
-        signal_queue_final_read(connection, conversation, event);
-        return TRUE;
-    }
     peer = event->peer_id;
     filename = g_path_get_basename(
         event->title != NULL && event->title[0] != '\0'
@@ -388,16 +375,6 @@ signal_deliver_attachment(SignalConnection *connection,
         }
     }
 
-    if (signal_pending_attachment_bytes >
-        SIGNAL_MAX_PENDING_ATTACHMENT_BYTES - event->data_len) {
-        purple_notify_error(
-            connection, "Signal attachment rejected",
-            "Too much attachment data is waiting for a save location",
-            "Save or reject pending transfers, then ask the sender to resend the attachment.");
-        signal_queue_final_read(connection, conversation, event);
-        return TRUE;
-    }
-
     xfer = purple_xfer_new(account, PURPLE_XFER_RECEIVE, peer);
     if (xfer == NULL) {
         purple_notify_error(connection, "Signal attachment unavailable",
@@ -409,7 +386,6 @@ signal_deliver_attachment(SignalConnection *connection,
     attachment = g_new0(SignalAttachment, 1);
     attachment->bytes = g_bytes_new(event->data, event->data_len);
     attachment->size = event->data_len;
-    signal_pending_attachment_bytes += attachment->size;
     xfer->data = attachment;
     purple_xfer_set_filename(xfer, filename);
     purple_xfer_set_size(xfer, event->data_len);

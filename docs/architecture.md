@@ -32,10 +32,10 @@ drift which separate C-only and Rust-only assertions cannot detect.
 
 - C strings passed into a command are validated and copied before return.
 - Rust owns all event strings and blobs until `signal_event_free`.
-- The event queue is bounded at 4096 entries and 64 MiB. Count and aggregate-byte
-  pressure apply producer backpressure; shutdown explicitly wakes a blocked
-  producer. A single event larger than the byte budget produces a fatal event
-  and reconnects rather than silently dropping an arbitrary message.
+- The event queue is bounded at 4096 entries and normally 64 MiB. Count and
+  aggregate-byte pressure apply producer backpressure; shutdown explicitly
+  wakes a blocked producer. One larger event is admitted when the queue is empty,
+  then blocks later producers until Purple consumes it.
 - Ordinary outbound work uses a bounded command queue. Display acknowledgements
   use a separate coalescing inbox whose registered IDs are bounded by pending
   projections, so queue pressure cannot lose durable UI acceptance. Attachment
@@ -216,11 +216,12 @@ direct messaging remains available.
   Local files are opened once with `O_NONBLOCK` to avoid special-file open
   stalls, inspected through that descriptor, restricted to regular files, and
   read only up to the configured limit plus one byte.
-  Each file is capped at 25 MiB and each incoming message at 50 MiB. Outgoing
-  admission spans queued, recovery-deferred, and active work, with at most two
-  files totaling 50 MiB per account. Queued binary events and unresolved Purple
-  receive prompts each have independent 64 MiB budgets. The
-  [attachment policy](attachment-policy.md) maps these limits to their owners.
+  Outgoing files are capped at 25 MiB. Outgoing admission spans queued,
+  recovery-deferred, and active work, with at most two files totaling 50 MiB per
+  account. Incoming file size follows Signal's network policy without a lower
+  plugin per-file or per-message cap. Queued binary events normally use a 64 MiB
+  aggregate budget, while unresolved Purple receive prompts have no byte cap.
+  The [attachment policy](attachment-policy.md) maps these limits to their owners.
   Decrypted attachment data and generated GIF data are passed through memory
   pipes and never written to a plugin-managed plaintext cache.
   Attachment sends are not part of the durable text-message outbox.

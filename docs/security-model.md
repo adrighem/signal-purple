@@ -69,12 +69,15 @@ user-facing local storage, not diagnostic output.
   encrypted rows.
 - Backend events use a bounded queue. Count and aggregate-byte pressure block
   the producer until Purple drains capacity; teardown wakes blocked producers.
-  A single event above the 64 MiB byte budget fails visibly and reconnects.
-- Attachments are capped at 25 MiB each and 50 MiB per incoming message.
-  The C adapter rejects non-regular and known-oversized outgoing files before
-  allocating their contents, rejects empty files, and enforces the same limit
-  while reading from the already inspected descriptor. Every outgoing Purple
-  transfer is registered from creation. Start callbacks are protected by a
+  One event larger than the normal 64 MiB aggregate budget is admitted alone.
+- Incoming attachment size follows Signal's network policy without a lower
+  plugin per-file or per-message cap. Incoming data and unresolved Purple
+  receive prompts remain in memory, including temporary handoff copies.
+  Outgoing attachments are capped at 25 MiB. The C adapter rejects non-regular
+  and known-oversized outgoing files before allocating their contents, rejects
+  empty files, and enforces the same limit while reading from the already
+  inspected descriptor. Every outgoing Purple transfer is registered from
+  creation. Start callbacks are protected by a
   temporary reference, started transfers are cancelled on disconnect, and all
   remaining contexts are detached before connection state is freed.
   Outgoing queued, recovery-deferred, and active attachments share a per-account
@@ -82,8 +85,7 @@ user-facing local storage, not diagnostic output.
   are released together on every terminal path. Cancellation is stored on the
   admitted request rather than submitted through the bounded work queue, so it
   remains effective under queue pressure and before task startup. Binary
-  backend events and unresolved receive prompts each have separate 64 MiB
-  ceilings; see the
+  backend events normally have a 64 MiB aggregate ceiling; see the
   [attachment policy](attachment-policy.md). Direct and group images are
   eligible for inline display only when a JPEG, PNG, or GIF MIME type agrees
   with its file signature, the encoded payload is no larger than 8 MiB, and the
