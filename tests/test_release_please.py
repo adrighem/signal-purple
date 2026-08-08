@@ -14,7 +14,14 @@ WORKFLOWS_DIRECTORY = pathlib.PurePosixPath(".github/workflows")
 CARGO_MANIFEST = pathlib.PurePosixPath("rust/signal-core/Cargo.toml")
 LOCK_PATH = pathlib.PurePosixPath("rust/signal-core/Cargo.lock")
 DEPENDENCY_POLICY = pathlib.PurePosixPath("docs/dependency-policy.md")
+RELEASE_PROCESS = pathlib.PurePosixPath("docs/release-process.md")
+RELEASE_CHECKLIST = pathlib.PurePosixPath("docs/release-checklist.md")
+LIVE_VALIDATION = pathlib.PurePosixPath("docs/live-validation.md")
 THIRD_PARTY_LICENSES = pathlib.PurePosixPath("THIRD_PARTY_LICENSES.md")
+README = pathlib.PurePosixPath("README.md")
+CONTRIBUTING = pathlib.PurePosixPath("CONTRIBUTING.md")
+PULL_REQUEST_TEMPLATE = pathlib.PurePosixPath(".github/PULL_REQUEST_TEMPLATE.md")
+BUG_FORM = pathlib.PurePosixPath(".github/ISSUE_TEMPLATE/bug.yml")
 MARKER = "# x-release-please-version"
 RELEASE_ARTIFACTS_WORKFLOW = pathlib.PurePosixPath(
     ".github/workflows/release-artifacts.yml"
@@ -435,6 +442,90 @@ def validate_ci_workflow() -> None:
         )
 
 
+def validate_repository_guidance() -> None:
+    release_process = (PROJECT_ROOT / RELEASE_PROCESS).read_text(encoding="utf-8")
+    require_fragments(
+        release_process,
+        RELEASE_PROCESS,
+        [
+            "parent release run and its exact",
+            "does not prove the parent dispatch-and-wait path",
+            "published GitHub release",
+            "Record pass, fail, or",
+            "not-applicable status for every stable-checklist section",
+            "makes no new Signal service compatibility claim",
+        ],
+    )
+
+    release_checklist = (PROJECT_ROOT / RELEASE_CHECKLIST).read_text(
+        encoding="utf-8"
+    )
+    require_fragments(
+        release_checklist,
+        RELEASE_CHECKLIST,
+        [
+            "published release links the candidate evidence index",
+            "release evidence from Signal compatibility evidence",
+        ],
+    )
+
+    live_validation = (PROJECT_ROOT / LIVE_VALIDATION).read_text(encoding="utf-8")
+    require_fragments(
+        live_validation,
+        LIVE_VALIDATION,
+        [
+            "## Current stable release evidence",
+            "https://github.com/adrighem/signal-purple/releases/latest",
+            "is the evidence landing page",
+            "does not substitute for Signal service compatibility evidence",
+        ],
+    )
+
+    pull_request_template = (PROJECT_ROOT / PULL_REQUEST_TEMPLATE).read_text(
+        encoding="utf-8"
+    )
+    require_fragments(
+        pull_request_template,
+        PULL_REQUEST_TEMPLATE,
+        ["dedicated-account live evidence", "required maintainer follow-up"],
+    )
+    reject_fragments(
+        pull_request_template,
+        PULL_REQUEST_TEMPLATE,
+        ["Live interoperability was tested when this changes Signal behavior"],
+    )
+
+    bug_form = (PROJECT_ROOT / BUG_FORM).read_text(encoding="utf-8")
+    require_fragments(
+        bug_form,
+        BUG_FORM,
+        [
+            "id: last_working_version",
+            "id: regression_context",
+            "Debian 13 APT package",
+            "Ubuntu 24.04 LTS APT package",
+            "Fedora RPM (best effort)",
+            "Nix flake (best effort)",
+        ],
+    )
+    reject_fragments(bug_form, BUG_FORM, ["- Debian package"])
+
+    readme = (PROJECT_ROOT / README).read_text(encoding="utf-8")
+    require_fragments(readme, README, ["plugin revision, distribution and version"])
+    reject_fragments(readme, README, ["plugin revision, Debian version"])
+
+    contributing = (PROJECT_ROOT / CONTRIBUTING).read_text(encoding="utf-8")
+    require_fragments(
+        contributing,
+        CONTRIBUTING,
+        [
+            "maintainer-controlled dedicated non-production",
+            "required maintainer follow-up",
+            "second trusted maintainer",
+        ],
+    )
+
+
 def validate_lock_marker() -> None:
     version = (PROJECT_ROOT / "version.txt").read_text(encoding="utf-8").strip()
     lock_text = (PROJECT_ROOT / LOCK_PATH).read_text(encoding="utf-8")
@@ -548,6 +639,7 @@ def main() -> None:
     validate_release_config()
     validate_release_workflows()
     validate_ci_workflow()
+    validate_repository_guidance()
     validate_lock_marker()
     validate_presage_revision()
     validate_nix_version_source()

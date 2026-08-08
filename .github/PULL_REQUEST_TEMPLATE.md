@@ -11,7 +11,7 @@
 - [ ] `scripts/check.sh full` passes
 - [ ] Security/storage/protocol impact is described
 - [ ] No real identifiers, messages, provisioning URIs, or keys are included
-- [ ] Live interoperability was tested when this changes Signal behavior
+- [ ] Signal behavior changes link dedicated-account live evidence or identify the required maintainer follow-up
 
 ## Compatibility
 

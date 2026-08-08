@@ -83,6 +83,8 @@ Signal service scenario into a compatibility claim.
 - Artifacts are reproduced, attested, smoke-tested, and attached before the
   draft is published as stable.
 - Downloaded release assets match `SHA256SUMS`.
+- The published release links the candidate evidence index and distinguishes
+  release evidence from Signal compatibility evidence.
 - Stable publication deploys signed APT metadata, and isolated Debian 13 and
   Ubuntu 24.04 clients select their matching packages while the repository
   retains the supported predecessor.

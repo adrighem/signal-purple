@@ -4,6 +4,15 @@ Live Signal compatibility is recorded per repository revision and test date.
 A partial pass does not establish complete compatibility with the production
 service.
 
+## Current stable release evidence
+
+The [latest stable release](https://github.com/adrighem/signal-purple/releases/latest)
+is the evidence landing page for its final tag and commit, candidate tracker,
+artifacts, supported-package probes, and publication status. Release evidence
+does not substitute for Signal service compatibility evidence. Each release
+states whether it adds a new compatibility claim; revision-specific live
+results and outstanding scenarios are recorded below.
+
 ## 2026-07-31 0.4.2 receive-store scheduling validation
 
 The immutable `v0.4.2` Debian package was installed over `v0.4.1` and Pidgin

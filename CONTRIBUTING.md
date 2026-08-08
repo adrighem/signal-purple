@@ -25,6 +25,22 @@ The main ownership boundaries are:
 See [development.md](docs/development.md) for targeted commands and architecture
 rules.
 
+## Choosing work and review
+
+Start with an existing issue when possible. Open one before broad protocol,
+storage, ABI, packaging, or lifecycle work so scope and compatibility evidence
+can be agreed first. Small, focused pull requests are easier to review and
+release safely.
+
+Live Signal testing uses maintainer-controlled dedicated non-production
+accounts. Contributors should identify required maintainer follow-up instead of
+using personal accounts or private message data for a contribution.
+
+The project currently has one trusted maintainer. Automated checks gate every
+pull request. Require human approval only after a second trusted maintainer
+joins; enabling it sooner would deadlock maintenance and automated release pull
+requests.
+
 ## Pull requests and releases
 
 Use a concise Conventional Commit-style pull-request title, such as
