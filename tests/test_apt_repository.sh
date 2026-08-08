@@ -43,6 +43,7 @@ cat > "$releases_json" <<'JSON'
     "draft": false,
     "prerelease": false,
     "published_at": "2026-08-05T00:00:00Z",
+    "target_commitish": "0000000000000000000000000000000000000000",
     "assets": []
   },
   {
@@ -51,6 +52,7 @@ cat > "$releases_json" <<'JSON'
     "draft": false,
     "prerelease": false,
     "published_at": "2026-08-03T00:00:00Z",
+    "target_commitish": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
     "assets": [
       {
         "id": 301,
@@ -88,6 +90,7 @@ cat > "$releases_json" <<'JSON'
     "draft": false,
     "prerelease": false,
     "published_at": "2026-08-02T00:00:00Z",
+    "target_commitish": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
     "assets": [
       {
         "id": 201,
@@ -127,6 +130,67 @@ test "$(awk -F '\t' 'NR == 3 { print $2 }' "$selected_assets")" \
     = signal-purple_1.2.3-1_ubuntu-24.04-lts_amd64.deb
 test "$(awk -F '\t' 'NR == 6 { print $3 }' "$selected_assets")" -eq 202
 
+expected_assets=$temporary/expected-assets.tsv
+"$project_root/scripts/select-apt-release-assets.py" \
+    "$releases_json" \
+    v1.2.3 \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    > "$expected_assets"
+cmp "$selected_assets" "$expected_assets"
+
+expect_selection_failure()
+{
+    description=$1
+    shift
+    if "$project_root/scripts/select-apt-release-assets.py" "$@" \
+        > /dev/null 2>&1; then
+        printf 'invalid release selection accepted: %s\n' "$description" >&2
+        exit 1
+    fi
+}
+
+expect_selection_failure \
+    'tag without commit' \
+    "$releases_json" v1.2.3 ''
+expect_selection_failure \
+    'commit without tag' \
+    "$releases_json" '' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+expect_selection_failure \
+    'wrong release commit' \
+    "$releases_json" v1.2.3 cccccccccccccccccccccccccccccccccccccccc
+expect_selection_failure \
+    'previous release requested as current' \
+    "$releases_json" v1.2.2 bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+missing_target=$temporary/missing-target.json
+duplicate_tag=$temporary/duplicate-tag.json
+python3 - "$releases_json" "$missing_target" "$duplicate_tag" <<'PY'
+import copy
+import json
+import pathlib
+import sys
+
+source, missing_target_path, duplicate_tag_path = map(pathlib.Path, sys.argv[1:])
+releases = json.loads(source.read_text(encoding="utf-8"))
+current = next(release for release in releases if release["tag_name"] == "v1.2.3")
+
+missing_target = copy.deepcopy(releases)
+next(
+    release for release in missing_target if release["tag_name"] == "v1.2.3"
+).pop("target_commitish")
+missing_target_path.write_text(json.dumps(missing_target), encoding="utf-8")
+
+duplicate_tag = copy.deepcopy(releases)
+duplicate_tag.append(copy.deepcopy(current))
+duplicate_tag_path.write_text(json.dumps(duplicate_tag), encoding="utf-8")
+PY
+expect_selection_failure \
+    'missing release target' \
+    "$missing_target" v1.2.3 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+expect_selection_failure \
+    'duplicate stable tag' \
+    "$duplicate_tag"
+
 bad_releases=$temporary/bad-releases.json
 python3 - "$releases_json" "$bad_releases" <<'PY'
 import json
@@ -139,11 +203,7 @@ next(release for release in releases if release["tag_name"] == "v1.2.3")[
 ].pop()
 pathlib.Path(sys.argv[2]).write_text(json.dumps(releases), encoding="utf-8")
 PY
-if "$project_root/scripts/select-apt-release-assets.py" "$bad_releases" \
-    > /dev/null 2>&1; then
-    printf '%s\n' 'incomplete stable release unexpectedly selected' >&2
-    exit 1
-fi
+expect_selection_failure 'incomplete stable release' "$bad_releases"
 
 package_directory=$temporary/packages
 mkdir "$package_directory"

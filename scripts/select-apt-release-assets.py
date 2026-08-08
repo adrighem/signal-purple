@@ -8,6 +8,7 @@ import sys
 
 
 TAG_PATTERN = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
+COMMIT_PATTERN = re.compile(r"^[0-9a-f]{40,64}$")
 DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 DISTRO_IDS = ("debian-13", "ubuntu-24.04-lts")
 
@@ -56,11 +57,23 @@ def version_key(release: dict[str, object]) -> tuple[int, int, int]:
     return tuple(int(part) for part in match.groups())
 
 
-def select_assets(releases: object) -> list[tuple[str, str, int, str]]:
+def select_assets(
+    releases: object,
+    expected_tag: str | None = None,
+    expected_commit: str | None = None,
+) -> list[tuple[str, str, int, str]]:
     if not isinstance(releases, list):
         fail("GitHub releases response must be an array")
+    if (expected_tag is None) != (expected_commit is None):
+        fail("expected release tag and commit must be provided together")
+    if expected_tag is not None:
+        if TAG_PATTERN.fullmatch(expected_tag) is None:
+            fail("expected release tag is not semantic-versioned")
+        if expected_commit is None or COMMIT_PATTERN.fullmatch(expected_commit) is None:
+            fail("expected release commit is invalid")
 
     stable: list[dict[str, object]] = []
+    stable_tags: set[str] = set()
     for release in releases:
         if not isinstance(release, dict):
             fail("GitHub releases response contains a non-object")
@@ -69,14 +82,23 @@ def select_assets(releases: object) -> list[tuple[str, str, int, str]]:
             published_at = release.get("published_at")
             if not isinstance(tag, str) or TAG_PATTERN.fullmatch(tag) is None:
                 fail("stable release has an invalid semantic-version tag")
+            if tag in stable_tags:
+                fail(f"stable releases contain duplicate tag {tag}")
             if not isinstance(published_at, str) or not published_at:
                 fail(f"stable release {tag} has no publication timestamp")
+            stable_tags.add(tag)
             stable.append(release)
 
     stable.sort(key=version_key, reverse=True)
     selected = stable[:2]
     if not selected:
         fail("no published stable release is available for the APT repository")
+    if expected_tag is not None:
+        newest = selected[0]
+        if newest.get("tag_name") != expected_tag:
+            fail("newest stable release does not match expected tag")
+        if newest.get("target_commitish") != expected_commit:
+            fail("newest stable release does not match expected commit")
 
     result: list[tuple[str, str, int, str]] = []
     for release_index, release in enumerate(selected):
@@ -116,15 +138,25 @@ def select_assets(releases: object) -> list[tuple[str, str, int, str]]:
 
 
 def main() -> None:
-    if len(sys.argv) != 2:
-        fail(f"usage: {pathlib.Path(sys.argv[0]).name} RELEASES_JSON")
+    if len(sys.argv) not in (2, 4):
+        fail(
+            f"usage: {pathlib.Path(sys.argv[0]).name} "
+            "RELEASES_JSON [EXPECTED_TAG EXPECTED_COMMIT]"
+        )
     path = pathlib.Path(sys.argv[1])
+    expected_tag = None
+    expected_commit = None
+    if len(sys.argv) == 4:
+        expected_tag = sys.argv[2] or None
+        expected_commit = sys.argv[3] or None
     try:
         releases = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
         fail(f"cannot read GitHub releases response: {error}")
 
-    for tag, name, asset_id, digest in select_assets(releases):
+    for tag, name, asset_id, digest in select_assets(
+        releases, expected_tag, expected_commit
+    ):
         print(tag, name, asset_id, digest, sep="\t")
 
 
