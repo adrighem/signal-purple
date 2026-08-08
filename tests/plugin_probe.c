@@ -4,6 +4,7 @@
 #include <gmodule.h>
 #include <purple.h>
 #include <errno.h>
+#include <stdio.h>
 #include <sys/stat.h>
 
 #include "signal_purple.h"
@@ -232,6 +233,73 @@ capture_group_echo(PurpleConversation *conversation, const char *who,
 static PurpleConversationUiOps group_echo_conversation_ops = {
     .write_chat = capture_group_echo,
 };
+
+typedef struct {
+    guint writes;
+    PurpleConversation *conversation;
+    PurpleStoredImage *image;
+    char *sender;
+    PurpleMessageFlags flags;
+    time_t timestamp;
+} InlineMediaCapture;
+
+static InlineMediaCapture inline_media_capture;
+
+static void
+capture_inline_media(PurpleConversation *conversation, const char *sender,
+                     const char *message, PurpleMessageFlags flags,
+                     time_t timestamp)
+{
+    PurpleStoredImage *image;
+    int image_id = 0;
+
+    g_assert_cmpint(sscanf(message, "<img id=\"%d\">", &image_id), ==, 1);
+    image = purple_imgstore_find_by_id(image_id);
+    g_assert_nonnull(image);
+    g_assert_null(inline_media_capture.image);
+
+    inline_media_capture.writes++;
+    inline_media_capture.conversation = conversation;
+    inline_media_capture.image = purple_imgstore_ref(image);
+    inline_media_capture.sender = g_strdup(sender);
+    inline_media_capture.flags = flags;
+    inline_media_capture.timestamp = timestamp;
+}
+
+static PurpleConversationUiOps inline_media_conversation_ops = {
+    .write_chat = capture_inline_media,
+    .write_im = capture_inline_media,
+    .has_focus = read_has_focus,
+};
+
+static guint presented_message_writes;
+
+static void
+capture_presented_message(PurpleConversation *conversation, const char *sender,
+                          const char *message, PurpleMessageFlags flags,
+                          time_t timestamp)
+{
+    (void)conversation;
+    (void)sender;
+    (void)message;
+    (void)flags;
+    (void)timestamp;
+    presented_message_writes++;
+}
+
+static PurpleConversationUiOps presented_message_conversation_ops = {
+    .write_chat = capture_presented_message,
+    .write_im = capture_presented_message,
+    .has_focus = read_has_focus,
+};
+
+static void
+reset_inline_media_capture(void)
+{
+    g_clear_pointer(&inline_media_capture.image, purple_imgstore_unref);
+    g_clear_pointer(&inline_media_capture.sender, g_free);
+    inline_media_capture = (InlineMediaCapture){ 0 };
+}
 
 static void
 reset_group_echo_capture(void)
@@ -1292,6 +1360,7 @@ test_pending_read_receipt_admission(PurplePlugin *plugin,
         .abi_version = SIGNAL_CORE_ABI_VERSION,
         .struct_size = sizeof(SignalEvent),
         .kind = SIGNAL_EVENT_MESSAGE,
+        .request_id = 1,
         .peer_id = "aci:pending-read-contact",
         .text = "pending read probe",
         .timestamp_ms = 100,
@@ -1379,6 +1448,237 @@ test_pending_read_receipt_admission(PurplePlugin *plugin,
 }
 
 static void
+test_inline_attachment_routing(PurplePlugin *plugin,
+                               PurplePluginProtocolInfo *protocol)
+{
+    gsize png_len = 0;
+    g_autofree guchar *png = g_base64_decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+        &png_len);
+    union {
+        gpointer pointer;
+        SignalDispatchEventFunc function;
+    } dispatch_event = { 0 };
+    PurpleAccount *account =
+        purple_account_new("inline-attachment-routing", SIGNAL_PLUGIN_ID);
+    PurpleConnection gc = {
+        .prpl = plugin,
+        .state = PURPLE_CONNECTED,
+        .account = account,
+    };
+    FakeReadMarker marker = {
+        .status = SIGNAL_STATUS_OK,
+    };
+    SignalConnection *connection;
+    PurpleConversation *direct;
+    PurpleConversation *group;
+    SignalEvent direct_caption = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_MESSAGE,
+        .timestamp_ms = 2000,
+        .peer_id = "aci:inline-direct",
+        .text = "direct caption",
+    };
+    SignalEvent direct_attachment = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_ATTACHMENT,
+        .request_id = 9001,
+        .timestamp_ms = 2000,
+        .peer_id = "aci:inline-direct",
+        .title = "direct.png",
+        .text = "image/png",
+        .data = png,
+        .data_len = png_len,
+    };
+    SignalEvent group_message = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_GROUP_MESSAGE,
+        .peer_id = "aci:inline-group-member",
+        .chat_id = "inline-media-group",
+        .title = "Inline media group",
+        .text = "group setup",
+    };
+    SignalEvent group_message_filtered = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_GROUP_MESSAGE,
+        .request_id = 9004,
+        .timestamp_ms = 3000,
+        .peer_id = "aci:inline-group-member",
+        .chat_id = "inline-media-group",
+        .title = "Inline media group",
+        .text = "ignored group message",
+    };
+    SignalEvent group_attachment = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_ATTACHMENT,
+        .request_id = 9005,
+        .timestamp_ms = 3000,
+        .peer_id = "aci:inline-group-member",
+        .chat_id = "inline-media-group",
+        .title = "group.png",
+        .text = "image/png",
+        .data = png,
+        .data_len = png_len,
+    };
+    gboolean accepted = FALSE;
+    guint transfer_count = g_list_length(purple_xfers_get_all());
+
+    g_assert_cmpuint(png_len, ==, 68);
+    g_assert_true(g_module_symbol((GModule *)plugin->handle,
+                                  "signal_dispatch_event",
+                                  &dispatch_event.pointer));
+    purple_account_set_connection(account, &gc);
+    connection = new_transfer_connection(&gc);
+    connection->core = (SignalCore *)&marker;
+    connection->mark_read = fake_mark_read;
+
+    direct = purple_conversation_new(PURPLE_CONV_TYPE_IM, account,
+                                     direct_attachment.peer_id);
+    purple_conversation_set_ui_ops(direct,
+                                   &presented_message_conversation_ops);
+    read_conversation_focused = TRUE;
+    presented_message_writes = 0;
+    g_assert_true(
+        dispatch_event.function(connection, &direct_caption, &accepted));
+    g_assert_true(accepted);
+    g_assert_cmpuint(presented_message_writes, ==, 1);
+    g_assert_cmpuint(marker.calls, ==, 0);
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 0);
+
+    purple_conversation_set_ui_ops(direct, &inline_media_conversation_ops);
+    accepted = FALSE;
+    g_assert_true(
+        dispatch_event.function(connection, &direct_attachment, &accepted));
+    g_assert_true(accepted);
+    g_assert_cmpuint(inline_media_capture.writes, ==, 1);
+    g_assert_true(inline_media_capture.conversation == direct);
+    g_assert_cmpstr(inline_media_capture.sender, ==,
+                    direct_attachment.peer_id);
+    g_assert_cmpuint(inline_media_capture.flags, ==,
+                     PURPLE_MESSAGE_RECV | PURPLE_MESSAGE_IMAGES);
+    g_assert_cmpint(inline_media_capture.timestamp, ==, 2);
+    g_assert_cmpuint(purple_imgstore_get_size(inline_media_capture.image), ==,
+                     png_len);
+    g_assert_cmpstr(purple_imgstore_get_filename(inline_media_capture.image),
+                    ==, "direct.png");
+    g_assert_cmpuint(marker.calls, ==, 1);
+    g_assert_cmpstr(marker.recipient, ==, direct_attachment.peer_id);
+    g_assert_cmpuint(marker.timestamp, ==, direct_attachment.timestamp_ms);
+    g_assert_cmpuint(g_list_length(purple_xfers_get_all()), ==,
+                     transfer_count);
+    reset_inline_media_capture();
+
+    purple_conversation_set_ui_ops(direct,
+                                   &presented_message_conversation_ops);
+    presented_message_writes = 0;
+    purple_account_set_privacy_type(account, PURPLE_PRIVACY_DENY_ALL);
+    direct_caption.request_id = 9002;
+    direct_caption.timestamp_ms = 2001;
+    accepted = FALSE;
+    g_assert_true(
+        dispatch_event.function(connection, &direct_caption, &accepted));
+    g_assert_true(accepted);
+    g_assert_cmpuint(presented_message_writes, ==, 0);
+    g_assert_cmpuint(marker.calls, ==, 1);
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 0);
+
+    direct_caption.flags = SIGNAL_EVENT_FLAG_OUTGOING;
+    direct_caption.request_id = 0;
+    direct_caption.timestamp_ms = 2002;
+    accepted = FALSE;
+    g_assert_true(
+        dispatch_event.function(connection, &direct_caption, &accepted));
+    g_assert_true(accepted);
+    g_assert_cmpuint(presented_message_writes, ==, 1);
+    g_assert_cmpuint(marker.calls, ==, 1);
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 0);
+    direct_caption.flags = 0;
+
+    purple_conversation_set_ui_ops(direct, &inline_media_conversation_ops);
+    direct_attachment.request_id = 9003;
+    direct_attachment.timestamp_ms = 2003;
+    accepted = FALSE;
+    g_assert_true(
+        dispatch_event.function(connection, &direct_attachment, &accepted));
+    g_assert_true(accepted);
+    g_assert_cmpuint(inline_media_capture.writes, ==, 0);
+    g_assert_cmpuint(g_list_length(purple_xfers_get_all()), ==,
+                     transfer_count);
+    g_assert_cmpuint(marker.calls, ==, 1);
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 0);
+    purple_account_set_privacy_type(account, PURPLE_PRIVACY_ALLOW_ALL);
+
+    accepted = FALSE;
+    g_assert_true(dispatch_event.function(connection, &group_message,
+                                          &accepted));
+    g_assert_true(accepted);
+    group = signal_group_sync_lookup_conversation(account,
+                                                  group_attachment.chat_id);
+    g_assert_nonnull(group);
+    purple_conversation_set_ui_ops(group,
+                                   &presented_message_conversation_ops);
+    purple_conv_chat_ignore(PURPLE_CONV_CHAT(group),
+                            group_attachment.peer_id);
+    presented_message_writes = 0;
+    accepted = FALSE;
+    g_assert_true(dispatch_event.function(connection, &group_message_filtered,
+                                          &accepted));
+    g_assert_true(accepted);
+    g_assert_cmpuint(presented_message_writes, ==, 0);
+    g_assert_cmpuint(marker.calls, ==, 1);
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 0);
+
+    purple_conversation_set_ui_ops(group, &inline_media_conversation_ops);
+    accepted = FALSE;
+    g_assert_true(dispatch_event.function(connection, &group_attachment,
+                                          &accepted));
+    g_assert_true(accepted);
+    g_assert_cmpuint(inline_media_capture.writes, ==, 0);
+    g_assert_cmpuint(g_list_length(purple_xfers_get_all()), ==,
+                     transfer_count);
+    g_assert_cmpuint(marker.calls, ==, 1);
+    g_assert_cmpuint(g_hash_table_size(connection->pending_reads), ==, 0);
+
+    purple_conv_chat_unignore(PURPLE_CONV_CHAT(group),
+                              group_attachment.peer_id);
+    accepted = FALSE;
+    g_assert_true(dispatch_event.function(connection, &group_attachment,
+                                          &accepted));
+    g_assert_true(accepted);
+    g_assert_cmpuint(inline_media_capture.writes, ==, 1);
+    g_assert_true(inline_media_capture.conversation == group);
+    g_assert_cmpstr(inline_media_capture.sender, ==,
+                    group_attachment.peer_id);
+    g_assert_cmpuint(inline_media_capture.flags, ==,
+                     PURPLE_MESSAGE_RECV | PURPLE_MESSAGE_IMAGES);
+    g_assert_cmpint(inline_media_capture.timestamp, ==, 3);
+    g_assert_cmpstr(purple_imgstore_get_filename(inline_media_capture.image),
+                    ==, "group.png");
+    g_assert_cmpuint(g_list_length(purple_xfers_get_all()), ==,
+                     transfer_count);
+    g_assert_cmpuint(marker.calls, ==, 2);
+    g_assert_cmpstr(marker.recipient, ==, group_attachment.peer_id);
+    g_assert_cmpuint(marker.timestamp, ==, group_attachment.timestamp_ms);
+    reset_inline_media_capture();
+
+    connection->core = NULL;
+    serv_got_chat_left(&gc,
+                       purple_conv_chat_get_id(PURPLE_CONV_CHAT(group)));
+    purple_conversation_destroy(group);
+    purple_conversation_destroy(direct);
+    protocol->close(&gc);
+    purple_account_set_connection(account, NULL);
+    purple_account_destroy(account);
+    g_clear_pointer(&marker.recipient, g_free);
+    read_conversation_focused = FALSE;
+}
+
+static void
 test_pending_read_receipt_limit(PurplePlugin *plugin,
                                 PurplePluginProtocolInfo *protocol)
 {
@@ -1399,6 +1699,7 @@ test_pending_read_receipt_limit(PurplePlugin *plugin,
         .abi_version = SIGNAL_CORE_ABI_VERSION,
         .struct_size = sizeof(SignalEvent),
         .kind = SIGNAL_EVENT_MESSAGE,
+        .request_id = 1,
         .peer_id = "aci:pending-read-limit-contact",
         .text = "pending read limit probe",
     };
@@ -1734,6 +2035,7 @@ main(int argc, char **argv)
     test_connection_owned_resource_cleanup(protocol);
     test_standard_conversation_logging(plugin, protocol);
     test_pending_read_receipt_admission(plugin, protocol);
+    test_inline_attachment_routing(plugin, protocol);
     test_pending_read_receipt_limit(plugin, protocol);
     test_pending_transfer_disconnect(protocol, user_dir);
     test_synchronous_start_failure(protocol, user_dir);

@@ -10,8 +10,8 @@ different ownership stages independently and may change without a C ABI bump.
 | Admitted outgoing files | 2 files and 50 MiB total per account | Rust core | Retryable queue-full result |
 | Queued binary events | 64 MiB aggregate | Rust event queue | Producer backpressure; a larger single event fails visibly and reconnects |
 | Unresolved receive prompts | 64 MiB | C adapter | Ask the user to resolve existing prompts |
-| Inline group JPEG/PNG | 8192 pixels per edge and 16 megapixels | C image decoder | Fall back to a file prompt |
-| Inline group GIF | 8 MiB and 8 million cumulative canvas pixel-frames | C GIF parser and image decoder | Fall back to a file prompt |
+| Inline direct/group JPEG/PNG | 8 MiB encoded, 8192 pixels per edge, and 16 megapixels | Rust classifier and C image decoder | Fall back to a file prompt |
+| Inline direct/group GIF | 8 MiB encoded, 8192 pixels per edge, 16 megapixels, and 8 million cumulative canvas pixel-frames | Rust classifier, C GIF parser, and image decoder | Fall back to a file prompt |
 | Signal GIF-style MP4 conversion | 8 MiB input/output, 480 pixels per edge, 15 fps maximum, 2 attempts per message, 1 process globally | Rust worker, `prlimit`, and FFmpeg | Preserve the original MP4 file prompt |
 
 Incoming downloads use the smaller of the per-file limit and the message's

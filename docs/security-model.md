@@ -84,20 +84,24 @@ user-facing local storage, not diagnostic output.
   remains effective under queue pressure and before task startup. Binary
   backend events and unresolved receive prompts each have separate 64 MiB
   ceilings; see the
-  [attachment policy](attachment-policy.md). Group images are eligible for
-  inline display only when a JPEG, PNG, or GIF MIME type agrees with its file
-  signature and the complete payload decodes. JPEG and PNG dimensions are no
-  larger than 8192 pixels per edge or 16 megapixels total. GIFs are limited to
-  8 MiB and 8 million cumulative canvas pixel-frames; their block structure is
-  checked before decoder allocation. Decoder validation is chunked, and
-  rejected dimensions are scaled down before allocation. A Signal GIF-flagged
-  group MP4 may be converted to a GIF by a pipe-only FFmpeg child with a cleared
-  environment and fixed arguments. `prlimit` applies a 1 GiB address-space cap
+  [attachment policy](attachment-policy.md). Direct and group images are
+  eligible for inline display only when a JPEG, PNG, or GIF MIME type agrees
+  with its file signature, the encoded payload is no larger than 8 MiB, and the
+  complete payload decodes. Dimensions are no larger than 8192 pixels per edge
+  or 16 megapixels total. GIFs are additionally limited to 8 million cumulative
+  canvas pixel-frames; their block structure is checked before decoder
+  allocation. Decoder validation is chunked, and rejected dimensions are
+  scaled down before allocation. A Signal GIF-flagged direct or group MP4 may be
+  converted to a GIF by a pipe-only FFmpeg child with a cleared environment and
+  fixed arguments. `prlimit` applies a 1 GiB address-space cap
   plus CPU and file-descriptor limits; the worker separately bounds
   source/output bytes, wall time, threads, dimensions, frame rate, cumulative
   frame area, attempts, and concurrency. Invalid output and all conversion
   failures preserve the original receive prompt. Ordinary video and other data
-  also use that prompt.
+  also use that prompt. One incoming-presentation gate applies Purple's direct
+  privacy and group-ignore rules to text, inline media, and transfer fallback.
+  Filtered events are acknowledged without presentation or a read receipt;
+  outgoing linked-device echoes remain visible.
   Decrypted
   incoming bytes remain in memory until the displayed image is released, saved,
   or rejected; the plugin creates no plaintext attachment cache. Remote

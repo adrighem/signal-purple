@@ -35,7 +35,7 @@ This README distinguishes production-service evidence from automated tests:
 | Group messages | **Implemented.** Routing and active-membership guards have automated coverage; current end-to-end send/receive still needs live validation. |
 | Remote group leave | **Test-covered.** The confirmed **Leave Signal group…** flow still needs live validation. |
 | Typing and receipts | **Test-covered.** Direct typing and outgoing delivery/focus-gated read receipts are implemented. Receipt updates received from other clients are not shown in Purple 2. |
-| Attachments | **Implemented.** Size limits, ABI handling, transfer presentation, and inline-image validation have focused tests. End-to-end transfers and the inline-image fix still need live checks. |
+| Attachments | **Implemented.** Size limits, ABI handling, transfer presentation, and direct/group inline-image routing have focused tests. End-to-end transfers and inline media still need live checks. |
 | Delivery recovery | **Test-covered.** The encrypted text outbox and unacknowledged-message replay are implemented; controlled offline, crash, and network-loss checks remain. |
 | Identity replacement | **Test-covered.** Verified-contact sends block until the user accepts a changed identity after out-of-band verification. |
 | Idle event handling | **Live-tested.** Descriptor-driven wakeups replaced the old polling loop; an isolated idle sample found no hot Signal thread. |
@@ -325,19 +325,20 @@ not implemented.
 
 ### Attachments
 
-Valid, within-limit incoming and outgoing files use Purple's transfer UI. An
-incoming group JPEG, PNG, or genuine GIF renders inline only when its MIME type,
-signature, complete decode, and bounded dimensions agree. Animated GIFs also
-have compressed-size and cumulative decoded-frame limits. Incoming group MP4s
-which carry Signal's GIF flag are converted through bounded, process-isolated
-FFmpeg pipes and presented as GIFs when the optional `ffmpeg` and `prlimit`
-helpers are installed. Ordinary video and any failed, unavailable, oversized,
-or invalid conversion retains the original MP4 transfer prompt. Unnamed common
-media receives a usable type-specific filename. Empty, over-limit, or
-resource-exhausting content is rejected visibly. Each file is limited to 25 MiB
-and one incoming message to 50 MiB. At most two outgoing files totaling 50 MiB
-are admitted per account; retry after another transfer finishes or is cancelled
-when that queue is full.
+Valid, within-limit incoming and outgoing files use Purple's transfer UI.
+Incoming direct and group JPEG, PNG, and genuine GIF images render inline only
+when their MIME type, signature, complete decode, 8 MiB encoded-size limit, and
+bounded dimensions agree. Animated GIFs also have a cumulative decoded-frame
+limit. Incoming direct and group MP4s which carry Signal's GIF flag are
+converted through bounded, process-isolated FFmpeg pipes and presented as GIFs
+when the optional `ffmpeg` and `prlimit` helpers are installed. Ordinary video
+and any failed, unavailable, oversized, or invalid conversion retains the
+original MP4 transfer prompt because Purple 2 has no native inline-video API.
+Unnamed common media receives a usable type-specific filename. Empty,
+over-limit, or resource-exhausting content is rejected visibly. Each file is
+limited to 25 MiB and one incoming message to 50 MiB. At most two outgoing files
+totaling 50 MiB are admitted per account; retry after another transfer finishes
+or is cancelled when that queue is full.
 The [attachment policy](docs/attachment-policy.md) records the ownership and
 memory bounds.
 

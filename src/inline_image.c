@@ -7,8 +7,8 @@
 #define SIGNAL_INLINE_IMAGE_MAX_EDGE 8192
 #define SIGNAL_INLINE_IMAGE_MAX_PIXELS \
     (G_GUINT64_CONSTANT(16) * 1000u * 1000u)
+#define SIGNAL_INLINE_IMAGE_MAX_BYTES (8u * 1024u * 1024u)
 #define SIGNAL_INLINE_IMAGE_VALIDATION_CHUNK 4096u
-#define SIGNAL_INLINE_GIF_MAX_BYTES (8u * 1024u * 1024u)
 #define SIGNAL_INLINE_GIF_MAX_PIXEL_FRAMES \
     (G_GUINT64_CONSTANT(8) * 1000u * 1000u)
 
@@ -16,6 +16,24 @@ typedef struct {
     gboolean dimensions_seen;
     gboolean dimensions_supported;
 } SignalInlineImageValidation;
+
+typedef void (*SignalInlineImageMarkupWriter)(const char *message,
+                                              PurpleMessageFlags flags,
+                                              time_t timestamp,
+                                              gpointer user_data);
+
+typedef struct {
+    PurpleConnection *gc;
+    int chat_id;
+    const char *sender;
+    SignalInlineImageGroupWriter writer;
+} SignalInlineImageGroupTarget;
+
+typedef struct {
+    PurpleConnection *gc;
+    const char *sender;
+    SignalInlineImageDirectWriter writer;
+} SignalInlineImageDirectTarget;
 
 static gboolean
 signal_inline_image_has_prefix(const guint8 *data, gsize size,
@@ -68,7 +86,7 @@ signal_inline_gif_is_bounded(const guint8 *data, gsize size)
     gsize offset = 13;
     guint8 packed;
 
-    if (size < 13 || size > SIGNAL_INLINE_GIF_MAX_BYTES ||
+    if (size < 13 || size > SIGNAL_INLINE_IMAGE_MAX_BYTES ||
         (!signal_inline_image_has_prefix(data, size, gif87a_prefix,
                                          sizeof(gif87a_prefix)) &&
          !signal_inline_image_has_prefix(data, size, gif89a_prefix,
@@ -147,6 +165,12 @@ signal_inline_gif_is_bounded(const guint8 *data, gsize size)
 }
 
 gboolean
+signal_inline_image_size_is_supported(gsize size)
+{
+    return size > 0 && size <= SIGNAL_INLINE_IMAGE_MAX_BYTES;
+}
+
+gboolean
 signal_inline_image_dimensions_are_supported(int width, int height)
 {
     return width > 0 && height > 0 && width <= SIGNAL_INLINE_IMAGE_MAX_EDGE &&
@@ -204,6 +228,8 @@ signal_inline_image_is_supported(const char *mime_type, const guint8 *data,
     gboolean complete = TRUE;
     gboolean closed;
 
+    if (!signal_inline_image_size_is_supported(size))
+        return FALSE;
     image_type = signal_inline_image_type(mime_type, data, size);
     if (image_type == NULL)
         return FALSE;
@@ -233,16 +259,16 @@ signal_inline_image_is_supported(const char *mime_type, const guint8 *data,
            gdk_pixbuf_loader_get_pixbuf(loader) != NULL;
 }
 
-gboolean
-signal_inline_image_deliver_with_writer(
-    PurpleConnection *gc, int chat_id, const char *sender,
+static gboolean
+signal_inline_image_deliver_with_markup_writer(
     const char *filename, const char *mime_type, const guint8 *data,
-    gsize size, time_t timestamp, SignalInlineImageWriter writer)
+    gsize size, time_t timestamp, SignalInlineImageMarkupWriter writer,
+    gpointer user_data)
 {
     g_autofree char *markup = NULL;
     int image_id;
 
-    if (gc == NULL || sender == NULL || sender[0] == '\0' || writer == NULL ||
+    if (writer == NULL ||
         !signal_inline_image_is_supported(mime_type, data, size))
         return FALSE;
 
@@ -254,19 +280,87 @@ signal_inline_image_deliver_with_writer(
     markup = g_strdup_printf("<img id=\"%d\">", image_id);
     /* Purple UIs resolve the image ID synchronously and retain their own
      * reference while the message remains displayed. */
-    writer(gc, chat_id, sender,
-           PURPLE_MESSAGE_RECV | PURPLE_MESSAGE_IMAGES, markup, timestamp);
+    writer(markup, PURPLE_MESSAGE_RECV | PURPLE_MESSAGE_IMAGES, timestamp,
+           user_data);
     purple_imgstore_unref_by_id(image_id);
     return purple_imgstore_find_by_id(image_id) != NULL;
 }
 
-gboolean
-signal_inline_image_deliver(PurpleConnection *gc, int chat_id,
-                            const char *sender, const char *filename,
-                            const char *mime_type, const guint8 *data,
-                            gsize size, time_t timestamp)
+static void
+signal_inline_image_write_group(const char *message, PurpleMessageFlags flags,
+                                time_t timestamp, gpointer user_data)
 {
-    return signal_inline_image_deliver_with_writer(
+    SignalInlineImageGroupTarget *target = user_data;
+
+    target->writer(target->gc, target->chat_id, target->sender, flags, message,
+                   timestamp);
+}
+
+static void
+signal_inline_image_write_direct(const char *message, PurpleMessageFlags flags,
+                                 time_t timestamp, gpointer user_data)
+{
+    SignalInlineImageDirectTarget *target = user_data;
+
+    target->writer(target->gc, target->sender, message, flags, timestamp);
+}
+
+gboolean
+signal_inline_image_deliver_group_with_writer(
+    PurpleConnection *gc, int chat_id, const char *sender,
+    const char *filename, const char *mime_type, const guint8 *data,
+    gsize size, time_t timestamp, SignalInlineImageGroupWriter writer)
+{
+    SignalInlineImageGroupTarget target = {
+        .gc = gc,
+        .chat_id = chat_id,
+        .sender = sender,
+        .writer = writer,
+    };
+
+    if (gc == NULL || sender == NULL || sender[0] == '\0' || writer == NULL)
+        return FALSE;
+    return signal_inline_image_deliver_with_markup_writer(
+        filename, mime_type, data, size, timestamp,
+        signal_inline_image_write_group, &target);
+}
+
+gboolean
+signal_inline_image_deliver_direct_with_writer(
+    PurpleConnection *gc, const char *sender, const char *filename,
+    const char *mime_type, const guint8 *data, gsize size, time_t timestamp,
+    SignalInlineImageDirectWriter writer)
+{
+    SignalInlineImageDirectTarget target = {
+        .gc = gc,
+        .sender = sender,
+        .writer = writer,
+    };
+
+    if (gc == NULL || sender == NULL || sender[0] == '\0' || writer == NULL)
+        return FALSE;
+    return signal_inline_image_deliver_with_markup_writer(
+        filename, mime_type, data, size, timestamp,
+        signal_inline_image_write_direct, &target);
+}
+
+gboolean
+signal_inline_image_deliver_group(PurpleConnection *gc, int chat_id,
+                                  const char *sender, const char *filename,
+                                  const char *mime_type, const guint8 *data,
+                                  gsize size, time_t timestamp)
+{
+    return signal_inline_image_deliver_group_with_writer(
         gc, chat_id, sender, filename, mime_type, data, size, timestamp,
         serv_got_chat_in);
+}
+
+gboolean
+signal_inline_image_deliver_direct(PurpleConnection *gc, const char *sender,
+                                   const char *filename,
+                                   const char *mime_type, const guint8 *data,
+                                   gsize size, time_t timestamp)
+{
+    return signal_inline_image_deliver_direct_with_writer(
+        gc, sender, filename, mime_type, data, size, timestamp, serv_got_im);
 }

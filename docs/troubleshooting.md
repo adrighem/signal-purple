@@ -173,16 +173,17 @@ active per account; wait for or cancel a transfer before retrying when that
 limit is reached. Outgoing uploads are not kept in the persistent text-message
 outbox, so send the file again after a restart or failed upload.
 
-Incoming group JPEG, PNG, and genuine GIF images are shown inline when their
-MIME type and file signature agree and the complete image passes its
-format-specific resource limits. Signal can transport GIF-style animations as
-MP4 video. When such an incoming group attachment has Signal's GIF flag, a
-valid MP4 signature, and stays within the conversion policy, installed
+Incoming direct and group JPEG, PNG, and genuine GIF images are shown inline
+when their MIME type and file signature agree and the complete image passes its
+encoded-size, decode, dimension, and format-specific resource limits. Signal
+can transport GIF-style animations as MP4 video. When such an incoming direct
+or group attachment has Signal's GIF flag, a valid MP4 signature, and stays
+within the conversion policy, installed
 `/usr/bin/ffmpeg` and `/usr/bin/prlimit` helpers convert it through memory pipes
-for inline display. Missing helpers, an ordinary video, direct images, other
-formats, invalid or oversized media, contention, timeout, or any failed limit
-keeps the original receive prompt. If an eligible group image still opens as a
-direct transfer after upgrading, verify that the two helper paths exist, then
-fully quit and restart Pidgin. The Linux Rust backend is deliberately
+for inline display. Missing helpers, an ordinary video, other formats, invalid
+or oversized media, contention, timeout, or any failed limit keeps the original
+receive prompt. If eligible media still opens as a transfer after upgrading,
+verify the helper paths for a Signal GIF-style video, then fully quit and
+restart Pidgin. The Linux Rust backend is deliberately
 process-resident for safe dependency-thread shutdown, so only process exit
 guarantees that an older backend mapping is discarded.

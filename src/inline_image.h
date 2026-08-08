@@ -5,27 +5,42 @@
 #include <glib.h>
 #include <purple.h>
 
-typedef void (*SignalInlineImageWriter)(PurpleConnection *gc, int chat_id,
-                                        const char *sender,
-                                        PurpleMessageFlags flags,
-                                        const char *message,
-                                        time_t timestamp);
+typedef void (*SignalInlineImageGroupWriter)(PurpleConnection *gc, int chat_id,
+                                             const char *sender,
+                                             PurpleMessageFlags flags,
+                                             const char *message,
+                                             time_t timestamp);
+
+typedef void (*SignalInlineImageDirectWriter)(PurpleConnection *gc,
+                                              const char *sender,
+                                              const char *message,
+                                              PurpleMessageFlags flags,
+                                              time_t timestamp);
 
 gboolean signal_inline_image_is_supported(const char *mime_type,
                                           const guint8 *data, gsize size);
 
+gboolean signal_inline_image_size_is_supported(gsize size);
+
 gboolean signal_inline_image_dimensions_are_supported(int width, int height);
 
-gboolean signal_inline_image_deliver_with_writer(
+gboolean signal_inline_image_deliver_group_with_writer(
     PurpleConnection *gc, int chat_id, const char *sender,
     const char *filename, const char *mime_type, const guint8 *data,
-    gsize size, time_t timestamp, SignalInlineImageWriter writer);
+    gsize size, time_t timestamp, SignalInlineImageGroupWriter writer);
 
-gboolean signal_inline_image_deliver(PurpleConnection *gc, int chat_id,
-                                     const char *sender,
-                                     const char *filename,
-                                     const char *mime_type,
-                                     const guint8 *data, gsize size,
-                                     time_t timestamp);
+gboolean signal_inline_image_deliver_direct_with_writer(
+    PurpleConnection *gc, const char *sender, const char *filename,
+    const char *mime_type, const guint8 *data, gsize size, time_t timestamp,
+    SignalInlineImageDirectWriter writer);
+
+gboolean signal_inline_image_deliver_group(
+    PurpleConnection *gc, int chat_id, const char *sender,
+    const char *filename, const char *mime_type, const guint8 *data,
+    gsize size, time_t timestamp);
+
+gboolean signal_inline_image_deliver_direct(
+    PurpleConnection *gc, const char *sender, const char *filename,
+    const char *mime_type, const guint8 *data, gsize size, time_t timestamp);
 
 #endif

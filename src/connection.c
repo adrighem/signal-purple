@@ -50,13 +50,13 @@ static void signal_queue_read(SignalConnection *connection,
 static void signal_flush_pending_reads(SignalConnection *connection);
 
 static void
-signal_queue_final_group_read(SignalConnection *connection,
-                              PurpleConversation *conversation,
-                              const SignalEvent *event)
+signal_queue_final_read(SignalConnection *connection,
+                        PurpleConversation *conversation,
+                        const SignalEvent *event)
 {
     /* The backend assigns the delivery ID only to the final projection event
      * for one Signal message, so captions and multiple attachments read once. */
-    if (conversation != NULL && event->request_id != 0)
+    if (event->request_id != 0)
         signal_queue_read(connection, conversation, event);
 }
 
@@ -294,6 +294,25 @@ signal_attachment_init(PurpleXfer *xfer)
 }
 
 static gboolean
+signal_event_can_present(SignalConnection *connection,
+                         PurpleConversation *conversation,
+                         const SignalEvent *event)
+{
+    PurpleAccount *account;
+
+    if ((event->flags & SIGNAL_EVENT_FLAG_OUTGOING) != 0)
+        return TRUE;
+
+    account = purple_connection_get_account(connection->gc);
+    if (event->chat_id == NULL)
+        return purple_privacy_check(account, event->peer_id);
+
+    return conversation == NULL ||
+           !purple_conv_chat_is_user_ignored(PURPLE_CONV_CHAT(conversation),
+                                             event->peer_id);
+}
+
+static gboolean
 signal_deliver_attachment(SignalConnection *connection,
                           const SignalEvent *event)
 {
@@ -320,12 +339,17 @@ signal_deliver_attachment(SignalConnection *connection,
         conversation = signal_open_group(connection, event->chat_id, NULL);
     }
 
+    account = purple_connection_get_account(connection->gc);
+    if (!signal_event_can_present(connection, conversation, event)) {
+        return TRUE;
+    }
+
     if (event->data_len > SIGNAL_CORE_MAX_ATTACHMENT_BYTES) {
         purple_notify_error(
             connection, "Signal attachment rejected",
             "The Signal attachment exceeds the 25 MiB size limit",
             "Ask the sender to resend a smaller attachment.");
-        signal_queue_final_group_read(connection, conversation, event);
+        signal_queue_final_read(connection, conversation, event);
         return TRUE;
     }
     peer = event->peer_id;
@@ -339,17 +363,27 @@ signal_deliver_attachment(SignalConnection *connection,
         filename = g_strdup("signal-attachment");
     }
 
-    if (conversation != NULL && event->peer_id != NULL &&
-        event->peer_id[0] != '\0') {
-        timestamp = event->timestamp_ms > 0
-                        ? (time_t)(event->timestamp_ms / 1000)
-                        : time(NULL);
-        if (signal_inline_image_deliver(
+    timestamp = event->timestamp_ms > 0 ? (time_t)(event->timestamp_ms / 1000)
+                                        : time(NULL);
+    if (event->chat_id != NULL) {
+        if (conversation != NULL &&
+            signal_inline_image_deliver_group(
                 connection->gc,
-                purple_conv_chat_get_id(PURPLE_CONV_CHAT(conversation)),
-                event->peer_id, filename, event->text, event->data,
-                event->data_len, timestamp)) {
-            signal_queue_final_group_read(connection, conversation, event);
+                purple_conv_chat_get_id(PURPLE_CONV_CHAT(conversation)), peer,
+                filename, event->text, event->data, event->data_len,
+                timestamp)) {
+            signal_queue_final_read(connection, conversation, event);
+            return TRUE;
+        }
+    } else {
+        gboolean delivered = signal_inline_image_deliver_direct(
+            connection->gc, peer, filename, event->text, event->data,
+            event->data_len, timestamp);
+
+        conversation = purple_find_conversation_with_account(
+            PURPLE_CONV_TYPE_IM, peer, account);
+        if (delivered) {
+            signal_queue_final_read(connection, conversation, event);
             return TRUE;
         }
     }
@@ -360,17 +394,16 @@ signal_deliver_attachment(SignalConnection *connection,
             connection, "Signal attachment rejected",
             "Too much attachment data is waiting for a save location",
             "Save or reject pending transfers, then ask the sender to resend the attachment.");
-        signal_queue_final_group_read(connection, conversation, event);
+        signal_queue_final_read(connection, conversation, event);
         return TRUE;
     }
 
-    account = purple_connection_get_account(connection->gc);
     xfer = purple_xfer_new(account, PURPLE_XFER_RECEIVE, peer);
     if (xfer == NULL) {
         purple_notify_error(connection, "Signal attachment unavailable",
                             "Could not create a receive transfer",
                             "Restart Pidgin, then ask the sender to resend the attachment.");
-        signal_queue_final_group_read(connection, conversation, event);
+        signal_queue_final_read(connection, conversation, event);
         return TRUE;
     }
     attachment = g_new0(SignalAttachment, 1);
@@ -386,7 +419,7 @@ signal_deliver_attachment(SignalConnection *connection,
     purple_xfer_set_request_denied_fnc(xfer, signal_attachment_free);
     purple_xfer_set_cancel_recv_fnc(xfer, signal_attachment_cancel);
     purple_xfer_request(xfer);
-    signal_queue_final_group_read(connection, conversation, event);
+    signal_queue_final_read(connection, conversation, event);
     return TRUE;
 }
 
@@ -1162,6 +1195,9 @@ signal_deliver_direct(SignalConnection *connection, const SignalEvent *event)
     }
 
     account = purple_connection_get_account(connection->gc);
+    if (!signal_event_can_present(connection, NULL, event))
+        return TRUE;
+
     conversation = purple_find_conversation_with_account(
         PURPLE_CONV_TYPE_IM, event->peer_id, account);
     if (conversation == NULL)
@@ -1176,7 +1212,7 @@ signal_deliver_direct(SignalConnection *connection, const SignalEvent *event)
     if ((event->flags & SIGNAL_EVENT_FLAG_OUTGOING) == 0) {
         serv_got_im(connection->gc, event->peer_id, escaped,
                     signal_message_flags(FALSE), timestamp);
-        signal_queue_read(connection, conversation, event);
+        signal_queue_final_read(connection, conversation, event);
         return TRUE;
     }
 
@@ -1209,6 +1245,9 @@ signal_deliver_group(SignalConnection *connection, const SignalEvent *event)
                      g_strdup(event->chat_id));
     PurpleConversation *conversation = signal_open_group(
         connection, event->chat_id, event->title);
+    if (!signal_event_can_present(connection, conversation, event))
+        return TRUE;
+
     id = signal_group_id(connection, event->chat_id, event->title);
     escaped = g_markup_escape_text(event->text, -1);
     timestamp = event->timestamp_ms > 0
@@ -1218,7 +1257,7 @@ signal_deliver_group(SignalConnection *connection, const SignalEvent *event)
                      signal_message_flags(
                          (event->flags & SIGNAL_EVENT_FLAG_OUTGOING) != 0),
                      escaped, timestamp);
-    signal_queue_final_group_read(connection, conversation, event);
+    signal_queue_final_read(connection, conversation, event);
     return TRUE;
 }
 

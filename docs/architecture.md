@@ -171,8 +171,10 @@ direct messaging remains available.
   deduplicated and capped at 4096. Command-queue pressure is retried by one owned
   GLib timer, backend readiness retries on `READY`, and teardown cancels the
   timer. Background delivery and notification rendering do not mark a message
-  read. Once admitted to the backend, a read receipt is best-effort: an
-  asynchronous send failure is reported but not durably replayed.
+  read. Only the final projection event queues the receipt, so captions and
+  multiple attachments read once after final presentation. Once admitted to the
+  backend, a read receipt is best-effort: an asynchronous send failure is
+  reported but not durably replayed.
 - Direct and group sends are written to an encrypted outbox before network
   submission. Failed entries retain their original Signal timestamp and retry
   with bounded exponential backoff across reconnects. Accepting a verified
@@ -184,20 +186,24 @@ direct messaging remains available.
   their original timestamp, while retry deadlines continue to use the wall
   clock directly.
 - Incoming direct and group attachments are downloaded on the backend thread
-  and copied across the owned ABI. An incoming group JPEG, PNG, or GIF whose
-  declared MIME type matches its file signature, passes decoder validation, and
-  remains within the format-specific pixel limits is copied into Purple's image
-  store and written to the originating chat with the Signal sender and
-  timestamp. GIF structure is parsed before decoding to bound frame count by
-  cumulative canvas area. An incoming group MP4 with Signal's GIF flag and a
-  valid file-type box is eligible for an in-memory FFmpeg conversion on a
+  and copied across the owned ABI. An incoming JPEG, PNG, or GIF in either
+  conversation type whose declared MIME type matches its file signature, stays
+  within 8 MiB, passes decoder validation, and remains within the
+  format-specific pixel limits is copied into Purple's image store and written
+  to the originating conversation with the Signal sender and timestamp. GIF
+  structure is parsed before decoding to bound frame count by cumulative canvas
+  area. An incoming direct or group MP4 with Signal's GIF flag and a valid
+  file-type box is eligible for an in-memory FFmpeg conversion on a
   blocking worker. The helper receives fixed arguments and a cleared
   environment under `prlimit`; input, output, process concurrency, attempts,
   threads, file descriptors, memory, CPU, wall time, dimensions, frame rate,
   frame area, and aggregate presentation bytes are bounded. Only validated GIF
   output replaces the presentation. Missing helpers or any failed boundary
   preserves the original MP4 receive-file flow. Ordinary video and any image
-  the UI does not retain also use that flow.
+  the UI does not retain also use that flow. One gate applies direct privacy and
+  group-ignore rules before incoming text, inline media, or transfer fallback;
+  filtered events are acknowledged without presentation or a read receipt.
+  Outgoing linked-device echoes bypass that gate.
   Outgoing transfers use
   Purple's direct and group send-file callbacks. Each admitted request carries
   cancellation state from queue admission through its backend upload task, so a
