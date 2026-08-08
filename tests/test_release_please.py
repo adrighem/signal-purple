@@ -32,7 +32,7 @@ RELEASE_BUILDER = pathlib.PurePosixPath("scripts/build-release-artifacts.sh")
 RELEASE_DOCKERFILE = pathlib.PurePosixPath(".github/release/Dockerfile")
 CMAKE_CONFIG = pathlib.PurePosixPath("CMakeLists.txt")
 NIX_FLAKE = pathlib.PurePosixPath("flake.nix")
-EXPECTED_CACHE_ACTION_SHA = "0057852bfaa89a56745cba8c7296529d2fc39830"
+EXPECTED_CACHE_ACTION_SHA = "55cc8345863c7cc4c66a329aec7e433d2d1c52a9"
 
 
 def fail(message: str) -> None:
@@ -370,13 +370,13 @@ def validate_ci_workflow() -> None:
             )
 
     expected_cache_uses = [
-        (CI_WORKFLOW, EXPECTED_CACHE_ACTION_SHA, "v4.3.0"),
-        (CI_WORKFLOW, EXPECTED_CACHE_ACTION_SHA, "v4.3.0"),
-        (CI_WORKFLOW, EXPECTED_CACHE_ACTION_SHA, "v4.3.0"),
+        (CI_WORKFLOW, EXPECTED_CACHE_ACTION_SHA, "v6.1.0"),
+        (CI_WORKFLOW, EXPECTED_CACHE_ACTION_SHA, "v6.1.0"),
+        (CI_WORKFLOW, EXPECTED_CACHE_ACTION_SHA, "v6.1.0"),
     ]
     if cache_uses != expected_cache_uses:
         fail(
-            "GitHub workflows must contain exactly three actions/cache v4.3.0 "
+            "GitHub workflows must contain exactly three actions/cache v6.1.0 "
             f"uses pinned to {EXPECTED_CACHE_ACTION_SHA}"
         )
 
