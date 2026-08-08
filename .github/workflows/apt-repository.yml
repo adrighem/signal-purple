@@ -1,8 +1,16 @@
 name: APT repository
 
 on:
-  workflow_call:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Expected latest stable release tag
+        required: false
+        type: string
+      release_sha:
+        description: Expected latest stable release commit
+        required: false
+        type: string
 
 concurrency:
   group: apt-repository-pages
@@ -25,7 +33,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           persist-credentials: false
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ github.sha }}
 
       - name: Install APT repository tools
         run: |
@@ -35,6 +43,8 @@ jobs:
       - name: Download current and previous stable packages
         shell: bash
         env:
+          EXPECTED_RELEASE_SHA: ${{ inputs.release_sha }}
+          EXPECTED_RELEASE_TAG: ${{ inputs.release_tag }}
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
@@ -46,8 +56,24 @@ jobs:
           gh api --paginate \
             "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
             | jq --slurp 'add' > "$release_json"
-          scripts/select-apt-release-assets.py "$release_json" \
+          scripts/select-apt-release-assets.py \
+            "$release_json" \
+            "$EXPECTED_RELEASE_TAG" \
+            "$EXPECTED_RELEASE_SHA" \
             > "$asset_manifest"
+          if [ -n "$EXPECTED_RELEASE_TAG" ]; then
+            gh api \
+              --header 'Accept: application/vnd.github+json' \
+              --header 'X-GitHub-Api-Version: 2026-03-10' \
+              "repos/$GITHUB_REPOSITORY/git/ref/tags/$EXPECTED_RELEASE_TAG" \
+              | jq --exit-status \
+                  --arg expected_ref "refs/tags/$EXPECTED_RELEASE_TAG" \
+                  --arg expected_sha "$EXPECTED_RELEASE_SHA" \
+                  '.ref == $expected_ref
+                    and .object.type == "commit"
+                    and .object.sha == $expected_sha' \
+                  > /dev/null
+          fi
 
           while IFS=$'\t' read -r tag name asset_id digest; do
             test -n "$tag"

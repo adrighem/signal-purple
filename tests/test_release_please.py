@@ -117,10 +117,16 @@ def validate_release_workflows() -> None:
             "release_version: ${{ steps.release.outputs.version }}",
             "if: ${{ needs.release-please.outputs.release_created == 'true' }}",
             "uses: ./.github/workflows/release-artifacts.yml",
-            "uses: ./.github/workflows/apt-repository.yml",
-            "actions: read",
-            "pages: write",
-            "id-token: write",
+            "Dispatch and await protected APT publication",
+            "actions: write",
+            "release_sha: $release_sha",
+            "release_tag: $release_tag",
+            "Accept: application/vnd.github+json",
+            "X-GitHub-Api-Version: 2026-03-10",
+            "actions/workflows/apt-repository.yml/dispatches",
+            "actions/runs/$run_id",
+            '.event == "workflow_dispatch"',
+            'if [ "$conclusion" != success ]; then',
             "cleanup-failed-release:",
             "needs.release-artifacts.result != 'success'",
             "id: cleanup-app-token",
@@ -134,10 +140,47 @@ def validate_release_workflows() -> None:
         release_please,
         RELEASE_PLEASE_WORKFLOW,
         [
-            "workflow_dispatch",
+            "\n  workflow_dispatch:",
             "RELEASE_PLEASE_TOKEN",
+            "return_run_details",
             "secrets.GITHUB_TOKEN",
+            "uses: ./.github/workflows/apt-repository.yml",
             'releases/tags/$RELEASE_TAG',
+        ],
+    )
+    try:
+        _, remaining_jobs = release_please.split(
+            "\n  publish-apt-repository:\n", 1
+        )
+        publish_apt_job, _ = remaining_jobs.split(
+            "\n  cleanup-failed-release:\n", 1
+        )
+    except ValueError as error:
+        fail(f"release workflow has an invalid APT job boundary: {error}")
+    require_fragments(
+        publish_apt_job,
+        RELEASE_PLEASE_WORKFLOW,
+        [
+            "actions: write",
+            "actions/workflows/apt-repository.yml/dispatches",
+            "actions/runs/$run_id",
+            '(.path | split("@")[0])',
+        ],
+    )
+    reject_fragments(
+        publish_apt_job,
+        RELEASE_PLEASE_WORKFLOW,
+        [
+            "environment:",
+            "checks:",
+            "contents:",
+            "gh run watch",
+            "id-token: write",
+            "pages: write",
+            "return_run_details",
+            "secrets: inherit",
+            "secrets.",
+            "uses:",
         ],
     )
 
@@ -237,10 +280,19 @@ def validate_release_workflows() -> None:
         apt_repository,
         APT_REPOSITORY_WORKFLOW,
         [
-            "workflow_call:",
             "workflow_dispatch:",
+            "release_tag:",
+            "description: Expected latest stable release tag",
+            "release_sha:",
+            "description: Expected latest stable release commit",
             "group: apt-repository-pages",
             'test "$GITHUB_REF" = "refs/heads/$DEFAULT_BRANCH"',
+            "ref: ${{ github.sha }}",
+            "EXPECTED_RELEASE_SHA: ${{ inputs.release_sha }}",
+            "EXPECTED_RELEASE_TAG: ${{ inputs.release_tag }}",
+            "git/ref/tags/$EXPECTED_RELEASE_TAG",
+            '.object.type == "commit"',
+            ".object.sha == $expected_sha",
             "scripts/select-apt-release-assets.py",
             "scripts/build-apt-repository.sh",
             "debian-13",
@@ -273,6 +325,8 @@ def validate_release_workflows() -> None:
             "apt-key",
             "trusted=yes",
             "allow-unauthenticated",
+            "ref: ${{ github.event.repository.default_branch }}",
+            "workflow_call:",
             "types: [published]",
             "types: [released]",
             "keys/release-signing-key.asc",

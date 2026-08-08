@@ -706,3 +706,19 @@ schema.
   The user approved the commit, branch push, and PR #60 after repository rules
   rejected a direct `main` push as designed. Release creation remains owned by
   Release Please; no tag, release, or public comment is created manually.
+
+## 2026-08-08 - v1.2.1 publication and protected APT recovery
+
+- Merged the reviewed v1.2.1 Release Please change. Reproducible source and
+  distro builds, package probes, SBOM normalization, checksums, provenance, and
+  stable GitHub publication passed. The release is non-draft, non-prerelease,
+  Latest, and targets the approved release commit.
+- The nested reusable APT signing job received empty protected-environment
+  secrets and failed before key import. A direct top-level manual dispatch used
+  the same environment successfully; signing, verification, and GitHub Pages
+  deployment passed. Both supported suites publicly contain v1.2.0 and v1.2.1.
+- Reworked future release chaining to dispatch and await an exact top-level APT
+  run without widening secret scope. Added tag-and-commit selection checks,
+  live tag verification, dispatch identity polling, moving-branch protection,
+  and positive and negative regression coverage. The sanitized release gate,
+  shell checks, workflow parsing, and live read-only gates passed.

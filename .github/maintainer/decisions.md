@@ -249,3 +249,16 @@
   filter graph can initialize. Retain the 128 MiB single-allocation cap, 8 MiB
   input/output bounds, one global process, one codec/filter thread, and CPU and
   descriptor limits.
+
+## 2026-08-08 - Dispatch APT publication across the secret boundary
+
+- Keep APT signing credentials only in the protected `apt-repository`
+  environment. Do not pass or inherit them through the Release Please workflow.
+- Replace the reusable APT call with a top-level `workflow_dispatch`. Use the
+  2026-03-10 Actions API response to identify the exact child run and fail the
+  release workflow if that run does not succeed.
+- Bind automated publication to Release Please's exact tag and commit after
+  semantic-version selection, then verify the live Git tag resolves to that
+  commit. Keep a no-input manual dispatch as the idempotent repair path.
+- Execute workflow helpers from the commit selected when the protected `main`
+  dispatch was created, not from a later moving branch tip.

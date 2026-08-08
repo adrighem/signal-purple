@@ -24,17 +24,22 @@ upgrade, rollback, relink, and removal guidance lives in the README's
 8. The final artifact job uploads the verified assets and publishes the draft
    as a stable GitHub release marked `Latest`. A failed artifact build deletes
    only the still-private draft and its matching tag.
-9. The same workflow graph rebuilds the signed APT repository from the highest
-   two stable semantic versions and deploys its Debian 13 and Ubuntu 24.04
-   suites through GitHub Pages. If deployment fails, manually dispatch the APT
-   repository workflow; it never changes a release, tag, or asset.
+9. The release job dispatches a top-level APT repository workflow, receives its
+   exact run ID, and waits for completion. The child rebuilds the signed
+   repository from the highest two stable semantic versions and deploys its
+   Debian 13 and Ubuntu 24.04 suites through GitHub Pages. If deployment fails,
+   manually dispatch the APT workflow without inputs; it never changes a
+   release, tag, or asset.
 
 The workflow uses a repository-scoped installation token from the private
 Release Please GitHub App. The App has only Contents and Pull requests
 read/write permissions and is installed only on this repository. This lets
 release pull requests trigger their checks automatically; events made with the
-repository `GITHUB_TOKEN` do not start new workflow runs. The workflow fails
-closed if its App Client ID variable or private-key secret is unavailable.
+repository `GITHUB_TOKEN` do not normally start new workflow runs. The APT job
+uses GitHub's explicit `workflow_dispatch` exception with only Actions write
+permission, then polls the exact returned run through the Actions API. The
+workflow fails closed if its App Client ID variable or private-key secret is
+unavailable.
 
 The artifact workflow is reusable only from the trusted Release Please
 workflow; it has no public event or manual dispatch trigger. Release Please
@@ -65,7 +70,16 @@ must match its uppercase primary-key fingerprint. The workflow exports only the
 public key into the Pages artifact. Enable Pages with GitHub Actions as its
 source before the first deployment. The `apt-repository` and `github-pages`
 environments must allow the `main` branch. Both release-driven and manual runs
-use that protected branch.
+use that protected branch. APT publication is a top-level workflow run so those
+environment secrets resolve only inside its signing job. Automated dispatches
+bind the newest stable release and Git tag to the exact Release Please tag and
+commit; manual repair runs omit that expected-release pair. The child checks out
+the trusted commit selected when its `main` dispatch was created.
+
+Cancelling the parent after dispatch does not cancel the child APT run. The
+parent's 60-minute limit currently exceeds the child's 40-minute job budget and
+neither protected environment has an approval wait. Revisit cancellation or
+timeout handling if those assumptions change.
 
 Do not publish a release from a working tree with only compilation evidence.
 

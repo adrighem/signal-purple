@@ -92,12 +92,16 @@ verified against its pinned SHA-256 before execution.
 
 ## Stable APT repository
 
-Stable publication calls the dedicated APT repository workflow directly. A
-manual dispatch can repair or republish it. The workflow selects the highest two
-semantic versions among non-draft, non-prerelease releases, requires both distro
-package pairs on the newest release, and verifies every download against the
-SHA-256 digest reported by GitHub. During migration, the retained predecessor
-may use the legacy unsuffixed Debian package names.
+Stable publication dispatches the dedicated top-level APT repository workflow
+through the versioned Actions API and waits for its exact run to finish. This
+keeps signing secrets inside the protected `apt-repository` environment. The
+automated run binds the selected newest release and Git tag to Release Please's
+exact tag and commit; a no-input manual dispatch can repair or republish it. The
+workflow selects the highest two semantic versions among non-draft,
+non-prerelease releases, requires both distro package pairs on the newest
+release, and verifies every download against the SHA-256 digest reported by
+GitHub. During migration, the retained predecessor may use the legacy
+unsuffixed Debian package names.
 
 The generated GitHub Pages site contains fixed `debian-13` and `ubuntu-24.04`
 suites. Their `Packages` and reproducible `Packages.gz` indexes use SHA-256
