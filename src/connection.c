@@ -1677,7 +1677,7 @@ signal_login(PurpleAccount *account)
     connection = signal_connection_new(gc, store_path);
 
     config.store_path = store_path;
-    config.device_name = purple_account_get_string(account, "device-name",
+    config.device_name = purple_account_get_string(account, SIGNAL_DEVICE_NAME_KEY,
                                                    "signal-purple");
     config.passphrase = passphrase;
     status = signal_core_new(&config, &connection->core);

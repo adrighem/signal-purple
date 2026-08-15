@@ -31,12 +31,12 @@ signal_clear_secret(void *data, gsize length)
 static const char *
 signal_store_id(PurpleAccount *account)
 {
-    const char *store_id = purple_account_get_string(account, "store-id", NULL);
+    const char *store_id = purple_account_get_string(account, SIGNAL_STORE_ID_KEY, NULL);
 
     if (store_id == NULL || store_id[0] == '\0') {
         g_autofree char *generated = g_uuid_string_random();
-        purple_account_set_string(account, "store-id", generated);
-        store_id = purple_account_get_string(account, "store-id", NULL);
+        purple_account_set_string(account, SIGNAL_STORE_ID_KEY, generated);
+        store_id = purple_account_get_string(account, SIGNAL_STORE_ID_KEY, NULL);
     }
     return store_id;
 }
@@ -67,7 +67,7 @@ signal_store_path(PurpleAccount *account, GError **error)
 
     g_return_val_if_fail(account != NULL, NULL);
 
-    configured = purple_account_get_string(account, "store-path", "");
+    configured = purple_account_get_string(account, SIGNAL_STORE_PATH_KEY, "");
     if (configured != NULL && configured[0] != '\0')
         return g_canonicalize_filename(configured, NULL);
 
