@@ -3,6 +3,7 @@
   "bootstrap-sha": "0db9d8d5330244208e111685d9d71df40aca02e0",
   "draft": true,
   "force-tag-creation": true,
+  "include-commit-authors": true,
   "packages": {
     ".": {
       "release-type": "simple",
