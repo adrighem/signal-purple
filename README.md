@@ -38,6 +38,7 @@ This README distinguishes production-service evidence from automated tests:
 | Attachments | **Implemented.** Size limits, ABI handling, transfer presentation, and direct/group inline-image routing have focused tests. End-to-end transfers and inline media still need live checks. |
 | Delivery recovery | **Test-covered.** The encrypted text outbox and unacknowledged-message replay are implemented; controlled offline, crash, and network-loss checks remain. |
 | Identity replacement | **Test-covered.** Verified-contact sends block until the user accepts a changed identity after out-of-band verification. |
+| Persisted identifiers | **Test-covered.** Plugin ID `prpl-adrighem-signal`, account keys `store-id`/`store-path`/`device-name`, and managed buddy/group keys are locked by literal regression tests. |
 | Idle event handling | **Live-tested.** Descriptor-driven wakeups replaced the old polling loop; an isolated idle sample found no hot Signal thread. |
 
 Production-service evidence is revision-specific. See
