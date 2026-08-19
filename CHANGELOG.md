@@ -4,6 +4,13 @@ All notable changes are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for stable releases.
 
+## [1.3.0](https://github.com/adrighem/signal-purple/compare/v1.2.1...v1.3.0) (2026-08-19)
+
+
+### Features
+
+* **media:** extend incoming media support ([#70](https://github.com/adrighem/signal-purple/issues/70)) ([4634066](https://github.com/adrighem/signal-purple/commit/4634066acb8d1ce04167aa77b334db3daa2f8ad6))
+
 ## [1.2.1](https://github.com/adrighem/signal-purple/compare/v1.2.0...v1.2.1) (2026-08-08)
 
 
