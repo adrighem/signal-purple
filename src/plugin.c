@@ -125,14 +125,14 @@ signal_plugin_init(PurplePlugin *plugin)
 
     (void)plugin;
     option = purple_account_option_string_new("Linked device name",
-                                              "device-name",
+                                              SIGNAL_DEVICE_NAME_KEY,
                                               "signal-purple");
     protocol_info.protocol_options =
         g_list_append(protocol_info.protocol_options, option);
 
     option = purple_account_option_string_new(
         "Encrypted store path (empty uses the Purple data directory)",
-        "store-path", "");
+        SIGNAL_STORE_PATH_KEY, "");
     protocol_info.protocol_options =
         g_list_append(protocol_info.protocol_options, option);
 }

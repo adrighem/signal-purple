@@ -192,6 +192,17 @@ test_message_flags(void)
                      ==, 0);
 }
 
+static void
+test_persisted_identifiers(void)
+{
+    g_assert_cmpstr(SIGNAL_PLUGIN_ID, ==, "prpl-adrighem-signal");
+    g_assert_cmpstr(SIGNAL_STORE_ID_KEY, ==, "store-id");
+    g_assert_cmpstr(SIGNAL_STORE_PATH_KEY, ==, "store-path");
+    g_assert_cmpstr(SIGNAL_DEVICE_NAME_KEY, ==, "device-name");
+    g_assert_cmpstr(SIGNAL_SYNCED_BUDDY_KEY, ==, "signal-purple-synced-contact");
+    g_assert_cmpstr(SIGNAL_SYNCED_GROUP_KEY, ==, "signal-purple-synced-group");
+}
+
 int
 main(int argc, char **argv)
 {
@@ -200,5 +211,6 @@ main(int argc, char **argv)
     g_test_add_func("/signal/abi-contract", test_abi_contract_matches_rust);
     g_test_add_func("/signal/markup-to-plaintext", test_markup_to_plaintext);
     g_test_add_func("/signal/message-flags", test_message_flags);
+    g_test_add_func("/signal/persisted-identifiers", test_persisted_identifiers);
     return g_test_run();
 }

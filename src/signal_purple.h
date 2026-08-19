@@ -12,6 +12,10 @@
 
 #define SIGNAL_PLUGIN_ID "prpl-adrighem-signal"
 
+#define SIGNAL_STORE_ID_KEY "store-id"
+#define SIGNAL_STORE_PATH_KEY "store-path"
+#define SIGNAL_DEVICE_NAME_KEY "device-name"
+
 typedef SignalStatus (*SignalSendGroupMessageFunc)(
     SignalCore *core, uint64_t request_id, const char *group_key,
     const char *message);
