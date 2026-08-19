@@ -11,6 +11,11 @@ All notable changes are documented here. The project follows
 
 * **media:** extend incoming media support ([#70](https://github.com/adrighem/signal-purple/issues/70)) ([4634066](https://github.com/adrighem/signal-purple/commit/4634066acb8d1ce04167aa77b334db3daa2f8ad6))
 
+### Miscellaneous Chores
+
+* **docs:** claim test coverage for persisted identifiers ([#75](https://github.com/adrighem/signal-purple/issues/75)) ([5989232](https://github.com/adrighem/signal-purple/commit/5989232)) (@YuuGR1337)
+* **test:** lock persisted Purple identifiers ([#74](https://github.com/adrighem/signal-purple/issues/74)) ([e7c042b](https://github.com/adrighem/signal-purple/commit/e7c042b))
+
 ## [1.2.1](https://github.com/adrighem/signal-purple/compare/v1.2.0...v1.2.1) (2026-08-08)
 
 
