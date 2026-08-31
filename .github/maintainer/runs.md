@@ -741,3 +741,11 @@ schema.
   release and APT helpers, the warning-as-error C build, all six C/Purple tests,
   and the staged install probe passed. The pinned C formatter was unavailable
   locally; no C source changed and CI remains authoritative for that gate.
+
+## 2026-08-31 — Safe event pointer dereferencing and code scanning resolution
+
+- Inbox, open issues, open pull requests, and Dependabot alerts: none.
+- Code scanning alerts: resolved all three active High-severity CodeQL alerts in `rust/signal-core/src/ffi.rs` (access of invalid pointer warnings at lines 936, 955, and 986).
+- Replaced direct pointer dereferencing (`*event`) in unit tests with safe `event.as_ref()` reference extraction, verifying pointers are non-null before field access and satisfying CodeQL static analysis.
+- Verified that all unit tests, C++ compilation, CTest suite, and staged-install probes pass with 100% success using `scripts/check.sh full`.
+- No public maintenance action was taken. No staging or committing was performed, preserving autonomous workspace mandates.
