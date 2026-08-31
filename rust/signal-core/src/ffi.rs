@@ -933,7 +933,8 @@ mod tests {
             let mut event = std::ptr::null_mut();
             // SAFETY: the core and output pointer remain live for the call.
             assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 1);
-            assert_eq!(unsafe { (*event).request_id }, request_id);
+            let event_ref = unsafe { event.as_ref() }.expect("event should not be null");
+            assert_eq!(event_ref.request_id, request_id);
             // SAFETY: this test uniquely owns the returned event.
             unsafe { signal_event_free(event) };
         }
@@ -952,7 +953,8 @@ mod tests {
             },
         );
         assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 1);
-        assert_eq!(unsafe { (*event).request_id }, 65);
+        let event_ref = unsafe { event.as_ref() }.expect("event should not be null");
+        assert_eq!(event_ref.request_id, 65);
         // SAFETY: this test uniquely owns the returned event.
         unsafe { signal_event_free(event) };
     }
@@ -983,13 +985,15 @@ mod tests {
         let mut event = std::ptr::null_mut();
         // SAFETY: the core and output pointer remain live for each call.
         assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 1);
-        assert_eq!(unsafe { (*event).request_id }, 7);
+        let event_ref = unsafe { event.as_ref() }.expect("event should not be null");
+        assert_eq!(event_ref.request_id, 7);
         // SAFETY: this test uniquely owns the returned event.
         unsafe { signal_event_free(event) };
         producer.join().unwrap();
         // SAFETY: the core and output pointer remain live for each call.
         assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 1);
-        assert_eq!(unsafe { (*event).request_id }, 8);
+        let event_ref = unsafe { event.as_ref() }.expect("event should not be null");
+        assert_eq!(event_ref.request_id, 8);
         // SAFETY: this test uniquely owns the returned event.
         unsafe { signal_event_free(event) };
         // SAFETY: the core and output pointer remain live for each call.
