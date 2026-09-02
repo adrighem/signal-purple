@@ -4,6 +4,13 @@ All notable changes are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for stable releases.
 
+## [1.4.0](https://github.com/adrighem/signal-purple/compare/v1.3.0...v1.4.0) (2026-09-02)
+
+
+### Features
+
+* add reset Signal session action for buddy context menu ([#77](https://github.com/adrighem/signal-purple/issues/77)) ([908eb82](https://github.com/adrighem/signal-purple/commit/908eb828b27009b980ad76018d1a6f10d8e4678b))
+
 ## [1.3.0](https://github.com/adrighem/signal-purple/compare/v1.2.1...v1.3.0) (2026-08-19)
 
 
