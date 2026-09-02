@@ -30,7 +30,7 @@ const MAX_ATTACHMENT_FILENAME_BYTES: usize = 255;
 const MAX_CONTENT_TYPE_BYTES: usize = 255;
 const EVENT_QUEUE_CAPACITY: usize = 4096;
 
-const ABI_CONTRACT_VALUE_COUNT: usize = 64;
+const ABI_CONTRACT_VALUE_COUNT: usize = 65;
 const ABI_CONTRACT_VALUES: [i64; ABI_CONTRACT_VALUE_COUNT] = [
     ABI_VERSION as i64,
     SignalStatus::Ok as i64,
@@ -61,6 +61,7 @@ const ABI_CONTRACT_VALUES: [i64; ABI_CONTRACT_VALUE_COUNT] = [
     event::EVENT_GROUP_LEFT as i64,
     event::EVENT_RECOVERING as i64,
     event::EVENT_ACCOUNT as i64,
+    event::EVENT_SESSION_RESET as i64,
     0,
     event::FLAG_OUTGOING as i64,
     event::FLAG_FATAL as i64,
@@ -676,6 +677,33 @@ pub unsafe extern "C" fn signal_core_dismiss_identity(
         queue_control_command(
             unsafe { &*core },
             Command::DismissIdentity {
+                request_id,
+                recipient,
+            },
+        )
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Resets established Signal sessions for one recipient.
+///
+/// # Safety
+///
+/// `core` must be live and `recipient` must be a valid NUL-terminated string.
+pub unsafe extern "C" fn signal_core_reset_session(
+    core: *mut SignalCore,
+    request_id: u64,
+    recipient: *const c_char,
+) -> SignalStatus {
+    ffi_guard(|| {
+        if core.is_null() {
+            return SignalStatus::InvalidArgument;
+        }
+        // SAFETY: copied immediately after validation.
+        let recipient = status_try!(unsafe { required_string(recipient, MAX_RECIPIENT_BYTES) });
+        queue_control_command(
+            unsafe { &*core },
+            Command::ResetSession {
                 request_id,
                 recipient,
             },

@@ -211,7 +211,7 @@ if(BUILD_TESTING)
     add_test(NAME plugin-probe
              COMMAND plugin-probe "$<TARGET_FILE:signal-purple>")
     set_tests_properties(plugin-probe PROPERTIES
-        ENVIRONMENT "G_DEBUG=fatal-warnings"
+        ENVIRONMENT "G_DEBUG=fatal-warnings;LD_LIBRARY_PATH=${CMAKE_CURRENT_BINARY_DIR}/signal-purple:$ENV{LD_LIBRARY_PATH}"
         TIMEOUT 30)
     add_test(NAME plugin-module-local-bindings
              COMMAND "${READELF_EXECUTABLE}" --relocs --wide
