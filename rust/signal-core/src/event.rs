@@ -27,6 +27,7 @@ pub const EVENT_ATTACHMENT_SENT: u32 = 20;
 pub const EVENT_GROUP_LEFT: u32 = 21;
 pub const EVENT_RECOVERING: u32 = 22;
 pub const EVENT_ACCOUNT: u32 = 23;
+pub const EVENT_SESSION_RESET: u32 = 24;
 
 pub const FLAG_OUTGOING: u32 = 1 << 0;
 pub const FLAG_FATAL: u32 = 1 << 1;
@@ -215,6 +216,7 @@ mod tests {
             EVENT_GROUP_LEFT,
             EVENT_RECOVERING,
             EVENT_ACCOUNT,
+            EVENT_SESSION_RESET,
         ];
 
         assert_eq!(ABI_VERSION, 7);

@@ -1314,6 +1314,17 @@ signal_identity_accepted(SignalConnection *connection,
                        "The contact is now unverified until its safety number is verified again.");
 }
 
+static void
+signal_session_reset(SignalConnection *connection,
+                     const SignalEvent *event)
+{
+    if (event->peer_id == NULL)
+        return;
+    purple_notify_info(connection, "Signal session reset",
+                       "Session reset successfully",
+                       "A fresh Signal session will be established on the next message.");
+}
+
 static gboolean
 signal_group_leave_failed(SignalConnection *connection,
                           const SignalEvent *event)
@@ -1426,6 +1437,9 @@ signal_dispatch_event(SignalConnection *connection, const SignalEvent *event,
         break;
     case SIGNAL_EVENT_IDENTITY_ACCEPTED:
         signal_identity_accepted(connection, event);
+        break;
+    case SIGNAL_EVENT_SESSION_RESET:
+        signal_session_reset(connection, event);
         break;
     case SIGNAL_EVENT_NOTICE:
         purple_notify_info(connection, "signal-purple", event->title,
@@ -1829,6 +1843,35 @@ signal_accept_changed_identity(PurpleBlistNode *node, gpointer user_data)
 }
 
 static void
+signal_reset_session(PurpleBlistNode *node, gpointer user_data)
+{
+    PurpleBuddy *buddy;
+    PurpleAccount *account;
+    PurpleConnection *gc;
+    SignalConnection *connection;
+    const char *peer;
+    SignalStatus status;
+
+    (void)user_data;
+    if (!PURPLE_BLIST_NODE_IS_BUDDY(node))
+        return;
+    buddy = PURPLE_BUDDY(node);
+    account = purple_buddy_get_account(buddy);
+    gc = purple_account_get_connection(account);
+    connection = signal_connection_data(gc);
+    peer = purple_buddy_get_name(buddy);
+    if (connection == NULL || connection->closing || peer == NULL)
+        return;
+
+    status = signal_core_reset_session(
+        connection->core, connection->next_request_id++, peer);
+    if (status != SIGNAL_STATUS_OK)
+        purple_notify_error(connection, "Could not reset Signal session",
+                            "The request could not be queued",
+                            "Reconnect the account and try again.");
+}
+
+static void
 signal_cancel_group_leave(void *user_data, int action)
 {
     SignalGroupLeaveRequest *request = user_data;
@@ -1968,16 +2011,27 @@ signal_blist_node_menu(PurpleBlistNode *node)
         return NULL;
     gc = purple_account_get_connection(account);
     connection = signal_connection_data(gc);
-    if (connection == NULL ||
-        !g_hash_table_contains(connection->pending_identity_changes,
-                               purple_buddy_get_name(buddy)))
+    if (connection == NULL || connection->closing)
         return NULL;
 
-    return g_list_append(
-        NULL,
+    GList *menu = NULL;
+
+    if (g_hash_table_contains(connection->pending_identity_changes,
+                              purple_buddy_get_name(buddy))) {
+        menu = g_list_append(
+            menu,
+            purple_menu_action_new(
+                "Accept changed Signal identity",
+                PURPLE_CALLBACK(signal_accept_changed_identity), NULL, NULL));
+    }
+
+    menu = g_list_append(
+        menu,
         purple_menu_action_new(
-            "Accept changed Signal identity",
-            PURPLE_CALLBACK(signal_accept_changed_identity), NULL, NULL));
+            "Reset Signal session",
+            PURPLE_CALLBACK(signal_reset_session), NULL, NULL));
+
+    return menu;
 }
 
 static int

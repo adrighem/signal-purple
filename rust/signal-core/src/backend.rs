@@ -41,8 +41,8 @@ use crate::event::{
     EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED, EVENT_GROUP,
     EVENT_GROUP_LEFT, EVENT_GROUP_MEMBER, EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN,
     EVENT_GROUP_SYNC_END, EVENT_IDENTITY_ACCEPTED, EVENT_IDENTITY_CHANGE, EVENT_LINK_QR,
-    EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT, EVENT_RECOVERING, EVENT_TYPING, Event,
-    FLAG_OUTGOING,
+    EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT, EVENT_RECOVERING, EVENT_SESSION_RESET, EVENT_TYPING,
+    Event, FLAG_OUTGOING,
 };
 use crate::event_queue::EventSink;
 
@@ -183,6 +183,10 @@ pub enum Command {
         recipient: String,
     },
     DismissIdentity {
+        request_id: u64,
+        recipient: String,
+    },
+    ResetSession {
         request_id: u64,
         recipient: String,
     },
@@ -2105,6 +2109,7 @@ fn deferred_command_failure(command: Command, message: &str) -> Option<Event> {
         | Command::SendGroupMessage { request_id, .. }
         | Command::AcceptIdentity { request_id, .. }
         | Command::DismissIdentity { request_id, .. }
+        | Command::ResetSession { request_id, .. }
         | Command::MarkRead { request_id, .. } => Some(Event::request_error(request_id, message)),
         Command::SendAttachment {
             request_id, permit, ..
@@ -2933,6 +2938,40 @@ async fn handle_command(
         return;
     }
 
+    if let Command::ResetSession {
+        request_id,
+        recipient,
+    } = command
+    {
+        let service_id = match parse_recipient(&recipient) {
+            Some(service_id) => service_id,
+            None => {
+                sink.emit(Event::request_error(
+                    request_id,
+                    "The recipient identifier could not be parsed as a Signal service ID",
+                ));
+                return;
+            }
+        };
+        match manager.clear_sessions(&service_id).await {
+            Ok(()) => {
+                sink.emit(Event {
+                    kind: EVENT_SESSION_RESET,
+                    request_id,
+                    peer_id: Some(recipient),
+                    ..Event::default()
+                });
+            }
+            Err(error) => {
+                sink.emit(Event::request_error(
+                    request_id,
+                    format!("Could not reset the Signal session: {error}"),
+                ));
+            }
+        }
+        return;
+    }
+
     if let Command::MarkRead {
         request_id,
         recipient,
@@ -3113,7 +3152,9 @@ async fn handle_command(
         }
         Command::SendAttachment { .. } => unreachable!(),
         Command::LeaveGroup { .. } => unreachable!(),
-        Command::AcceptIdentity { .. } | Command::DismissIdentity { .. } => unreachable!(),
+        Command::AcceptIdentity { .. }
+        | Command::DismissIdentity { .. }
+        | Command::ResetSession { .. } => unreachable!(),
         Command::MarkRead { .. } => unreachable!(),
     };
 
@@ -5552,11 +5593,22 @@ mod tests {
             "recovery stopped",
         );
 
+        let reset_session = deferred_command_failure(
+            Command::ResetSession {
+                request_id: 44,
+                recipient: "recipient".into(),
+            },
+            "recovery stopped",
+        )
+        .unwrap();
+
         assert_eq!(send.request_id, 41);
         assert_eq!(send.text.as_deref(), Some("recovery stopped"));
         assert_eq!(leave.request_id, 42);
         assert_eq!(leave.chat_id.as_deref(), Some("group"));
         assert!(typing.is_none());
+        assert_eq!(reset_session.request_id, 44);
+        assert_eq!(reset_session.text.as_deref(), Some("recovery stopped"));
     }
 
     #[test]

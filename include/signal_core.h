@@ -56,7 +56,8 @@ typedef enum {
     SIGNAL_EVENT_ATTACHMENT_SENT = 20,
     SIGNAL_EVENT_GROUP_LEFT = 21,
     SIGNAL_EVENT_RECOVERING = 22,
-    SIGNAL_EVENT_ACCOUNT = 23
+    SIGNAL_EVENT_ACCOUNT = 23,
+    SIGNAL_EVENT_SESSION_RESET = 24
 } SignalEventKind;
 
 typedef enum {
@@ -126,6 +127,7 @@ typedef enum {
     SIGNAL_CORE_ABI_VALUE_EVENT_GROUP_LEFT,
     SIGNAL_CORE_ABI_VALUE_EVENT_RECOVERING,
     SIGNAL_CORE_ABI_VALUE_EVENT_ACCOUNT,
+    SIGNAL_CORE_ABI_VALUE_EVENT_SESSION_RESET,
     SIGNAL_CORE_ABI_VALUE_FLAG_NONE,
     SIGNAL_CORE_ABI_VALUE_FLAG_OUTGOING,
     SIGNAL_CORE_ABI_VALUE_FLAG_FATAL,
@@ -232,6 +234,10 @@ SignalStatus signal_core_accept_identity(SignalCore *core,
 SignalStatus signal_core_dismiss_identity(SignalCore *core,
                                           uint64_t request_id,
                                           const char *recipient);
+
+SignalStatus signal_core_reset_session(SignalCore *core,
+                                       uint64_t request_id,
+                                       const char *recipient);
 
 SignalStatus signal_core_mark_read(SignalCore *core,
                                    uint64_t request_id,
