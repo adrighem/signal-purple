@@ -1730,6 +1730,74 @@ test_pending_read_receipt_limit(PurplePlugin *plugin,
 }
 
 static void
+test_avatar_support(PurplePlugin *plugin, PurplePluginProtocolInfo *protocol)
+{
+    PurpleAccount *account =
+        purple_account_new("avatar-probe", SIGNAL_PLUGIN_ID);
+    PurpleConnection gc = {
+        .prpl = plugin,
+        .state = PURPLE_CONNECTED,
+        .account = account,
+    };
+    SignalConnection *connection;
+    union {
+        gpointer pointer;
+        SignalDispatchEventFunc function;
+    } dispatch_event = { 0 };
+    PurpleGroup *group;
+    PurpleBuddy *buddy;
+    PurpleChat *chat;
+    const guint8 png_data[] = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+    SignalEvent contact_avatar_event = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_AVATAR,
+        .peer_id = "aci:avatar-buddy-1",
+        .data = png_data,
+        .data_len = sizeof(png_data),
+    };
+    SignalEvent group_avatar_event = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_AVATAR,
+        .chat_id = "avatar-group-1",
+        .data = png_data,
+        .data_len = sizeof(png_data),
+    };
+    gboolean accepted = FALSE;
+
+    g_assert_cmpstr(protocol->icon_spec.format, ==, "png,jpeg,gif");
+    g_assert_cmpuint(protocol->icon_spec.max_filesize, ==, 10 * 1024 * 1024);
+    g_assert_cmpint(protocol->icon_spec.scale_rules, ==, PURPLE_ICON_SCALE_DISPLAY);
+
+    g_assert_true(g_module_symbol((GModule *)plugin->handle,
+                                  "signal_dispatch_event",
+                                  &dispatch_event.pointer));
+    purple_account_set_connection(account, &gc);
+    connection = new_transfer_connection(&gc);
+
+    group = purple_group_new("Avatar Test Group");
+    purple_blist_add_group(group, NULL);
+    buddy = purple_buddy_new(account, "aci:avatar-buddy-1", "Avatar Buddy");
+    purple_blist_add_buddy(buddy, NULL, group, NULL);
+    chat = add_group_chat(account, group, "avatar-group-1", TRUE);
+
+    g_assert_true(dispatch_event.function(connection, &contact_avatar_event, &accepted));
+    g_assert_nonnull(purple_buddy_get_icon(buddy));
+
+    g_assert_true(dispatch_event.function(connection, &group_avatar_event, &accepted));
+    g_assert_true(purple_buddy_icons_node_has_custom_icon(PURPLE_BLIST_NODE(chat)));
+
+    purple_blist_remove_buddy(buddy);
+    purple_blist_remove_chat(chat);
+    purple_blist_remove_group(group);
+
+    protocol->close(&gc);
+    purple_account_set_connection(account, NULL);
+    purple_account_destroy(account);
+}
+
+static void
 test_pending_transfer_disconnect(PurplePluginProtocolInfo *protocol,
                                  const char *user_dir)
 {
@@ -2033,6 +2101,7 @@ main(int argc, char **argv)
     g_assert_nonnull(protocol->find_blist_chat);
     g_assert_nonnull(protocol->get_cb_alias);
     test_connection_owned_resource_cleanup(protocol);
+    test_avatar_support(plugin, protocol);
     test_standard_conversation_logging(plugin, protocol);
     test_pending_read_receipt_admission(plugin, protocol);
     test_inline_attachment_routing(plugin, protocol);

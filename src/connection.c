@@ -1325,6 +1325,38 @@ signal_session_reset(SignalConnection *connection,
                        "A fresh Signal session will be established on the next message.");
 }
 
+static void
+signal_set_avatar(SignalConnection *connection, const SignalEvent *event)
+{
+    PurpleAccount *account;
+
+    if (connection == NULL || connection->gc == NULL || event == NULL)
+        return;
+
+    account = purple_connection_get_account(connection->gc);
+    if (account == NULL)
+        return;
+
+    if (event->peer_id != NULL && event->peer_id[0] != '\0') {
+        gpointer data_copy = NULL;
+        if (event->data != NULL && event->data_len > 0)
+            data_copy = g_memdup2(event->data, event->data_len);
+        purple_buddy_icons_set_for_user(account, event->peer_id, data_copy,
+                                        data_copy != NULL ? event->data_len : 0,
+                                        event->title);
+    } else if (event->chat_id != NULL && event->chat_id[0] != '\0') {
+        PurpleChat *chat = signal_group_sync_lookup_chat(account, event->chat_id);
+        if (chat != NULL) {
+            guchar *data_copy = NULL;
+            if (event->data != NULL && event->data_len > 0)
+                data_copy = g_memdup2(event->data, event->data_len);
+            purple_buddy_icons_node_set_custom_icon(
+                PURPLE_BLIST_NODE(chat), data_copy,
+                data_copy != NULL ? event->data_len : 0);
+        }
+    }
+}
+
 static gboolean
 signal_group_leave_failed(SignalConnection *connection,
                           const SignalEvent *event)
@@ -1440,6 +1472,9 @@ signal_dispatch_event(SignalConnection *connection, const SignalEvent *event,
         break;
     case SIGNAL_EVENT_SESSION_RESET:
         signal_session_reset(connection, event);
+        break;
+    case SIGNAL_EVENT_AVATAR:
+        signal_set_avatar(connection, event);
         break;
     case SIGNAL_EVENT_NOTICE:
         purple_notify_info(connection, "signal-purple", event->title,

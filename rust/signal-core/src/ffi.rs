@@ -30,7 +30,7 @@ const MAX_ATTACHMENT_FILENAME_BYTES: usize = 255;
 const MAX_CONTENT_TYPE_BYTES: usize = 255;
 const EVENT_QUEUE_CAPACITY: usize = 4096;
 
-const ABI_CONTRACT_VALUE_COUNT: usize = 65;
+const ABI_CONTRACT_VALUE_COUNT: usize = 66;
 const ABI_CONTRACT_VALUES: [i64; ABI_CONTRACT_VALUE_COUNT] = [
     ABI_VERSION as i64,
     SignalStatus::Ok as i64,
@@ -62,6 +62,7 @@ const ABI_CONTRACT_VALUES: [i64; ABI_CONTRACT_VALUE_COUNT] = [
     event::EVENT_RECOVERING as i64,
     event::EVENT_ACCOUNT as i64,
     event::EVENT_SESSION_RESET as i64,
+    event::EVENT_AVATAR as i64,
     0,
     event::FLAG_OUTGOING as i64,
     event::FLAG_FATAL as i64,
@@ -1026,6 +1027,67 @@ mod tests {
         unsafe { signal_event_free(event) };
         // SAFETY: the core and output pointer remain live for each call.
         assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 0);
+    }
+
+    #[test]
+    fn avatar_event_ffi_preserves_peer_chat_and_data() {
+        let (mut core, sink) = event_test_core(2);
+        let avatar_data = vec![0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
+
+        enqueue_test_event(
+            &sink,
+            Event {
+                kind: crate::event::EVENT_AVATAR,
+                peer_id: Some("aci:test-uuid".to_string()),
+                data: avatar_data.clone(),
+                ..Event::default()
+            },
+        );
+
+        let mut event = std::ptr::null_mut();
+        assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 1);
+        let event_ref = unsafe { event.as_ref() }.expect("event should not be null");
+        assert_eq!(event_ref.kind, crate::event::EVENT_AVATAR);
+        assert_eq!(
+            unsafe { CStr::from_ptr(event_ref.peer_id) }
+                .to_str()
+                .unwrap(),
+            "aci:test-uuid"
+        );
+        assert!(event_ref.chat_id.is_null());
+        assert_eq!(event_ref.data_len, avatar_data.len());
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(event_ref.data, event_ref.data_len) },
+            avatar_data.as_slice()
+        );
+        unsafe { signal_event_free(event) };
+
+        enqueue_test_event(
+            &sink,
+            Event {
+                kind: crate::event::EVENT_AVATAR,
+                chat_id: Some("group-test-id".to_string()),
+                data: avatar_data.clone(),
+                ..Event::default()
+            },
+        );
+
+        assert_eq!(unsafe { signal_core_poll_event(&mut core, &mut event) }, 1);
+        let event_ref = unsafe { event.as_ref() }.expect("event should not be null");
+        assert_eq!(event_ref.kind, crate::event::EVENT_AVATAR);
+        assert!(event_ref.peer_id.is_null());
+        assert_eq!(
+            unsafe { CStr::from_ptr(event_ref.chat_id) }
+                .to_str()
+                .unwrap(),
+            "group-test-id"
+        );
+        assert_eq!(event_ref.data_len, avatar_data.len());
+        assert_eq!(
+            unsafe { std::slice::from_raw_parts(event_ref.data, event_ref.data_len) },
+            avatar_data.as_slice()
+        );
+        unsafe { signal_event_free(event) };
     }
 
     #[test]
