@@ -1049,7 +1049,9 @@ mod tests {
         let event_ref = unsafe { event.as_ref() }.expect("event should not be null");
         assert_eq!(event_ref.kind, crate::event::EVENT_AVATAR);
         assert_eq!(
-            unsafe { CStr::from_ptr(event_ref.peer_id) }.to_str().unwrap(),
+            unsafe { CStr::from_ptr(event_ref.peer_id) }
+                .to_str()
+                .unwrap(),
             "aci:test-uuid"
         );
         assert!(event_ref.chat_id.is_null());
@@ -1075,7 +1077,9 @@ mod tests {
         assert_eq!(event_ref.kind, crate::event::EVENT_AVATAR);
         assert!(event_ref.peer_id.is_null());
         assert_eq!(
-            unsafe { CStr::from_ptr(event_ref.chat_id) }.to_str().unwrap(),
+            unsafe { CStr::from_ptr(event_ref.chat_id) }
+                .to_str()
+                .unwrap(),
             "group-test-id"
         );
         assert_eq!(event_ref.data_len, avatar_data.len());
