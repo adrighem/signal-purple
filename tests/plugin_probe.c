@@ -1788,6 +1788,10 @@ test_avatar_support(PurplePlugin *plugin, PurplePluginProtocolInfo *protocol)
     g_assert_true(dispatch_event.function(connection, &group_avatar_event, &accepted));
     g_assert_true(purple_buddy_icons_node_has_custom_icon(PURPLE_BLIST_NODE(chat)));
 
+    purple_blist_remove_buddy(buddy);
+    purple_blist_remove_chat(chat);
+    purple_blist_remove_group(group);
+
     protocol->close(&gc);
     purple_account_set_connection(account, NULL);
     purple_account_destroy(account);

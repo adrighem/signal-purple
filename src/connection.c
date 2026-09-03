@@ -1330,10 +1330,12 @@ signal_set_avatar(SignalConnection *connection, const SignalEvent *event)
 {
     PurpleAccount *account;
 
-    if (connection == NULL || event == NULL)
+    if (connection == NULL || connection->gc == NULL || event == NULL)
         return;
 
     account = purple_connection_get_account(connection->gc);
+    if (account == NULL)
+        return;
 
     if (event->peer_id != NULL && event->peer_id[0] != '\0') {
         gpointer data_copy = NULL;
