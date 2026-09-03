@@ -15,6 +15,7 @@ use presage::libsignal_service::content::{
 use presage::libsignal_service::groups_v2::Role;
 use presage::libsignal_service::protocol::{Aci, ServiceId};
 use presage::libsignal_service::sender::{AttachmentSpec, MessageSenderError};
+use presage::libsignal_service::zkgroup::profiles::ProfileKey;
 use presage::model::groups::Group;
 use presage::model::identity::OnNewIdentity;
 use presage::model::messages::Received;
@@ -37,7 +38,7 @@ use crate::acknowledgment::AcknowledgmentInbox;
 use crate::attachment::AttachmentAdmission;
 use crate::attachment::{AttachmentControl, AttachmentPermit, MAX_ATTACHMENT_BYTES};
 use crate::event::{
-    EVENT_ACCOUNT, EVENT_ATTACHMENT, EVENT_ATTACHMENT_SENT, EVENT_CONTACT,
+    EVENT_ACCOUNT, EVENT_ATTACHMENT, EVENT_ATTACHMENT_SENT, EVENT_AVATAR, EVENT_CONTACT,
     EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED, EVENT_GROUP,
     EVENT_GROUP_LEFT, EVENT_GROUP_MEMBER, EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN,
     EVENT_GROUP_SYNC_END, EVENT_IDENTITY_ACCEPTED, EVENT_IDENTITY_CHANGE, EVENT_LINK_QR,
@@ -310,6 +311,7 @@ enum DeliveryReceiptFailureAction {
 struct ActiveReceiveTasks {
     receive: tokio::task::JoinHandle<()>,
     contact_sync: tokio::task::JoinHandle<()>,
+    avatar_fetch: tokio::task::JoinHandle<()>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1471,7 +1473,7 @@ async fn receive_and_command_loop(
         }
         receive_generation = receive_generation.wrapping_add(1).max(1);
 
-        // Keep the contact request completely unpolled until the first
+        // Keep background tasks completely unpolled until the first
         // QueueEmpty path has finished its startup store work.
         let (contact_sync_start, contact_sync_wait) = oneshot::channel();
         let mut contact_sync_start = Some(contact_sync_start);
@@ -1481,9 +1483,18 @@ async fn receive_and_command_loop(
             shutdown.clone(),
             sink.clone(),
         ));
+        let (avatar_fetch_start, avatar_fetch_wait) = oneshot::channel();
+        let mut avatar_fetch_start = Some(avatar_fetch_start);
+        let avatar_fetch = tokio::task::spawn_local(fetch_missing_avatars_after_queue_drain(
+            avatar_fetch_wait,
+            manager.clone(),
+            shutdown.clone(),
+            sink.clone(),
+        ));
         let mut receive_tasks = ActiveReceiveTasks {
             receive: receive_task,
             contact_sync,
+            avatar_fetch,
         };
 
         macro_rules! await_phase_or_stop {
@@ -1589,6 +1600,9 @@ async fn receive_and_command_loop(
                                 ready.store(true, Ordering::Release);
                                 sink.emit(Event { kind: EVENT_READY, ..Event::default() });
                                 if let Some(start) = contact_sync_start.take() {
+                                    let _ = start.send(());
+                                }
+                                if let Some(start) = avatar_fetch_start.take() {
                                     let _ = start.send(());
                                 }
                             } else if groups_dirty {
@@ -1942,6 +1956,105 @@ async fn request_contacts_with_retries(
     }
 }
 
+async fn fetch_missing_avatars_after_queue_drain(
+    start: oneshot::Receiver<()>,
+    manager: Manager<SqliteStore, Registered>,
+    shutdown: watch::Receiver<bool>,
+    sink: EventSink,
+) {
+    run_after_start_signal(start, fetch_missing_avatars(manager, shutdown, sink)).await;
+}
+
+async fn fetch_missing_avatars(
+    mut manager: Manager<SqliteStore, Registered>,
+    mut shutdown: watch::Receiver<bool>,
+    sink: EventSink,
+) {
+    if let Ok(contacts) = manager.store().contacts().await
+        && let Ok(contacts) = contacts.collect::<Result<Vec<_>, _>>()
+    {
+        for contact in contacts {
+            let profile_key = if contact.profile_key.len() == 32 {
+                let mut key_bytes = [0u8; 32];
+                key_bytes.copy_from_slice(&contact.profile_key);
+                Some(ProfileKey::create(key_bytes))
+            } else {
+                manager
+                    .store()
+                    .profile_key(&ServiceId::Aci(contact.uuid.into()))
+                    .await
+                    .ok()
+                    .flatten()
+            };
+
+            if let Some(key) = profile_key {
+                let is_cached = manager
+                    .store()
+                    .profile_avatar(contact.uuid, key)
+                    .await
+                    .ok()
+                    .flatten()
+                    .is_some();
+                if !is_cached {
+                    let fetch = manager.retrieve_profile_avatar_by_uuid(contact.uuid, key);
+                    let result = tokio::select! {
+                        res = fetch => res,
+                        _ = wait_for_shutdown(&mut shutdown) => return,
+                    };
+                    if let Ok(Some(avatar)) = result {
+                        let peer = ServiceId::Aci(contact.uuid.into()).service_id_string();
+                        sink.emit(Event {
+                            kind: EVENT_AVATAR,
+                            peer_id: Some(peer),
+                            data: avatar,
+                            ..Event::default()
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    if let Ok(groups) = manager.store().groups().await
+        && let Ok(groups) = groups.collect::<Result<Vec<_>, _>>()
+    {
+        let local_aci = manager.registration_data().service_ids.aci();
+        for (key, group) in groups {
+            if !group_contains_local_aci(&group, &local_aci) || group.avatar.is_empty() {
+                continue;
+            }
+            let is_cached = manager
+                .store()
+                .group_avatar(key)
+                .await
+                .ok()
+                .flatten()
+                .is_some();
+            if !is_cached {
+                let context = GroupContextV2 {
+                    master_key: Some(key.to_vec()),
+                    revision: Some(group.revision),
+                    ..Default::default()
+                };
+                let fetch = manager.retrieve_group_avatar(context);
+                let result = tokio::select! {
+                    res = fetch => res,
+                    _ = wait_for_shutdown(&mut shutdown) => return,
+                };
+                if let Ok(Some(avatar)) = result {
+                    let chat_id = group_identifier(&key);
+                    sink.emit(Event {
+                        kind: EVENT_AVATAR,
+                        chat_id: Some(chat_id),
+                        data: avatar,
+                        ..Event::default()
+                    });
+                }
+            }
+        }
+    }
+}
+
 async fn handle_attachment_completion(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
@@ -2189,11 +2302,38 @@ async fn emit_contact_snapshot(manager: &Manager<SqliteStore, Registered>, sink:
                     let peer = ServiceId::Aci(contact.uuid.into()).service_id_string();
                     sink.emit(Event {
                         kind: EVENT_CONTACT,
-                        peer_id: Some(peer),
+                        peer_id: Some(peer.clone()),
                         title: (!contact.name.is_empty()).then_some(contact.name),
                         text: contact.phone_number.map(|number| number.to_string()),
                         ..Event::default()
                     });
+                    let profile_key = if contact.profile_key.len() == 32 {
+                        let mut key_bytes = [0u8; 32];
+                        key_bytes.copy_from_slice(&contact.profile_key);
+                        Some(ProfileKey::create(key_bytes))
+                    } else {
+                        manager
+                            .store()
+                            .profile_key(&ServiceId::Aci(contact.uuid.into()))
+                            .await
+                            .ok()
+                            .flatten()
+                    };
+                    if let Some(key) = profile_key
+                        && let Some(avatar) = manager
+                            .store()
+                            .profile_avatar(contact.uuid, key)
+                            .await
+                            .ok()
+                            .flatten()
+                    {
+                        sink.emit(Event {
+                            kind: EVENT_AVATAR,
+                            peer_id: Some(peer),
+                            data: avatar,
+                            ..Event::default()
+                        });
+                    }
                 }
                 sink.emit(Event {
                     kind: EVENT_CONTACT_SYNC_END,
@@ -2267,6 +2407,15 @@ async fn emit_group_snapshot(
             ..Event::default()
         });
         emitted_records += 1;
+        if let Some(avatar) = manager.store().group_avatar(key).await.ok().flatten() {
+            sink.emit(Event {
+                kind: EVENT_AVATAR,
+                chat_id: Some(chat_id.clone()),
+                data: avatar,
+                ..Event::default()
+            });
+            emitted_records += 1;
+        }
         for member in group.members {
             if emitted_records % SNAPSHOT_YIELD_INTERVAL == 0 {
                 tokio::task::yield_now().await;
@@ -2843,9 +2992,11 @@ async fn stop_receive_tasks<F>(
 {
     tasks.receive.abort();
     tasks.contact_sync.abort();
+    tasks.avatar_fetch.abort();
     let cleanup = async {
         let _ = (&mut tasks.receive).await;
         let _ = (&mut tasks.contact_sync).await;
+        let _ = (&mut tasks.avatar_fetch).await;
         abort_in_flight_attachments(manager, sink, attachment_tasks, attachment_controls).await;
         final_cleanup.await;
     };
