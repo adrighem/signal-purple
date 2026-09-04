@@ -4,6 +4,19 @@ All notable changes are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for stable releases.
 
+## [1.5.0](https://github.com/adrighem/signal-purple/compare/v1.4.0...v1.5.0) (2026-09-04)
+
+
+### Features
+
+* add read-only avatar support for contacts and groups ([#79](https://github.com/adrighem/signal-purple/issues/79)) ([dc87efa](https://github.com/adrighem/signal-purple/commit/dc87efab4ab77f294161be8efcd30e791482552d))
+
+
+### Bug Fixes
+
+* harden event queue draining, ephemeral errors, and avatar scaling ([567dc22](https://github.com/adrighem/signal-purple/commit/567dc22969b62f818baf892036860b4cc7379e8e))
+* harden event queue draining, ephemeral errors, and avatar scaling ([5e2390d](https://github.com/adrighem/signal-purple/commit/5e2390d9d0494185e0353f9a40c4a34d4b177d9b))
+
 ## [1.4.0](https://github.com/adrighem/signal-purple/compare/v1.3.0...v1.4.0) (2026-09-02)
 
 
