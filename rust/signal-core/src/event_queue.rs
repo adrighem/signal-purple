@@ -216,9 +216,7 @@ impl EventQueue {
                 EventPoll::Event(event)
             }
             Err(error) => {
-                let mut token = [0u8; 1];
-                let mut reader = &self.notification_reader;
-                let _ = reader.read(&mut token);
+                drain_notification(&self.notification_reader);
                 self.state
                     .notification_pending
                     .store(false, Ordering::Release);
@@ -227,6 +225,19 @@ impl EventQueue {
                     mpsc::TryRecvError::Disconnected => EventPoll::Disconnected,
                 }
             }
+        }
+    }
+}
+
+fn drain_notification(mut reader: &UnixStream) {
+    let mut buf = [0u8; 64];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(_) => continue,
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => break,
+            Err(_) => break,
         }
     }
 }
@@ -478,5 +489,16 @@ mod tests {
         });
         assert!(sink.state.notification_pending.load(Ordering::Acquire));
         assert_notification_readable(&queue, &sink);
+    }
+
+    #[test]
+    fn drains_multiple_accumulated_notification_bytes_when_empty() {
+        let (sink, queue) = queue(4, 16);
+
+        let mut writer = sink.notification_writer.as_ref();
+        writer.write_all(&[1, 1, 1, 1]).unwrap();
+
+        assert!(matches!(queue.poll(), EventPoll::Empty));
+        assert_notification_empty(&queue);
     }
 }

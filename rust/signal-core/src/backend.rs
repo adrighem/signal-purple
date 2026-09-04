@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
-use std::io::{Read, Write};
-use std::path::Path;
+use std::io::{Cursor, Read, Write};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use futures::{FutureExt, StreamExt, channel::oneshot, future::Abortable, pin_mut};
+use image::{ImageFormat, ImageReader};
 use presage::libsignal_service::configuration::SignalServers;
 use presage::libsignal_service::content::{
     Content, ContentBody, DataMessage, GroupContextV2, ServiceError,
@@ -131,6 +132,133 @@ impl Drop for StorePassphrase {
         if let Some(observer) = &self.drop_observer {
             observer.store(true, Ordering::Release);
         }
+    }
+}
+
+const MAX_AVATAR_DIMENSION: u32 = 192;
+const AVATAR_JPEG_QUALITY: u8 = 85;
+
+fn downscale_avatar(raw_data: &[u8]) -> Result<Vec<u8>, String> {
+    let reader = ImageReader::new(Cursor::new(raw_data))
+        .with_guessed_format()
+        .map_err(|e| format!("unrecognized image format: {e}"))?;
+
+    let format = reader.format();
+
+    // Fast-path: read image dimensions from header
+    if let Ok(dimensions) = reader.into_dimensions()
+        && dimensions.0 <= MAX_AVATAR_DIMENSION
+        && dimensions.1 <= MAX_AVATAR_DIMENSION
+    {
+        return Ok(raw_data.to_vec());
+    }
+
+    let dynamic_img =
+        image::load_from_memory(raw_data).map_err(|e| format!("image decode error: {e}"))?;
+
+    let resized = dynamic_img.thumbnail(MAX_AVATAR_DIMENSION, MAX_AVATAR_DIMENSION);
+
+    let mut output = Vec::new();
+    if format == Some(ImageFormat::Png) || resized.color().has_alpha() {
+        resized
+            .write_to(&mut Cursor::new(&mut output), ImageFormat::Png)
+            .map_err(|e| format!("png encode error: {e}"))?;
+    } else {
+        let mut encoder =
+            image::codecs::jpeg::JpegEncoder::new_with_quality(&mut output, AVATAR_JPEG_QUALITY);
+        encoder
+            .encode_image(&resized)
+            .map_err(|e| format!("jpeg encode error: {e}"))?;
+    }
+
+    Ok(output)
+}
+
+type CachedAvatar = (Vec<u8>, String);
+type AvatarMemoryCache = Arc<Mutex<HashMap<[u8; 32], CachedAvatar>>>;
+
+#[derive(Clone)]
+pub(crate) struct AvatarCache {
+    cache_dir: Option<PathBuf>,
+    mem_cache: AvatarMemoryCache,
+}
+
+impl AvatarCache {
+    pub(crate) fn new(store_path: Option<&str>) -> Self {
+        let cache_dir = store_path.and_then(|path| {
+            let parent = Path::new(path).parent()?;
+            let dir = parent.join("avatar_cache");
+            if std::fs::create_dir_all(&dir).is_ok() {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700));
+                }
+                Some(dir)
+            } else {
+                None
+            }
+        });
+        Self {
+            cache_dir,
+            mem_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    pub(crate) fn prepare_avatar(&self, raw_data: Vec<u8>) -> (Vec<u8>, String) {
+        if raw_data.is_empty() {
+            return (raw_data, String::new());
+        }
+
+        let raw_hash: [u8; 32] = Sha256::digest(&raw_data).into();
+
+        // 1. L1 Memory Cache Check
+        if let Ok(guard) = self.mem_cache.lock()
+            && let Some(hit) = guard.get(&raw_hash)
+        {
+            return hit.clone();
+        }
+
+        let raw_hash_hex = hex::encode(raw_hash);
+
+        // 2. L2 Disk Cache Check
+        if let Some(ref cache_dir) = self.cache_dir {
+            let disk_path = cache_dir.join(&raw_hash_hex);
+            if let Ok(disk_bytes) = std::fs::read(&disk_path) {
+                let checksum = hex::encode(Sha256::digest(&disk_bytes));
+                if let Ok(mut guard) = self.mem_cache.lock() {
+                    guard.insert(raw_hash, (disk_bytes.clone(), checksum.clone()));
+                }
+                return (disk_bytes, checksum);
+            }
+        }
+
+        // 3. Downscale or Fallback
+        let downscaled = match downscale_avatar(&raw_data) {
+            Ok(processed) => processed,
+            Err(err) => {
+                tracing::warn!("Avatar downscale skipped: {err}; using raw payload");
+                raw_data
+            }
+        };
+
+        let checksum = hex::encode(Sha256::digest(&downscaled));
+
+        // 4. Atomic Disk Persistence
+        if let Some(ref cache_dir) = self.cache_dir {
+            let disk_path = cache_dir.join(&raw_hash_hex);
+            let tmp_path = cache_dir.join(format!("{raw_hash_hex}.tmp.{}", std::process::id()));
+            if std::fs::write(&tmp_path, &downscaled).is_ok() {
+                let _ = std::fs::rename(&tmp_path, &disk_path);
+            }
+        }
+
+        // 5. Store in L1 Memory Cache
+        if let Ok(mut guard) = self.mem_cache.lock() {
+            guard.insert(raw_hash, (downscaled.clone(), checksum.clone()));
+        }
+
+        (downscaled, checksum)
     }
 }
 
@@ -999,6 +1127,7 @@ async fn run(
         device_name,
         passphrase,
     } = config;
+    let avatar_cache = AvatarCache::new(Some(&store_path));
     let Some(store) = open_encrypted_store(&store_path, passphrase, &mut shutdown).await? else {
         return Ok(());
     };
@@ -1025,7 +1154,16 @@ async fn run(
         }
     };
 
-    receive_and_command_loop(manager, commands, acknowledgments, shutdown, sink, ready).await
+    receive_and_command_loop(
+        manager,
+        commands,
+        acknowledgments,
+        shutdown,
+        sink,
+        ready,
+        avatar_cache,
+    )
+    .await
 }
 
 async fn open_encrypted_store(
@@ -1175,6 +1313,7 @@ async fn receive_and_command_loop(
     mut shutdown: watch::Receiver<bool>,
     sink: EventSink,
     ready: Arc<AtomicBool>,
+    avatar_cache: AvatarCache,
 ) -> Result<(), String> {
     let Some(projection_initialization) = await_or_shutdown(
         manager
@@ -1490,6 +1629,7 @@ async fn receive_and_command_loop(
             manager.clone(),
             shutdown.clone(),
             sink.clone(),
+            avatar_cache.clone(),
         ));
         let mut receive_tasks = ActiveReceiveTasks {
             receive: receive_task,
@@ -1567,12 +1707,13 @@ async fn receive_and_command_loop(
                                 await_phase_or_stop!(
                                     emit_account_identity(&mut manager, &sink)
                                 );
-                                await_phase_or_stop!(emit_contact_snapshot(&manager, &sink));
+                                await_phase_or_stop!(emit_contact_snapshot(&manager, &sink, &avatar_cache));
                                 match await_phase_or_stop!(
                                     synchronize_and_emit_group_snapshot(
                                         &mut manager,
                                         &sink,
                                         &departed_groups,
+                                        &avatar_cache,
                                     )
                                 ) {
                                     Ok(()) => session.mark_groups_authoritative(),
@@ -1610,6 +1751,7 @@ async fn receive_and_command_loop(
                                     &manager,
                                     &sink,
                                     &departed_groups,
+                                    &avatar_cache,
                                 )) {
                                     Ok(()) => session.mark_groups_authoritative(),
                                     Err(error) => {
@@ -1621,7 +1763,7 @@ async fn receive_and_command_loop(
                             }
                         }
                         Some(Received::Contacts) => {
-                            await_phase_or_stop!(emit_contact_snapshot(&manager, &sink));
+                            await_phase_or_stop!(emit_contact_snapshot(&manager, &sink, &avatar_cache));
                         }
                         Some(Received::Content(content)) => {
                             session.note_group_content(content_has_group_context(&content.body));
@@ -1793,6 +1935,7 @@ async fn receive_and_command_loop(
                         &mut manager,
                         &sink,
                         &departed_groups,
+                        &avatar_cache,
                     )) {
                         Ok(()) => {
                             session.mark_groups_authoritative();
@@ -1961,14 +2104,20 @@ async fn fetch_missing_avatars_after_queue_drain(
     manager: Manager<SqliteStore, Registered>,
     shutdown: watch::Receiver<bool>,
     sink: EventSink,
+    avatar_cache: AvatarCache,
 ) {
-    run_after_start_signal(start, fetch_missing_avatars(manager, shutdown, sink)).await;
+    run_after_start_signal(
+        start,
+        fetch_missing_avatars(manager, shutdown, sink, avatar_cache),
+    )
+    .await;
 }
 
 async fn fetch_missing_avatars(
     mut manager: Manager<SqliteStore, Registered>,
     mut shutdown: watch::Receiver<bool>,
     sink: EventSink,
+    avatar_cache: AvatarCache,
 ) {
     if let Ok(contacts) = manager.store().contacts().await
         && let Ok(contacts) = contacts.collect::<Result<Vec<_>, _>>()
@@ -2002,11 +2151,13 @@ async fn fetch_missing_avatars(
                         _ = wait_for_shutdown(&mut shutdown) => return,
                     };
                     if let Ok(Some(avatar)) = result {
+                        let (avatar_data, checksum) = avatar_cache.prepare_avatar(avatar);
                         let peer = ServiceId::Aci(contact.uuid.into()).service_id_string();
                         sink.emit(Event {
                             kind: EVENT_AVATAR,
                             peer_id: Some(peer),
-                            data: avatar,
+                            title: Some(checksum),
+                            data: avatar_data,
                             ..Event::default()
                         });
                     }
@@ -2042,11 +2193,13 @@ async fn fetch_missing_avatars(
                     _ = wait_for_shutdown(&mut shutdown) => return,
                 };
                 if let Ok(Some(avatar)) = result {
+                    let (avatar_data, checksum) = avatar_cache.prepare_avatar(avatar);
                     let chat_id = group_identifier(&key);
                     sink.emit(Event {
                         kind: EVENT_AVATAR,
                         chat_id: Some(chat_id),
-                        data: avatar,
+                        title: Some(checksum),
+                        data: avatar_data,
                         ..Event::default()
                     });
                 }
@@ -2222,13 +2375,15 @@ fn deferred_command_failure(command: Command, message: &str) -> Option<Event> {
         | Command::SendGroupMessage { request_id, .. }
         | Command::AcceptIdentity { request_id, .. }
         | Command::DismissIdentity { request_id, .. }
-        | Command::ResetSession { request_id, .. }
-        | Command::MarkRead { request_id, .. } => Some(Event::request_error(request_id, message)),
+        | Command::ResetSession { request_id, .. } => {
+            Some(Event::request_error(request_id, message))
+        }
         Command::SendAttachment {
             request_id, permit, ..
         } if permit.claim_terminal() => Some(Event::request_error(request_id, message)),
         Command::SendAttachment { .. } => None,
         Command::SetTyping { .. } => None,
+        Command::MarkRead { .. } => None,
     }
 }
 
@@ -2287,7 +2442,11 @@ async fn handle_command_interruptibly(
     }
 }
 
-async fn emit_contact_snapshot(manager: &Manager<SqliteStore, Registered>, sink: &EventSink) {
+async fn emit_contact_snapshot(
+    manager: &Manager<SqliteStore, Registered>,
+    sink: &EventSink,
+    avatar_cache: &AvatarCache,
+) {
     match manager.store().contacts().await {
         Ok(contacts) => match contacts.collect::<Result<Vec<_>, _>>() {
             Ok(contacts) => {
@@ -2327,10 +2486,12 @@ async fn emit_contact_snapshot(manager: &Manager<SqliteStore, Registered>, sink:
                             .ok()
                             .flatten()
                     {
+                        let (avatar_data, checksum) = avatar_cache.prepare_avatar(avatar);
                         sink.emit(Event {
                             kind: EVENT_AVATAR,
                             peer_id: Some(peer),
-                            data: avatar,
+                            title: Some(checksum),
+                            data: avatar_data,
                             ..Event::default()
                         });
                     }
@@ -2377,6 +2538,7 @@ async fn emit_group_snapshot(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
     departed_groups: &DepartedGroups,
+    avatar_cache: &AvatarCache,
 ) -> Result<(), String> {
     let groups = manager
         .store()
@@ -2408,10 +2570,12 @@ async fn emit_group_snapshot(
         });
         emitted_records += 1;
         if let Some(avatar) = manager.store().group_avatar(key).await.ok().flatten() {
+            let (avatar_data, checksum) = avatar_cache.prepare_avatar(avatar);
             sink.emit(Event {
                 kind: EVENT_AVATAR,
                 chat_id: Some(chat_id.clone()),
-                data: avatar,
+                title: Some(checksum),
+                data: avatar_data,
                 ..Event::default()
             });
             emitted_records += 1;
@@ -2441,12 +2605,13 @@ async fn synchronize_and_emit_group_snapshot(
     manager: &mut Manager<SqliteStore, Registered>,
     sink: &EventSink,
     departed_groups: &DepartedGroups,
+    avatar_cache: &AvatarCache,
 ) -> Result<(), String> {
     manager
         .synchronize_storage_groups()
         .await
         .map_err(|error| format!("Could not synchronize Signal groups: {error}"))?;
-    emit_group_snapshot(manager, sink, departed_groups).await
+    emit_group_snapshot(manager, sink, departed_groups, avatar_cache).await
 }
 
 async fn emit_identity_changes(manager: &Manager<SqliteStore, Registered>, sink: &EventSink) {
@@ -3142,7 +3307,7 @@ async fn handle_command(
             None => Err("Recipient is not a canonical Signal service identifier".into()),
         };
         if let Err(error) = result {
-            sink.emit(Event::request_error(request_id, error));
+            sink.emit(Event::transient_request_error(request_id, error));
         }
         return;
     }
@@ -3310,7 +3475,7 @@ async fn handle_command(
     };
 
     if let Err(error) = result {
-        sink.emit(Event::request_error(request_id, error));
+        sink.emit(Event::transient_request_error(request_id, error));
     }
 }
 
@@ -5717,7 +5882,7 @@ mod tests {
     }
 
     #[test]
-    fn fails_deferred_requests_but_drops_ephemeral_typing() {
+    fn fails_deferred_requests_but_drops_ephemeral_typing_and_read_receipts() {
         let send = deferred_command_failure(
             Command::SendGroupMessage {
                 request_id: 41,
@@ -5743,6 +5908,14 @@ mod tests {
             },
             "recovery stopped",
         );
+        let read = deferred_command_failure(
+            Command::MarkRead {
+                request_id: 45,
+                recipient: "recipient".into(),
+                timestamp: 12345,
+            },
+            "recovery stopped",
+        );
 
         let reset_session = deferred_command_failure(
             Command::ResetSession {
@@ -5758,6 +5931,7 @@ mod tests {
         assert_eq!(leave.request_id, 42);
         assert_eq!(leave.chat_id.as_deref(), Some("group"));
         assert!(typing.is_none());
+        assert!(read.is_none());
         assert_eq!(reset_session.request_id, 44);
         assert_eq!(reset_session.text.as_deref(), Some("recovery stopped"));
     }
@@ -6134,5 +6308,59 @@ mod tests {
         };
         truncate_attachment_to_sender_size(&empty, &mut shorter);
         assert!(shorter.is_empty());
+    }
+
+    #[test]
+    fn downscales_oversized_avatar_and_caches_to_disk() {
+        let test_dir = TestDirectory::new("avatar-cache");
+        let store_path = test_dir.join("presage.db");
+        let cache = AvatarCache::new(store_path.to_str());
+
+        let img = image::RgbaImage::new(300, 200);
+        let mut raw_png = Vec::new();
+        img.write_to(&mut Cursor::new(&mut raw_png), ImageFormat::Png)
+            .expect("png write should succeed");
+
+        let (processed1, checksum1) = cache.prepare_avatar(raw_png.clone());
+        assert!(!processed1.is_empty());
+        assert!(!checksum1.is_empty());
+
+        let reader = ImageReader::new(Cursor::new(&processed1))
+            .with_guessed_format()
+            .expect("format should be guessed");
+        let (w, h) = reader.into_dimensions().expect("dimensions should be read");
+        assert_eq!(w, 192);
+        assert_eq!(h, 128);
+
+        let (processed2, checksum2) = cache.prepare_avatar(raw_png.clone());
+        assert_eq!(processed1, processed2);
+        assert_eq!(checksum1, checksum2);
+
+        let cache2 = AvatarCache::new(store_path.to_str());
+        let (processed3, checksum3) = cache2.prepare_avatar(raw_png);
+        assert_eq!(processed1, processed3);
+        assert_eq!(checksum1, checksum3);
+    }
+
+    #[test]
+    fn preserves_small_avatar_without_modification() {
+        let cache = AvatarCache::new(None);
+        let img = image::RgbaImage::new(64, 64);
+        let mut raw_png = Vec::new();
+        img.write_to(&mut Cursor::new(&mut raw_png), ImageFormat::Png)
+            .expect("png write should succeed");
+
+        let (processed, checksum) = cache.prepare_avatar(raw_png.clone());
+        assert_eq!(processed, raw_png);
+        assert_eq!(checksum, hex::encode(Sha256::digest(&raw_png)));
+    }
+
+    #[test]
+    fn handles_corrupt_avatar_gracefully() {
+        let cache = AvatarCache::new(None);
+        let corrupt_data = b"definitely not an image".to_vec();
+        let (processed, checksum) = cache.prepare_avatar(corrupt_data.clone());
+        assert_eq!(processed, corrupt_data);
+        assert_eq!(checksum, hex::encode(Sha256::digest(&corrupt_data)));
     }
 }

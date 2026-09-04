@@ -15,6 +15,7 @@ crate-type = ["cdylib", "rlib"]
 [dependencies]
 futures = "0.3.31"
 hex = "0.4.3"
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 png = "0.18.0"
 presage = { git = "https://github.com/adrighem/presage.git", rev = "82c215e5fe00049ed527c7c6d93928c7c506ee79", default-features = false }
 presage-store-sqlite = { git = "https://github.com/adrighem/presage.git", rev = "82c215e5fe00049ed527c7c6d93928c7c506ee79" }
