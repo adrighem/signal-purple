@@ -1496,11 +1496,19 @@ signal_dispatch_event(SignalConnection *connection, const SignalEvent *event,
         if (signal_group_leave_failed(connection, event)) {
             purple_debug_warning("signal-purple",
                                  "Remote Signal group leave failed\n");
-            purple_notify_error(connection, "Could not leave Signal group",
-                                "The group was not removed", event->text);
-        } else if (!signal_outgoing_attachment_failed(connection, event))
-            purple_notify_error(connection, "signal-purple", event->title,
-                                event->text);
+            purple_notify_error(
+                connection, "Could not leave Signal group",
+                "The group was not removed",
+                event->text != NULL ? event->text : "Unknown error");
+        } else if (!signal_outgoing_attachment_failed(connection, event)) {
+            const char *primary =
+                event->title != NULL && event->title[0] != '\0'
+                    ? event->title
+                    : "Signal operation failed";
+            const char *secondary = event->text != NULL ? event->text : "";
+            purple_notify_error(connection, "signal-purple", primary,
+                                secondary);
+        }
         break;
     case SIGNAL_EVENT_DISCONNECTED:
         purple_connection_error_reason(

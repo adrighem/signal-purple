@@ -77,6 +77,13 @@ impl Event {
         }
     }
 
+    pub fn transient_request_error(request_id: u64, message: impl Into<String>) -> Self {
+        Self {
+            flags: FLAG_TRANSIENT,
+            ..Self::request_error(request_id, message)
+        }
+    }
+
     pub fn group_request_error(
         request_id: u64,
         chat_id: impl Into<String>,
@@ -268,5 +275,16 @@ mod tests {
         assert_eq!(event.flags, FLAG_TRANSIENT);
         assert_eq!(event.title.as_deref(), Some("Signal operation failed"));
         assert_eq!(event.text.as_deref(), Some("network is recovering"));
+    }
+
+    #[test]
+    fn transient_request_errors_preserve_request_id_and_transient_flag() {
+        let event = Event::transient_request_error(42, "ephemeral typing failed");
+
+        assert_eq!(event.kind, EVENT_ERROR);
+        assert_eq!(event.flags, FLAG_TRANSIENT);
+        assert_eq!(event.request_id, 42);
+        assert_eq!(event.title.as_deref(), Some("Signal operation failed"));
+        assert_eq!(event.text.as_deref(), Some("ephemeral typing failed"));
     }
 }
