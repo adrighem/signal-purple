@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -440,6 +441,7 @@ struct ActiveReceiveTasks {
     receive: tokio::task::JoinHandle<()>,
     contact_sync: tokio::task::JoinHandle<()>,
     avatar_fetch: tokio::task::JoinHandle<()>,
+    group_sync: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1090,14 +1092,14 @@ pub(crate) fn run_worker(context: WorkerContext) {
         match run_local_future(
             runtime,
             local,
-            run(
+            Box::pin(run(
                 config,
                 commands,
                 worker_acknowledgments,
                 shutdown,
                 sink.clone(),
                 Arc::clone(&ready),
-            ),
+            )),
             SHUTDOWN_CLEANUP_TIMEOUT,
         ) {
             Ok(result) => result,
@@ -1154,7 +1156,7 @@ async fn run(
         }
     };
 
-    receive_and_command_loop(
+    Box::pin(receive_and_command_loop(
         manager,
         commands,
         acknowledgments,
@@ -1162,7 +1164,7 @@ async fn run(
         sink,
         ready,
         avatar_cache,
-    )
+    ))
     .await
 }
 
@@ -1224,14 +1226,14 @@ fn shutdown_runtime(runtime: tokio::runtime::Runtime, timeout: Duration) {
 fn run_local_future<F>(
     runtime: tokio::runtime::Runtime,
     local: tokio::task::LocalSet,
-    future: F,
+    mut future: Pin<Box<F>>,
     shutdown_timeout: Duration,
 ) -> std::thread::Result<F::Output>
 where
-    F: Future,
+    F: Future + ?Sized,
 {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runtime.block_on(local.run_until(future))
+        runtime.block_on(local.run_until(&mut future))
     }));
     drop(local);
     shutdown_runtime(runtime, shutdown_timeout);
@@ -1631,10 +1633,20 @@ async fn receive_and_command_loop(
             sink.clone(),
             avatar_cache.clone(),
         ));
+        let (group_sync_tx, mut group_sync_rx) = tokio_mpsc::channel(1);
+        let group_sync = spawn_group_sync(
+            manager.clone(),
+            sink.clone(),
+            departed_groups.clone(),
+            avatar_cache.clone(),
+            shutdown.clone(),
+            group_sync_tx.clone(),
+        );
         let mut receive_tasks = ActiveReceiveTasks {
             receive: receive_task,
             contact_sync,
             avatar_fetch,
+            group_sync: Some(group_sync),
         };
 
         macro_rules! await_phase_or_stop {
@@ -1656,6 +1668,39 @@ async fn receive_and_command_loop(
                     }
                 }
             };
+        }
+
+        if !session.is_ready() {
+            await_phase_or_stop!(emit_account_identity(&mut manager, &sink));
+            await_phase_or_stop!(emit_contact_snapshot(&manager, &sink, &avatar_cache));
+            if let Err(error) = await_phase_or_stop!(emit_group_snapshot(
+                &manager,
+                &sink,
+                &departed_groups,
+                &avatar_cache,
+            )) {
+                sink.emit(Event::transient_error(error));
+            }
+            await_phase_or_stop!(load_unprojected_messages(
+                &manager,
+                &sink,
+                &mut replay,
+                session.groups_authoritative(),
+            ));
+            await_phase_or_stop!(emit_identity_changes(&manager, &sink));
+            await_phase_or_stop!(retry_outbox(
+                &mut manager,
+                &sink,
+                &departed_groups,
+                session.groups_authoritative(),
+            ));
+            session.mark_ready();
+            projection.delivery_receipts.activate_retries();
+            ready.store(true, Ordering::Release);
+            sink.emit(Event {
+                kind: EVENT_READY,
+                ..Event::default()
+            });
         }
 
         let recovery_error = loop {
@@ -1703,50 +1748,13 @@ async fn receive_and_command_loop(
                     && replay.can_accept_live_message() => {
                     match received {
                         Some(Received::QueueEmpty) => {
-                            if !session_ready {
-                                await_phase_or_stop!(
-                                    emit_account_identity(&mut manager, &sink)
-                                );
-                                await_phase_or_stop!(emit_contact_snapshot(&manager, &sink, &avatar_cache));
-                                match await_phase_or_stop!(
-                                    synchronize_and_emit_group_snapshot(
-                                        &mut manager,
-                                        &sink,
-                                        &departed_groups,
-                                        &avatar_cache,
-                                    )
-                                ) {
-                                    Ok(()) => session.mark_groups_authoritative(),
-                                    Err(error) => {
-                                        session.mark_groups_pending();
-                                        sink.emit(Event::transient_error(error));
-                                        group_sync_retry_tick.reset();
-                                    }
-                                }
-                                await_phase_or_stop!(load_unprojected_messages(
-                                    &manager,
-                                    &sink,
-                                    &mut replay,
-                                    session.groups_authoritative(),
-                                ));
-                                await_phase_or_stop!(emit_identity_changes(&manager, &sink));
-                                await_phase_or_stop!(retry_outbox(
-                                    &mut manager,
-                                    &sink,
-                                    &departed_groups,
-                                    session.groups_authoritative(),
-                                ));
-                                session.mark_ready();
-                                projection.delivery_receipts.activate_retries();
-                                ready.store(true, Ordering::Release);
-                                sink.emit(Event { kind: EVENT_READY, ..Event::default() });
-                                if let Some(start) = contact_sync_start.take() {
-                                    let _ = start.send(());
-                                }
-                                if let Some(start) = avatar_fetch_start.take() {
-                                    let _ = start.send(());
-                                }
-                            } else if groups_dirty {
+                            if let Some(start) = contact_sync_start.take() {
+                                let _ = start.send(());
+                            }
+                            if let Some(start) = avatar_fetch_start.take() {
+                                let _ = start.send(());
+                            }
+                            if groups_dirty {
                                 match await_phase_or_stop!(emit_group_snapshot(
                                     &manager,
                                     &sink,
@@ -1930,13 +1938,12 @@ async fn receive_and_command_loop(
                 _ = acknowledgment_retry_tick.tick() => {
                     acknowledgments.activate_retries();
                 }
-                _ = group_sync_retry_tick.tick(), if session_ready && !groups_authoritative => {
-                    match await_phase_or_stop!(synchronize_and_emit_group_snapshot(
-                        &mut manager,
-                        &sink,
-                        &departed_groups,
-                        &avatar_cache,
-                    )) {
+                result = group_sync_rx.recv() => {
+                    let Some(result) = result else {
+                        continue;
+                    };
+                    receive_tasks.group_sync = None;
+                    match result {
                         Ok(()) => {
                             session.mark_groups_authoritative();
                             replay.activate_groups();
@@ -1950,8 +1957,19 @@ async fn receive_and_command_loop(
                         Err(error) => {
                             session.mark_groups_pending();
                             sink.emit(Event::transient_error(error));
+                            group_sync_retry_tick.reset();
                         }
                     }
+                }
+                _ = group_sync_retry_tick.tick(), if session_ready && !groups_authoritative && receive_tasks.group_sync.is_none() => {
+                    receive_tasks.group_sync = Some(spawn_group_sync(
+                        manager.clone(),
+                        sink.clone(),
+                        departed_groups.clone(),
+                        avatar_cache.clone(),
+                        shutdown.clone(),
+                        group_sync_tx.clone(),
+                    ));
                 }
                 _ = wait_for_shutdown(&mut shutdown) => {
                     stop_active_receive_loop(
@@ -2208,6 +2226,42 @@ async fn fetch_missing_avatars(
     }
 }
 
+async fn synchronize_groups_task(
+    mut manager: Manager<SqliteStore, Registered>,
+    sink: EventSink,
+    departed_groups: DepartedGroups,
+    avatar_cache: AvatarCache,
+    mut shutdown: watch::Receiver<bool>,
+    result_tx: tokio_mpsc::Sender<Result<(), String>>,
+) {
+    let sync =
+        synchronize_and_emit_group_snapshot(&mut manager, &sink, &departed_groups, &avatar_cache);
+    tokio::select! {
+        result = sync => {
+            let _ = result_tx.send(result).await;
+        }
+        _ = wait_for_shutdown(&mut shutdown) => {}
+    }
+}
+
+fn spawn_group_sync(
+    manager: Manager<SqliteStore, Registered>,
+    sink: EventSink,
+    departed_groups: DepartedGroups,
+    avatar_cache: AvatarCache,
+    shutdown: watch::Receiver<bool>,
+    result_tx: tokio_mpsc::Sender<Result<(), String>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::task::spawn_local(synchronize_groups_task(
+        manager,
+        sink,
+        departed_groups,
+        avatar_cache,
+        shutdown,
+        result_tx,
+    ))
+}
+
 async fn handle_attachment_completion(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
@@ -2426,15 +2480,14 @@ async fn handle_command_interruptibly(
     groups_authoritative: bool,
     timestamps: &MessageTimestampAllocator,
 ) -> bool {
-    let operation = handle_command(
+    let mut operation = Box::pin(handle_command(
         manager,
         command,
         sink,
         departed_groups,
         groups_authoritative,
         timestamps,
-    );
-    pin_mut!(operation);
+    ));
 
     tokio::select! {
         () = &mut operation => false,
@@ -2653,18 +2706,17 @@ async fn attempt_outbox_message(
                     "Recipient is not a canonical Signal service identifier",
                 )
             })?;
-            manager
-                .send_message(
-                    recipient,
-                    DataMessage {
-                        body: Some(message.body.clone()),
-                        timestamp: Some(message.timestamp),
-                        ..Default::default()
-                    },
-                    message.timestamp,
-                )
-                .await
-                .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
+            Box::pin(manager.send_message(
+                recipient,
+                DataMessage {
+                    body: Some(message.body.clone()),
+                    timestamp: Some(message.timestamp),
+                    ..Default::default()
+                },
+                message.timestamp,
+            ))
+            .await
+            .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
             Ok(SentMessage {
                 thread: Thread::Contact(recipient),
                 timestamp: message.timestamp,
@@ -2679,23 +2731,22 @@ async fn attempt_outbox_message(
                         "Signal group is unavailable or this account is no longer a member",
                     )
                 })?;
-            manager
-                .send_message_to_group(
-                    &key,
-                    DataMessage {
-                        body: Some(message.body.clone()),
-                        timestamp: Some(message.timestamp),
-                        group_v2: Some(GroupContextV2 {
-                            master_key: Some(key.to_vec()),
-                            revision: Some(group.revision),
-                            ..Default::default()
-                        }),
+            Box::pin(manager.send_message_to_group(
+                &key,
+                DataMessage {
+                    body: Some(message.body.clone()),
+                    timestamp: Some(message.timestamp),
+                    group_v2: Some(GroupContextV2 {
+                        master_key: Some(key.to_vec()),
+                        revision: Some(group.revision),
                         ..Default::default()
-                    },
-                    message.timestamp,
-                )
-                .await
-                .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
+                    }),
+                    ..Default::default()
+                },
+                message.timestamp,
+            ))
+            .await
+            .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
             Ok(SentMessage {
                 thread: Thread::Group(key),
                 timestamp: message.timestamp,
@@ -3158,10 +3209,16 @@ async fn stop_receive_tasks<F>(
     tasks.receive.abort();
     tasks.contact_sync.abort();
     tasks.avatar_fetch.abort();
+    if let Some(group_sync) = tasks.group_sync.as_mut() {
+        group_sync.abort();
+    }
     let cleanup = async {
         let _ = (&mut tasks.receive).await;
         let _ = (&mut tasks.contact_sync).await;
         let _ = (&mut tasks.avatar_fetch).await;
+        if let Some(group_sync) = tasks.group_sync.as_mut() {
+            let _ = group_sync.await;
+        }
         abort_in_flight_attachments(manager, sink, attachment_tasks, attachment_controls).await;
         final_cleanup.await;
     };
@@ -3345,7 +3402,7 @@ async fn handle_command(
             return;
         };
 
-        match manager.leave_group(&key).await {
+        match Box::pin(manager.leave_group(&key)).await {
             Ok(outcome) => {
                 for event in group_leave_completion_events(
                     departed_groups,
@@ -3390,7 +3447,7 @@ async fn handle_command(
             message,
         } => {
             let result = if parse_recipient(&recipient).is_some() {
-                enqueue_and_send(
+                Box::pin(enqueue_and_send(
                     manager,
                     ClientOutboxKind::Direct,
                     recipient,
@@ -3398,7 +3455,7 @@ async fn handle_command(
                     departed_groups,
                     sink,
                     timestamps,
-                )
+                ))
                 .await
             } else {
                 Err("Recipient is not a canonical Signal service identifier".into())
@@ -3418,7 +3475,7 @@ async fn handle_command(
             } else {
                 match resolve_active_group(manager, &group_key, departed_groups).await {
                     Ok(Some(_)) => {
-                        enqueue_and_send(
+                        Box::pin(enqueue_and_send(
                             manager,
                             ClientOutboxKind::Group,
                             group_key,
@@ -3426,7 +3483,7 @@ async fn handle_command(
                             departed_groups,
                             sink,
                             timestamps,
-                        )
+                        ))
                         .await
                     }
                     Ok(None) => Err(
@@ -3445,22 +3502,21 @@ async fn handle_command(
             let result = match parse_recipient(&recipient) {
                 Some(recipient) => {
                     let timestamp = timestamps.next();
-                    manager
-                        .send_message(
-                            recipient,
-                            TypingMessage {
-                                timestamp: Some(timestamp),
-                                action: Some(if typing {
-                                    typing_message::Action::Started.into()
-                                } else {
-                                    typing_message::Action::Stopped.into()
-                                }),
-                                group_id: None,
-                            },
-                            timestamp,
-                        )
-                        .await
-                        .map_err(|error| error.to_string())
+                    Box::pin(manager.send_message(
+                        recipient,
+                        TypingMessage {
+                            timestamp: Some(timestamp),
+                            action: Some(if typing {
+                                typing_message::Action::Started.into()
+                            } else {
+                                typing_message::Action::Stopped.into()
+                            }),
+                            group_id: None,
+                        },
+                        timestamp,
+                    ))
+                    .await
+                    .map_err(|error| error.to_string())
                 }
                 None => Err("Recipient is not a canonical Signal service identifier".into()),
             };
@@ -4328,16 +4384,15 @@ async fn send_receipt_at_timestamp(
     receipt_type: receipt_message::Type,
     send_timestamp: u64,
 ) -> Result<(), presage::Error<presage_store_sqlite::SqliteStoreError>> {
-    manager
-        .send_message(
-            recipient,
-            ReceiptMessage {
-                r#type: Some(receipt_type.into()),
-                timestamp: vec![message_timestamp],
-            },
-            send_timestamp,
-        )
-        .await
+    Box::pin(manager.send_message(
+        recipient,
+        ReceiptMessage {
+            r#type: Some(receipt_type.into()),
+            timestamp: vec![message_timestamp],
+        },
+        send_timestamp,
+    ))
+    .await
 }
 
 async fn send_receipt(
@@ -4838,7 +4893,7 @@ mod tests {
         };
 
         let started = std::time::Instant::now();
-        let result = run_local_future(runtime, local, future, Duration::from_millis(10));
+        let result = run_local_future(runtime, local, Box::pin(future), Duration::from_millis(10));
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
 
@@ -5616,6 +5671,44 @@ mod tests {
             RecoveryTransition::Entered
         );
         assert_eq!(session.next_recovery_delay(), Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn models_fast_connect_decoupled_transitions() {
+        let mut session = SessionState::default();
+
+        assert_eq!(session.phase, SessionPhase::Initializing);
+        assert!(!session.is_ready());
+        assert!(!session.groups_authoritative());
+
+        // Decoupled startup: session is marked ready before remote group synchronization
+        session.mark_ready();
+        assert_eq!(session.phase, SessionPhase::Ready);
+        assert!(session.is_ready());
+        assert!(!session.groups_authoritative());
+
+        // Background group synchronization completes later
+        session.mark_groups_authoritative();
+        assert!(session.groups_authoritative());
+        assert!(session.is_ready());
+
+        // Network interruption moves session to recovery and resets group authority
+        assert_eq!(
+            session.enter_recovery("connection lost".to_owned()),
+            RecoveryTransition::Entered
+        );
+        assert!(session.is_recovering());
+        assert!(!session.is_ready());
+        assert!(!session.groups_authoritative());
+
+        // Fast reconnect: session is marked ready immediately upon socket connect
+        session.mark_ready();
+        assert!(session.is_ready());
+        assert!(!session.groups_authoritative());
+
+        // Remote group synchronization finishes again
+        session.mark_groups_authoritative();
+        assert!(session.groups_authoritative());
     }
 
     #[test]
