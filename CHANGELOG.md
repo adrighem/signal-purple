@@ -4,6 +4,15 @@ All notable changes are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for stable releases.
 
+## [1.5.1](https://github.com/adrighem/signal-purple/compare/v1.5.0...v1.5.1) (2026-09-05)
+
+
+### Bug Fixes
+
+* box large backend futures and optimize dependency builds ([e45a2e8](https://github.com/adrighem/signal-purple/commit/e45a2e899eae79e409f1a9405b9d6b106ae5b0c8)), closes [#83](https://github.com/adrighem/signal-purple/issues/83)
+* decouple connection readiness from remote group sync for fast startup ([8814158](https://github.com/adrighem/signal-purple/commit/8814158071b0465cf38f430deeddc99d9e4eee0f))
+* decouple connection readiness from remote group sync for fast startup ([4d0f057](https://github.com/adrighem/signal-purple/commit/4d0f0578113db9e5cbc26c3f6583868b9ce4e0f9))
+
 ## [1.5.0](https://github.com/adrighem/signal-purple/compare/v1.4.0...v1.5.0) (2026-09-04)
 
 
