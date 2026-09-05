@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::future::Future;
 use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -1091,14 +1092,14 @@ pub(crate) fn run_worker(context: WorkerContext) {
         match run_local_future(
             runtime,
             local,
-            run(
+            Box::pin(run(
                 config,
                 commands,
                 worker_acknowledgments,
                 shutdown,
                 sink.clone(),
                 Arc::clone(&ready),
-            ),
+            )),
             SHUTDOWN_CLEANUP_TIMEOUT,
         ) {
             Ok(result) => result,
@@ -1155,7 +1156,7 @@ async fn run(
         }
     };
 
-    receive_and_command_loop(
+    Box::pin(receive_and_command_loop(
         manager,
         commands,
         acknowledgments,
@@ -1163,7 +1164,7 @@ async fn run(
         sink,
         ready,
         avatar_cache,
-    )
+    ))
     .await
 }
 
@@ -1225,14 +1226,14 @@ fn shutdown_runtime(runtime: tokio::runtime::Runtime, timeout: Duration) {
 fn run_local_future<F>(
     runtime: tokio::runtime::Runtime,
     local: tokio::task::LocalSet,
-    future: F,
+    mut future: Pin<Box<F>>,
     shutdown_timeout: Duration,
 ) -> std::thread::Result<F::Output>
 where
-    F: Future,
+    F: Future + ?Sized,
 {
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runtime.block_on(local.run_until(future))
+        runtime.block_on(local.run_until(&mut future))
     }));
     drop(local);
     shutdown_runtime(runtime, shutdown_timeout);
@@ -2479,15 +2480,14 @@ async fn handle_command_interruptibly(
     groups_authoritative: bool,
     timestamps: &MessageTimestampAllocator,
 ) -> bool {
-    let operation = handle_command(
+    let mut operation = Box::pin(handle_command(
         manager,
         command,
         sink,
         departed_groups,
         groups_authoritative,
         timestamps,
-    );
-    pin_mut!(operation);
+    ));
 
     tokio::select! {
         () = &mut operation => false,
@@ -2706,18 +2706,17 @@ async fn attempt_outbox_message(
                     "Recipient is not a canonical Signal service identifier",
                 )
             })?;
-            manager
-                .send_message(
-                    recipient,
-                    DataMessage {
-                        body: Some(message.body.clone()),
-                        timestamp: Some(message.timestamp),
-                        ..Default::default()
-                    },
-                    message.timestamp,
-                )
-                .await
-                .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
+            Box::pin(manager.send_message(
+                recipient,
+                DataMessage {
+                    body: Some(message.body.clone()),
+                    timestamp: Some(message.timestamp),
+                    ..Default::default()
+                },
+                message.timestamp,
+            ))
+            .await
+            .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
             Ok(SentMessage {
                 thread: Thread::Contact(recipient),
                 timestamp: message.timestamp,
@@ -2732,23 +2731,22 @@ async fn attempt_outbox_message(
                         "Signal group is unavailable or this account is no longer a member",
                     )
                 })?;
-            manager
-                .send_message_to_group(
-                    &key,
-                    DataMessage {
-                        body: Some(message.body.clone()),
-                        timestamp: Some(message.timestamp),
-                        group_v2: Some(GroupContextV2 {
-                            master_key: Some(key.to_vec()),
-                            revision: Some(group.revision),
-                            ..Default::default()
-                        }),
+            Box::pin(manager.send_message_to_group(
+                &key,
+                DataMessage {
+                    body: Some(message.body.clone()),
+                    timestamp: Some(message.timestamp),
+                    group_v2: Some(GroupContextV2 {
+                        master_key: Some(key.to_vec()),
+                        revision: Some(group.revision),
                         ..Default::default()
-                    },
-                    message.timestamp,
-                )
-                .await
-                .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
+                    }),
+                    ..Default::default()
+                },
+                message.timestamp,
+            ))
+            .await
+            .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
             Ok(SentMessage {
                 thread: Thread::Group(key),
                 timestamp: message.timestamp,
@@ -3404,7 +3402,7 @@ async fn handle_command(
             return;
         };
 
-        match manager.leave_group(&key).await {
+        match Box::pin(manager.leave_group(&key)).await {
             Ok(outcome) => {
                 for event in group_leave_completion_events(
                     departed_groups,
@@ -3449,7 +3447,7 @@ async fn handle_command(
             message,
         } => {
             let result = if parse_recipient(&recipient).is_some() {
-                enqueue_and_send(
+                Box::pin(enqueue_and_send(
                     manager,
                     ClientOutboxKind::Direct,
                     recipient,
@@ -3457,7 +3455,7 @@ async fn handle_command(
                     departed_groups,
                     sink,
                     timestamps,
-                )
+                ))
                 .await
             } else {
                 Err("Recipient is not a canonical Signal service identifier".into())
@@ -3477,7 +3475,7 @@ async fn handle_command(
             } else {
                 match resolve_active_group(manager, &group_key, departed_groups).await {
                     Ok(Some(_)) => {
-                        enqueue_and_send(
+                        Box::pin(enqueue_and_send(
                             manager,
                             ClientOutboxKind::Group,
                             group_key,
@@ -3485,7 +3483,7 @@ async fn handle_command(
                             departed_groups,
                             sink,
                             timestamps,
-                        )
+                        ))
                         .await
                     }
                     Ok(None) => Err(
@@ -3504,22 +3502,21 @@ async fn handle_command(
             let result = match parse_recipient(&recipient) {
                 Some(recipient) => {
                     let timestamp = timestamps.next();
-                    manager
-                        .send_message(
-                            recipient,
-                            TypingMessage {
-                                timestamp: Some(timestamp),
-                                action: Some(if typing {
-                                    typing_message::Action::Started.into()
-                                } else {
-                                    typing_message::Action::Stopped.into()
-                                }),
-                                group_id: None,
-                            },
-                            timestamp,
-                        )
-                        .await
-                        .map_err(|error| error.to_string())
+                    Box::pin(manager.send_message(
+                        recipient,
+                        TypingMessage {
+                            timestamp: Some(timestamp),
+                            action: Some(if typing {
+                                typing_message::Action::Started.into()
+                            } else {
+                                typing_message::Action::Stopped.into()
+                            }),
+                            group_id: None,
+                        },
+                        timestamp,
+                    ))
+                    .await
+                    .map_err(|error| error.to_string())
                 }
                 None => Err("Recipient is not a canonical Signal service identifier".into()),
             };
@@ -4387,16 +4384,15 @@ async fn send_receipt_at_timestamp(
     receipt_type: receipt_message::Type,
     send_timestamp: u64,
 ) -> Result<(), presage::Error<presage_store_sqlite::SqliteStoreError>> {
-    manager
-        .send_message(
-            recipient,
-            ReceiptMessage {
-                r#type: Some(receipt_type.into()),
-                timestamp: vec![message_timestamp],
-            },
-            send_timestamp,
-        )
-        .await
+    Box::pin(manager.send_message(
+        recipient,
+        ReceiptMessage {
+            r#type: Some(receipt_type.into()),
+            timestamp: vec![message_timestamp],
+        },
+        send_timestamp,
+    ))
+    .await
 }
 
 async fn send_receipt(
@@ -4897,7 +4893,7 @@ mod tests {
         };
 
         let started = std::time::Instant::now();
-        let result = run_local_future(runtime, local, future, Duration::from_millis(10));
+        let result = run_local_future(runtime, local, Box::pin(future), Duration::from_millis(10));
         assert!(result.is_err());
         assert!(started.elapsed() < Duration::from_secs(1));
 
