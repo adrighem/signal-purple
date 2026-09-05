@@ -322,7 +322,7 @@ def validate_release_workflows() -> None:
             "id-token: write",
             "pages: write",
             "actions/deploy-pages@"
-            "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128",
+            "368f82528645a54fb793d4d04e342629a3f51346",
         ],
     )
     reject_fragments(
