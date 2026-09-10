@@ -9,7 +9,7 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-## [ ] Track: SQLite persistence hardening
+## [x] Track: SQLite persistence hardening
 *Link: [./conductor/tracks/storage_hardening_20260910/](./conductor/tracks/storage_hardening_20260910/)*
 
 ---
