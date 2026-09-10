@@ -1674,19 +1674,11 @@ async fn receive_and_command_loop(
             avatar_cache.clone(),
         ));
         let (group_sync_tx, mut group_sync_rx) = tokio_mpsc::channel(1);
-        let group_sync = spawn_group_sync(
-            manager.clone(),
-            sink.clone(),
-            departed_groups.clone(),
-            avatar_cache.clone(),
-            shutdown.clone(),
-            group_sync_tx.clone(),
-        );
         let mut receive_tasks = ActiveReceiveTasks {
             receive: receive_task,
             contact_sync,
             avatar_fetch,
-            group_sync: Some(group_sync),
+            group_sync: None,
         };
 
         macro_rules! await_phase_or_stop {
@@ -1793,6 +1785,16 @@ async fn receive_and_command_loop(
                             }
                             if let Some(start) = avatar_fetch_start.take() {
                                 let _ = start.send(());
+                            }
+                            if receive_tasks.group_sync.is_none() && !groups_authoritative {
+                                receive_tasks.group_sync = Some(spawn_group_sync(
+                                    manager.clone(),
+                                    sink.clone(),
+                                    departed_groups.clone(),
+                                    avatar_cache.clone(),
+                                    shutdown.clone(),
+                                    group_sync_tx.clone(),
+                                ));
                             }
                             if groups_dirty {
                                 match await_phase_or_stop!(emit_group_snapshot(
