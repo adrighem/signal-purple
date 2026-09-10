@@ -12,7 +12,7 @@ const BACKEND_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 use crate::acknowledgment::AcknowledgmentInbox;
 use crate::attachment::{AttachmentAdmission, AttachmentAdmissionError, MAX_ATTACHMENT_BYTES};
-use crate::backend::{self, Command, Config, StorePassphrase, WorkerContext};
+use crate::backend::{self, AttachmentPayload, Command, Config, StorePassphrase, WorkerContext};
 #[cfg(test)]
 use crate::event::Event;
 use crate::event::{self, ABI_VERSION, OwnedEvent, SignalEvent};
@@ -482,7 +482,7 @@ unsafe fn send_attachment(
             recipient,
             filename,
             content_type,
-            data,
+            data: AttachmentPayload::Data(data),
             group,
             permit: attachment_permit,
         });
@@ -551,6 +551,132 @@ pub unsafe extern "C" fn signal_core_send_group_attachment(
                 data,
                 data_len,
             },
+            true,
+        )
+    }
+}
+
+unsafe fn send_file_attachment(
+    core: *mut SignalCore,
+    request_id: u64,
+    recipient: *const c_char,
+    filename: *const c_char,
+    content_type: *const c_char,
+    file_path: *const c_char,
+    group: bool,
+) -> SignalStatus {
+    ffi_guard(|| {
+        if core.is_null() || file_path.is_null() {
+            return SignalStatus::InvalidArgument;
+        }
+        // SAFETY: `core` remains live and ABI calls are serialized by C.
+        let core = unsafe { &*core };
+        if !core.ready.load(Ordering::Acquire) {
+            return SignalStatus::NotReady;
+        }
+        // SAFETY: all strings are validated and copied during this call.
+        let recipient = status_try!(unsafe { required_string(recipient, MAX_RECIPIENT_BYTES) });
+        let filename =
+            status_try!(unsafe { required_string(filename, MAX_ATTACHMENT_FILENAME_BYTES) });
+        let content_type =
+            status_try!(unsafe { required_string(content_type, MAX_CONTENT_TYPE_BYTES) });
+        let path_str = status_try!(unsafe { required_string(file_path, MAX_STORE_PATH_BYTES) });
+        let path = std::path::PathBuf::from(&path_str);
+        let metadata = match std::fs::metadata(&path) {
+            Ok(metadata) => metadata,
+            Err(_) => return SignalStatus::InvalidArgument,
+        };
+        if !metadata.is_file() {
+            return SignalStatus::InvalidArgument;
+        }
+        let file_len: usize = match metadata.len().try_into() {
+            Ok(len) if len > 0 && len <= MAX_ATTACHMENT_BYTES => len,
+            _ => return SignalStatus::InvalidArgument,
+        };
+        if group
+            && (recipient.len() != GROUP_KEY_BYTES
+                || hex::decode(&recipient).map_or(true, |value| value.len() != 32))
+        {
+            return SignalStatus::InvalidArgument;
+        }
+        let attachment_permit = match core.attachments.try_reserve(request_id, file_len) {
+            Ok(permit) => permit,
+            Err(AttachmentAdmissionError::Invalid) => return SignalStatus::InvalidArgument,
+            Err(AttachmentAdmissionError::Capacity) => return SignalStatus::QueueFull,
+        };
+        let command_slot = match core.commands.try_reserve() {
+            Ok(slot) => slot,
+            Err(tokio_mpsc::error::TrySendError::Full(_)) => return SignalStatus::QueueFull,
+            Err(tokio_mpsc::error::TrySendError::Closed(_)) => {
+                return SignalStatus::InternalError;
+            }
+        };
+        command_slot.send(Command::SendAttachment {
+            request_id,
+            recipient,
+            filename,
+            content_type,
+            data: AttachmentPayload::Path(path),
+            group,
+            permit: attachment_permit,
+        });
+        SignalStatus::Ok
+    })
+}
+
+#[unsafe(no_mangle)]
+/// Queues one bounded attachment for a direct Signal recipient by file path.
+///
+/// # Safety
+///
+/// All pointers must remain readable for this call. The core must be live and
+/// serialized with teardown.
+pub unsafe extern "C" fn signal_core_send_file_attachment(
+    core: *mut SignalCore,
+    request_id: u64,
+    recipient: *const c_char,
+    filename: *const c_char,
+    content_type: *const c_char,
+    file_path: *const c_char,
+) -> SignalStatus {
+    // SAFETY: this function has the same pointer contract as the helper.
+    unsafe {
+        send_file_attachment(
+            core,
+            request_id,
+            recipient,
+            filename,
+            content_type,
+            file_path,
+            false,
+        )
+    }
+}
+
+#[unsafe(no_mangle)]
+/// Queues one bounded attachment for a synchronized Signal group by file path.
+///
+/// # Safety
+///
+/// All pointers must remain readable for this call. The core must be live and
+/// serialized with teardown.
+pub unsafe extern "C" fn signal_core_send_group_file_attachment(
+    core: *mut SignalCore,
+    request_id: u64,
+    group_key: *const c_char,
+    filename: *const c_char,
+    content_type: *const c_char,
+    file_path: *const c_char,
+) -> SignalStatus {
+    // SAFETY: this function has the same pointer contract as the helper.
+    unsafe {
+        send_file_attachment(
+            core,
+            request_id,
+            group_key,
+            filename,
+            content_type,
+            file_path,
             true,
         )
     }
@@ -1223,7 +1349,7 @@ mod tests {
             receiver.try_recv(),
             Ok(Command::SendAttachment {
                 request_id: 7,
-                data: queued,
+                data: AttachmentPayload::Data(queued),
                 group: false,
                 ..
             }) if queued == data
@@ -1407,6 +1533,79 @@ mod tests {
 
         drop(receiver.try_recv().unwrap());
         assert_eq!(send(&mut core, 1), SignalStatus::Ok);
+    }
+
+    #[test]
+    fn file_attachment_abi_validates_file_and_queues() {
+        let (commands, mut receiver) = tokio_mpsc::channel(1);
+        let (shutdown, _shutdown_receiver) = watch::channel(false);
+        let mut core = test_core(commands, shutdown, None, true);
+        let recipient = CString::new("aci:recipient").unwrap();
+        let filename = CString::new("photo.jpg").unwrap();
+        let content_type = CString::new("image/jpeg").unwrap();
+
+        let test_dir =
+            std::env::temp_dir().join(format!("signal-purple-ffi-test-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&test_dir);
+        let file_path_buf = test_dir.join("test.bin");
+        std::fs::write(&file_path_buf, b"file content").unwrap();
+        let file_path = CString::new(file_path_buf.to_str().unwrap()).unwrap();
+
+        // SAFETY: pointers are valid for the call.
+        let status = unsafe {
+            signal_core_send_file_attachment(
+                &mut core,
+                42,
+                recipient.as_ptr(),
+                filename.as_ptr(),
+                content_type.as_ptr(),
+                file_path.as_ptr(),
+            )
+        };
+
+        assert_eq!(status, SignalStatus::Ok);
+        assert_eq!(core.attachments.usage(), (12, 1));
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(Command::SendAttachment {
+                request_id: 42,
+                data: AttachmentPayload::Path(path),
+                group: false,
+                ..
+            }) if path == file_path_buf
+        ));
+
+        // Non-existent file rejects with InvalidArgument
+        let non_existent = CString::new(test_dir.join("missing.bin").to_str().unwrap()).unwrap();
+        let status = unsafe {
+            signal_core_send_file_attachment(
+                &mut core,
+                43,
+                recipient.as_ptr(),
+                filename.as_ptr(),
+                content_type.as_ptr(),
+                non_existent.as_ptr(),
+            )
+        };
+        assert_eq!(status, SignalStatus::InvalidArgument);
+
+        // Empty file rejects with InvalidArgument
+        let empty_buf = test_dir.join("empty.bin");
+        std::fs::write(&empty_buf, b"").unwrap();
+        let empty_path = CString::new(empty_buf.to_str().unwrap()).unwrap();
+        let status = unsafe {
+            signal_core_send_file_attachment(
+                &mut core,
+                44,
+                recipient.as_ptr(),
+                filename.as_ptr(),
+                content_type.as_ptr(),
+                empty_path.as_ptr(),
+            )
+        };
+        assert_eq!(status, SignalStatus::InvalidArgument);
+
+        let _ = std::fs::remove_dir_all(&test_dir);
     }
 
     #[test]

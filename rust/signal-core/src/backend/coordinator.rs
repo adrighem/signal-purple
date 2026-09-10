@@ -1189,11 +1189,17 @@ pub(crate) async fn mark_sent_message_projected_or_report(
     }
 }
 
+#[derive(Debug)]
+pub(crate) enum AttachmentPayload {
+    Data(Vec<u8>),
+    Path(std::path::PathBuf),
+}
+
 pub(crate) struct OutgoingAttachment {
     pub(crate) recipient: String,
     pub(crate) filename: String,
     pub(crate) content_type: String,
-    pub(crate) data: Vec<u8>,
+    pub(crate) data: AttachmentPayload,
     pub(crate) group: bool,
 }
 
@@ -1210,6 +1216,12 @@ pub(crate) async fn upload_and_send_attachment(
         data,
         group,
     } = attachment;
+    let data = match data {
+        AttachmentPayload::Data(bytes) => bytes,
+        AttachmentPayload::Path(path) => tokio::fs::read(&path)
+            .await
+            .map_err(|error| format!("Could not read attachment file: {error}"))?,
+    };
     if data.is_empty() || data.len() > MAX_ATTACHMENT_BYTES {
         return Err("Attachment size is outside the supported range".into());
     }

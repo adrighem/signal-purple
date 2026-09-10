@@ -6,5 +6,8 @@
 
 GBytes *signal_read_bounded_file(const char *path, gsize maximum_bytes,
                                  GError **error);
+gboolean signal_inspect_attachment_file(const char *path, gsize maximum_bytes,
+                                        gsize *out_size, char **out_mime_type,
+                                        GError **error);
 
 #endif

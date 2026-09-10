@@ -115,14 +115,11 @@ static void
 signal_outgoing_attachment_init(PurpleXfer *xfer)
 {
     SignalOutgoingAttachment *attachment = xfer->data;
-    g_autoptr(GBytes) contents = NULL;
+    const char *local_filename;
     g_autofree char *filename = NULL;
-    g_autofree char *content_type = NULL;
     g_autofree char *mime_type = NULL;
     g_autoptr(GError) error = NULL;
-    gconstpointer contents_data;
     gsize size = 0;
-    gboolean uncertain = FALSE;
     SignalStatus status;
     guint64 *key;
 
@@ -140,10 +137,10 @@ signal_outgoing_attachment_init(PurpleXfer *xfer)
         purple_xfer_cancel_local(xfer);
         return;
     }
-    contents = signal_read_bounded_file(
-        purple_xfer_get_local_filename(xfer), SIGNAL_CORE_MAX_ATTACHMENT_BYTES,
-        &error);
-    if (contents == NULL) {
+    local_filename = purple_xfer_get_local_filename(xfer);
+    if (!signal_inspect_attachment_file(local_filename,
+                                        SIGNAL_CORE_MAX_ATTACHMENT_BYTES,
+                                        &size, &mime_type, &error)) {
         const char *message = error->message;
 
         if (g_error_matches(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA) ||
@@ -155,17 +152,8 @@ signal_outgoing_attachment_init(PurpleXfer *xfer)
         purple_xfer_cancel_local(xfer);
         return;
     }
-    contents_data = g_bytes_get_data(contents, &size);
     purple_xfer_set_size(xfer, size);
-
-    filename = g_path_get_basename(purple_xfer_get_local_filename(xfer));
-    content_type = g_content_type_guess(filename, contents_data,
-                                        MIN(size, (gsize)512), &uncertain);
-    (void)uncertain;
-    if (content_type != NULL)
-        mime_type = g_content_type_get_mime_type(content_type);
-    if (mime_type == NULL)
-        mime_type = g_strdup("application/octet-stream");
+    filename = g_path_get_basename(local_filename);
 
     attachment->request_id = attachment->connection->next_request_id++;
     purple_xfer_ref(xfer);
@@ -176,15 +164,15 @@ signal_outgoing_attachment_init(PurpleXfer *xfer)
     }
     attachment = xfer->data;
     if (attachment->group) {
-        status = signal_core_send_group_attachment(
+        status = signal_core_send_group_file_attachment(
             attachment->connection->core, attachment->request_id,
             attachment->recipient, filename, mime_type,
-            contents_data, size);
+            local_filename);
     } else {
-        status = signal_core_send_attachment(
+        status = signal_core_send_file_attachment(
             attachment->connection->core, attachment->request_id,
             attachment->recipient, filename, mime_type,
-            contents_data, size);
+            local_filename);
     }
     if (status != SIGNAL_STATUS_OK) {
         attachment->request_id = 0;
