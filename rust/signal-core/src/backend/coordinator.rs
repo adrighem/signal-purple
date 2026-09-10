@@ -25,8 +25,8 @@ use presage::proto::{
 };
 use presage::store::{StateStore, Thread};
 use presage::{Manager, manager::Registered};
+use presage_store_sqlite::ClientOutboxKind;
 use presage_store_sqlite::SqliteStore;
-use presage_store_sqlite::{ClientOutboxKind, ClientOutboxMessage};
 use qrcode::QrCode;
 use qrcode::types::Color;
 use sha2::{Digest, Sha256};
@@ -37,6 +37,7 @@ use super::media::{
     AvatarCache, DownloadedAttachment, MAX_SIGNAL_GIF_TRANSCODES_PER_MESSAGE,
     attachment_display_name, should_inline_image, transcode_signal_gif_video,
 };
+use super::outbox::{enqueue_and_send, retry_outbox};
 use crate::acknowledgment::AcknowledgmentInbox;
 #[cfg(test)]
 use crate::attachment::AttachmentAdmission;
@@ -62,12 +63,12 @@ const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 const SNAPSHOT_YIELD_INTERVAL: usize = 64;
 
 #[derive(Clone, Default)]
-struct MessageTimestampAllocator {
+pub(crate) struct MessageTimestampAllocator {
     latest: Arc<AtomicU64>,
 }
 
 impl MessageTimestampAllocator {
-    fn next(&self) -> u64 {
+    pub(crate) fn next(&self) -> u64 {
         self.next_at(wall_clock_ms())
     }
 
@@ -404,9 +405,9 @@ struct BareDataMessageRoute {
     outgoing: bool,
 }
 
-struct SentMessage {
-    thread: Thread,
-    timestamp: u64,
+pub(crate) struct SentMessage {
+    pub(crate) thread: Thread,
+    pub(crate) timestamp: u64,
 }
 
 enum ProjectionGroup {
@@ -449,14 +450,8 @@ fn group_message_peer(outgoing: bool, peer: &str, local_aci: Aci) -> String {
     }
 }
 
-#[derive(Debug)]
-struct OutboxAttemptError {
-    message: String,
-    retryable: bool,
-}
-
 #[derive(Clone, Default)]
-struct DepartedGroups {
+pub(crate) struct DepartedGroups {
     state: Arc<Mutex<GroupLeaveState>>,
     operation: Arc<AsyncMutex<()>>,
 }
@@ -497,7 +492,7 @@ impl DepartedGroups {
         }
     }
 
-    fn contains(&self, identifier: &str) -> bool {
+    pub(crate) fn contains(&self, identifier: &str) -> bool {
         self.departure_state(identifier) != GroupDepartureState::Active
     }
 
@@ -576,32 +571,6 @@ fn group_leave_completion_events(
             departed_groups.cancel_leave(group_key);
             vec![Event::group_request_error(request_id, group_key, error)]
         }
-    }
-}
-
-impl OutboxAttemptError {
-    fn permanent(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            retryable: false,
-        }
-    }
-
-    fn retryable(message: impl Into<String>) -> Self {
-        Self {
-            message: message.into(),
-            retryable: true,
-        }
-    }
-
-    fn should_retry(&self) -> bool {
-        self.retryable
-    }
-}
-
-impl std::fmt::Display for OutboxAttemptError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.message)
     }
 }
 
@@ -974,7 +943,9 @@ fn signal_protocol_error_is_transient(error: &SignalProtocolError) -> bool {
     }
 }
 
-fn sqlite_store_error_is_transient(error: &presage_store_sqlite::SqliteStoreError) -> bool {
+pub(crate) fn sqlite_store_error_is_transient(
+    error: &presage_store_sqlite::SqliteStoreError,
+) -> bool {
     match error {
         presage_store_sqlite::SqliteStoreError::Db(db_error) => sqlx_error_is_transient(db_error),
         presage_store_sqlite::SqliteStoreError::Io(_) => true,
@@ -2682,72 +2653,6 @@ async fn emit_identity_changes(manager: &Manager<SqliteStore, Registered>, sink:
     }
 }
 
-fn retry_delay_ms(attempts: u32) -> u64 {
-    let exponent = attempts.min(9);
-    5_000u64.saturating_mul(1u64 << exponent).min(3_600_000)
-}
-
-async fn attempt_outbox_message(
-    manager: &mut Manager<SqliteStore, Registered>,
-    message: &ClientOutboxMessage,
-    departed_groups: &DepartedGroups,
-) -> Result<SentMessage, OutboxAttemptError> {
-    match message.kind {
-        ClientOutboxKind::Direct => {
-            let recipient = parse_recipient(&message.recipient).ok_or_else(|| {
-                OutboxAttemptError::permanent(
-                    "Recipient is not a canonical Signal service identifier",
-                )
-            })?;
-            Box::pin(manager.send_message(
-                recipient,
-                DataMessage {
-                    body: Some(message.body.clone()),
-                    timestamp: Some(message.timestamp),
-                    ..Default::default()
-                },
-                message.timestamp,
-            ))
-            .await
-            .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
-            Ok(SentMessage {
-                thread: Thread::Contact(recipient),
-                timestamp: message.timestamp,
-            })
-        }
-        ClientOutboxKind::Group => {
-            let (key, group) = resolve_active_group(manager, &message.recipient, departed_groups)
-                .await
-                .map_err(OutboxAttemptError::retryable)?
-                .ok_or_else(|| {
-                    OutboxAttemptError::permanent(
-                        "Signal group is unavailable or this account is no longer a member",
-                    )
-                })?;
-            Box::pin(manager.send_message_to_group(
-                &key,
-                DataMessage {
-                    body: Some(message.body.clone()),
-                    timestamp: Some(message.timestamp),
-                    group_v2: Some(GroupContextV2 {
-                        master_key: Some(key.to_vec()),
-                        revision: Some(group.revision),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                message.timestamp,
-            ))
-            .await
-            .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
-            Ok(SentMessage {
-                thread: Thread::Group(key),
-                timestamp: message.timestamp,
-            })
-        }
-    }
-}
-
 async fn mark_sent_message_projected(
     repo: &StorageRepository,
     sent: &SentMessage,
@@ -2756,7 +2661,7 @@ async fn mark_sent_message_projected(
         .await
 }
 
-async fn mark_sent_message_projected_or_report(
+pub(crate) async fn mark_sent_message_projected_or_report(
     manager: &Manager<SqliteStore, Registered>,
     sent: &SentMessage,
     sink: &EventSink,
@@ -2765,125 +2670,6 @@ async fn mark_sent_message_projected_or_report(
     if let Err(error) = mark_sent_message_projected(&repo, sent).await {
         sink.emit(Event::error(error, false));
     }
-}
-
-async fn finish_outbox_attempt(
-    manager: &mut Manager<SqliteStore, Registered>,
-    message: &ClientOutboxMessage,
-    result: &Result<SentMessage, OutboxAttemptError>,
-) -> Result<(), String> {
-    let repo = StorageRepository::new(manager.store().clone());
-    match result {
-        Ok(_) => repo
-            .complete_outbox_message(message.id)
-            .await
-            .map_err(|error| {
-                format!("Message sent but its outbox entry could not be cleared: {error}")
-            }),
-        Err(error) if !error.should_retry() => repo
-            .complete_outbox_message(message.id)
-            .await
-            .map_err(|store_error| {
-                format!("Could not discard a terminal outbox entry: {store_error}")
-            }),
-        Err(_) => {
-            let attempts = message.attempts.saturating_add(1);
-            repo.defer_outbox_message(
-                message.id,
-                attempts,
-                wall_clock_ms().saturating_add(retry_delay_ms(attempts)),
-            )
-            .await
-            .map_err(|error| format!("Could not schedule message retry: {error}"))
-        }
-    }
-}
-
-async fn retry_outbox(
-    manager: &mut Manager<SqliteStore, Registered>,
-    sink: &EventSink,
-    departed_groups: &DepartedGroups,
-    groups_authoritative: bool,
-) {
-    let repo = StorageRepository::new(manager.store().clone());
-    let messages = match repo.due_outbox_messages(wall_clock_ms()).await {
-        Ok(messages) => messages,
-        Err(error) => {
-            if sqlite_store_error_is_transient(&error) {
-                tracing::warn!(%error, "Transient store contention reading encrypted Signal outbox; deferring");
-            } else {
-                sink.emit(Event::error(
-                    format!("Could not read the encrypted Signal outbox: {error}"),
-                    false,
-                ));
-            }
-            return;
-        }
-    };
-    for message in messages {
-        if !outbox_message_is_attemptable(&message.kind, groups_authoritative) {
-            continue;
-        }
-        let result = attempt_outbox_message(manager, &message, departed_groups).await;
-        if let Ok(sent) = &result {
-            mark_sent_message_projected_or_report(manager, sent, sink).await;
-        }
-        if let Err(error) = finish_outbox_attempt(manager, &message, &result).await {
-            sink.emit(Event::error(error, false));
-        } else if let Err(error) = result {
-            if !error.should_retry() {
-                sink.emit(Event::error(
-                    format!(
-                        "Discarded a queued Signal message that can no longer be sent: {error}"
-                    ),
-                    false,
-                ));
-            } else if matches!(message.attempts.saturating_add(1), 4 | 8) {
-                sink.emit(Event::error(
-                    format!(
-                        "A Signal message is still queued after {} attempts: {error}",
-                        message.attempts.saturating_add(1)
-                    ),
-                    false,
-                ));
-            }
-        }
-    }
-}
-
-fn outbox_message_is_attemptable(kind: &ClientOutboxKind, groups_authoritative: bool) -> bool {
-    groups_authoritative || matches!(kind, ClientOutboxKind::Direct)
-}
-
-async fn enqueue_and_send(
-    manager: &mut Manager<SqliteStore, Registered>,
-    kind: ClientOutboxKind,
-    recipient: String,
-    body: String,
-    departed_groups: &DepartedGroups,
-    sink: &EventSink,
-    timestamps: &MessageTimestampAllocator,
-) -> Result<(), String> {
-    let timestamp = timestamps.next();
-    let repo = StorageRepository::new(manager.store().clone());
-    let id = repo
-        .enqueue_outbox_message(kind, &recipient, &body, timestamp)
-        .await
-        .map_err(|error| format!("Could not save the message in the encrypted outbox: {error}"))?;
-    let message = ClientOutboxMessage {
-        id,
-        kind,
-        recipient,
-        body,
-        timestamp,
-        attempts: 0,
-    };
-    let result = attempt_outbox_message(manager, &message, departed_groups).await;
-    if let Ok(sent) = &result {
-        mark_sent_message_projected_or_report(manager, sent, sink).await;
-    }
-    finish_outbox_attempt(manager, &message, &result).await?;
-    result.map(|_| ()).map_err(|error| error.to_string())
 }
 
 struct OutgoingAttachment {
@@ -3996,7 +3782,7 @@ async fn send_receipt(
     .await
 }
 
-fn parse_recipient(value: &str) -> Option<ServiceId> {
+pub(crate) fn parse_recipient(value: &str) -> Option<ServiceId> {
     ServiceId::parse_from_service_id_string(value).or_else(|| {
         value
             .parse::<presage::libsignal_service::prelude::Uuid>()
@@ -4092,7 +3878,7 @@ async fn active_group_by_key(
     repo.active_group(key, &local_aci).await
 }
 
-async fn resolve_active_group(
+pub(crate) async fn resolve_active_group(
     manager: &Manager<SqliteStore, Registered>,
     identifier: &str,
     departed_groups: &DepartedGroups,
@@ -4145,7 +3931,7 @@ fn content_timestamp(content: &Content) -> u64 {
     }
 }
 
-fn wall_clock_ms() -> u64 {
+pub(crate) fn wall_clock_ms() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -4648,31 +4434,6 @@ mod tests {
     }
 
     #[test]
-    fn classifies_inactive_group_outbox_entries_as_terminal() {
-        let terminal = OutboxAttemptError::permanent("not a member");
-        let transient = OutboxAttemptError::retryable("network unavailable");
-
-        assert!(!terminal.should_retry());
-        assert!(transient.should_retry());
-    }
-
-    #[test]
-    fn quarantines_group_outbox_until_membership_is_authoritative() {
-        assert!(outbox_message_is_attemptable(
-            &ClientOutboxKind::Direct,
-            false
-        ));
-        assert!(!outbox_message_is_attemptable(
-            &ClientOutboxKind::Group,
-            false
-        ));
-        assert!(outbox_message_is_attemptable(
-            &ClientOutboxKind::Group,
-            true
-        ));
-    }
-
-    #[test]
     fn remembers_departed_groups_across_worker_clones() {
         let departed = DepartedGroups::default();
         let worker_copy = departed.clone();
@@ -4927,14 +4688,6 @@ mod tests {
             departure_projection_disposition(GroupDepartureState::Active),
             None
         );
-    }
-
-    #[test]
-    fn bounds_outbox_retry_backoff() {
-        assert_eq!(retry_delay_ms(0), 5_000);
-        assert_eq!(retry_delay_ms(1), 10_000);
-        assert_eq!(retry_delay_ms(4), 80_000);
-        assert_eq!(retry_delay_ms(32), 2_560_000);
     }
 
     #[test]
