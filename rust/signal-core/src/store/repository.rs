@@ -10,6 +10,8 @@ use presage_store_sqlite::{
     ClientOutboxKind, ClientOutboxMessage, IdentityChangeNotice, SqliteStore, SqliteStoreError,
 };
 
+use super::errors::StorageError;
+
 pub const MESSAGE_PROJECTION_CLIENT: &str = "signal-purple-v1";
 
 /// Dedicated repository encapsulating all direct SQLite database interactions,
@@ -26,21 +28,27 @@ impl StorageRepository {
 
     // --- Subsystem Initialization ---
 
-    pub async fn initialize_subsystems(&self) -> Result<(), String> {
+    pub async fn initialize_subsystems(&self) -> Result<(), StorageError> {
         self.store
             .initialize_message_projection(MESSAGE_PROJECTION_CLIENT)
             .await
-            .map_err(|error| format!("Could not initialize durable message replay: {error}"))?;
+            .map_err(|source| {
+                StorageError::store("Could not initialize durable message replay", source)
+            })?;
 
         self.store
             .initialize_identity_change_tracking()
             .await
-            .map_err(|error| format!("Could not initialize identity-change tracking: {error}"))?;
+            .map_err(|source| {
+                StorageError::store("Could not initialize identity-change tracking", source)
+            })?;
 
         self.store
             .initialize_client_outbox()
             .await
-            .map_err(|error| format!("Could not initialize the encrypted outbox: {error}"))?;
+            .map_err(|source| {
+                StorageError::store("Could not initialize the encrypted outbox", source)
+            })?;
 
         Ok(())
     }
@@ -71,18 +79,22 @@ impl StorageRepository {
         &self,
         thread: &Thread,
         timestamp: u64,
-    ) -> Result<(), String> {
+    ) -> Result<(), StorageError> {
         let content = self
             .sent_message_content(thread, timestamp)
             .await
-            .map_err(|error| format!("Could not read the sent Signal message: {error}"))?
-            .ok_or_else(|| {
-                "The sent Signal message was not found in the encrypted store".to_owned()
-            })?;
+            .map_err(|source| {
+                StorageError::store("Could not read the sent Signal message", source)
+            })?
+            .ok_or(StorageError::NotFound(
+                "The sent Signal message was not found in the encrypted store",
+            ))?;
 
         self.mark_message_projected(&content)
             .await
-            .map_err(|error| format!("Could not record the sent Signal message: {error}"))
+            .map_err(|source| {
+                StorageError::store("Could not record the sent Signal message", source)
+            })
     }
 
     // --- Outbox Staging & Retries ---
@@ -143,16 +155,14 @@ impl StorageRepository {
 
     // --- Contacts & Avatars ---
 
-    pub async fn contacts(&self) -> Result<Vec<Contact>, String> {
-        let stream = self
-            .store
-            .contacts()
-            .await
-            .map_err(|error| format!("Could not read synchronized Signal contacts: {error}"))?;
+    pub async fn contacts(&self) -> Result<Vec<Contact>, StorageError> {
+        let stream = self.store.contacts().await.map_err(|source| {
+            StorageError::store("Could not read synchronized Signal contacts", source)
+        })?;
 
-        stream
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("Could not decode synchronized Signal contacts: {error}"))
+        stream.collect::<Result<Vec<_>, _>>().map_err(|source| {
+            StorageError::store("Could not decode synchronized Signal contacts", source)
+        })
     }
 
     pub async fn contact_profile_key(
@@ -172,16 +182,14 @@ impl StorageRepository {
 
     // --- Groups & Avatars ---
 
-    pub async fn groups(&self) -> Result<Vec<([u8; 32], Group)>, String> {
-        let stream = self
-            .store
-            .groups()
-            .await
-            .map_err(|error| format!("Could not read synchronized Signal groups: {error}"))?;
+    pub async fn groups(&self) -> Result<Vec<([u8; 32], Group)>, StorageError> {
+        let stream = self.store.groups().await.map_err(|source| {
+            StorageError::store("Could not read synchronized Signal groups", source)
+        })?;
 
-        stream
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| format!("Could not decode synchronized Signal groups: {error}"))
+        stream.collect::<Result<Vec<_>, _>>().map_err(|source| {
+            StorageError::store("Could not decode synchronized Signal groups", source)
+        })
     }
 
     pub async fn group(&self, key: [u8; 32]) -> Result<Option<Group>, SqliteStoreError> {
@@ -196,11 +204,11 @@ impl StorageRepository {
         &self,
         key: [u8; 32],
         local_aci: &Aci,
-    ) -> Result<Option<Group>, String> {
+    ) -> Result<Option<Group>, StorageError> {
         self.group(key)
             .await
             .map(|group| group.filter(|g| group_has_local_aci(g, local_aci)))
-            .map_err(|error| format!("Could not read Signal group membership: {error}"))
+            .map_err(|source| StorageError::store("Could not read Signal group membership", source))
     }
 }
 

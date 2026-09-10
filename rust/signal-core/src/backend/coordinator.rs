@@ -11,7 +11,9 @@ use presage::libsignal_service::content::{
     Content, ContentBody, DataMessage, GroupContextV2, ServiceError,
 };
 use presage::libsignal_service::groups_v2::Role;
-use presage::libsignal_service::protocol::{Aci, ServiceId, SignalProtocolError};
+#[cfg(test)]
+use presage::libsignal_service::protocol::SignalProtocolError;
+use presage::libsignal_service::protocol::{Aci, ServiceId};
 use presage::libsignal_service::sender::{AttachmentSpec, MessageSenderError};
 use presage::libsignal_service::zkgroup::profiles::ProfileKey;
 use presage::model::groups::Group;
@@ -47,6 +49,9 @@ use crate::event::{
 };
 use crate::event_queue::EventSink;
 use crate::store::StorageRepository;
+use crate::store::errors::{
+    StorageError, signal_protocol_error_is_transient, sqlite_store_error_is_transient,
+};
 
 pub(crate) const GROUP_SYNC_RETRY_SECS: u64 = 30;
 pub(crate) const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
@@ -501,74 +506,6 @@ fn websocket_error_is_transient(error: &reqwest_websocket::Error) -> bool {
     }
 }
 
-fn sqlx_error_is_transient(db_error: &sqlx::Error) -> bool {
-    match db_error {
-        sqlx::Error::PoolTimedOut => true,
-        sqlx::Error::Database(err) => {
-            if let Some(code) = err.code() {
-                // Extended result codes in SQLite:
-                // Primary: 5 (SQLITE_BUSY), 6 (SQLITE_LOCKED)
-                // Extended: 261 (BUSY_RECOVERY), 517 (LOCKED_SHAREDCACHE),
-                //           773 (BUSY_SNAPSHOT), 1029 (LOCKED_VTAB), 1032 (BUSY_TIMEOUT)
-                if code == "5"
-                    || code == "6"
-                    || code.starts_with("5_")
-                    || code.starts_with("6_")
-                    || code == "261"
-                    || code == "517"
-                    || code == "773"
-                    || code == "1029"
-                    || code == "1032"
-                {
-                    return true;
-                }
-            }
-            let message = err.message();
-            message.contains("pool timed out")
-                || message.contains("timed out")
-                || message.contains("locked")
-                || message.contains("busy")
-        }
-        sqlx::Error::Io(_) => true,
-        _ => {
-            let message = db_error.to_string();
-            message.contains("pool timed out")
-                || message.contains("timed out")
-                || message.contains("locked")
-                || message.contains("busy")
-        }
-    }
-}
-
-fn signal_protocol_error_is_transient(error: &SignalProtocolError) -> bool {
-    match error {
-        SignalProtocolError::InvalidState(scope, message) => {
-            (*scope == "sqlite" || *scope == "presage sqlite store error")
-                && (message.contains("pool timed out")
-                    || message.contains("timed out")
-                    || message.contains("locked")
-                    || message.contains("busy")
-                    || message.contains("code: 5")
-                    || message.contains("code: 6")
-                    || message.contains("code: 1032"))
-        }
-        _ => false,
-    }
-}
-
-pub(crate) fn sqlite_store_error_is_transient(
-    error: &presage_store_sqlite::SqliteStoreError,
-) -> bool {
-    match error {
-        presage_store_sqlite::SqliteStoreError::Db(db_error) => sqlx_error_is_transient(db_error),
-        presage_store_sqlite::SqliteStoreError::Io(_) => true,
-        presage_store_sqlite::SqliteStoreError::Protocol(error) => {
-            signal_protocol_error_is_transient(error)
-        }
-        _ => false,
-    }
-}
-
 fn service_error_is_transient(error: &ServiceError) -> bool {
     match error {
         ServiceError::Timeout { .. }
@@ -732,19 +669,40 @@ async fn fetch_missing_avatars(
                 key_bytes.copy_from_slice(&contact.profile_key);
                 Some(ProfileKey::create(key_bytes))
             } else {
-                repo.contact_profile_key(&ServiceId::Aci(contact.uuid.into()))
+                match repo
+                    .contact_profile_key(&ServiceId::Aci(contact.uuid.into()))
                     .await
-                    .ok()
-                    .flatten()
+                {
+                    Ok(key) => key,
+                    Err(error) if sqlite_store_error_is_transient(&error) => {
+                        tracing::warn!(
+                            %error,
+                            "Transient store contention reading a Signal contact profile key; skipping this cycle"
+                        );
+                        None
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Could not read a Signal contact profile key");
+                        None
+                    }
+                }
             };
 
             if let Some(key) = profile_key {
-                let is_cached = repo
-                    .contact_avatar(contact.uuid, key)
-                    .await
-                    .ok()
-                    .flatten()
-                    .is_some();
+                let is_cached = match repo.contact_avatar(contact.uuid, key).await {
+                    Ok(avatar) => avatar.is_some(),
+                    Err(error) if sqlite_store_error_is_transient(&error) => {
+                        tracing::warn!(
+                            %error,
+                            "Transient store contention reading a cached Signal contact avatar"
+                        );
+                        false
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "Could not read a cached Signal contact avatar");
+                        false
+                    }
+                };
                 if !is_cached {
                     let fetch = manager.retrieve_profile_avatar_by_uuid(contact.uuid, key);
                     let result = tokio::select! {
@@ -775,7 +733,17 @@ async fn fetch_missing_avatars(
                 continue;
             }
             metadata_cache.put_group_revision(key, group.revision);
-            let is_cached = repo.group_avatar(key).await.ok().flatten().is_some();
+            let is_cached = match repo.group_avatar(key).await {
+                Ok(avatar) => avatar.is_some(),
+                Err(error) if sqlite_store_error_is_transient(&error) => {
+                    tracing::warn!(%error, "Transient store contention reading a cached Signal group avatar");
+                    false
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "Could not read a cached Signal group avatar");
+                    false
+                }
+            };
             if !is_cached {
                 let revision = metadata_cache
                     .get_group_revision(&key)
@@ -969,15 +937,46 @@ pub(crate) async fn emit_contact_snapshot(
                     key_bytes.copy_from_slice(&contact.profile_key);
                     Some(ProfileKey::create(key_bytes))
                 } else {
-                    repo.contact_profile_key(&ServiceId::Aci(contact.uuid.into()))
+                    match repo
+                        .contact_profile_key(&ServiceId::Aci(contact.uuid.into()))
                         .await
-                        .ok()
-                        .flatten()
+                    {
+                        Ok(key) => key,
+                        Err(error) => {
+                            if sqlite_store_error_is_transient(&error) {
+                                tracing::warn!(
+                                    %error,
+                                    "Transient store contention reading a Signal contact profile key"
+                                );
+                            } else {
+                                tracing::warn!(%error, "Could not read a Signal contact profile key");
+                            }
+                            None
+                        }
+                    }
                 };
-                if let Some(key) = profile_key
-                    && let Some(avatar) =
-                        repo.contact_avatar(contact.uuid, key).await.ok().flatten()
-                {
+                let avatar = if let Some(key) = profile_key {
+                    match repo.contact_avatar(contact.uuid, key).await {
+                        Ok(avatar) => avatar,
+                        Err(error) => {
+                            if sqlite_store_error_is_transient(&error) {
+                                tracing::warn!(
+                                    %error,
+                                    "Transient store contention reading a cached Signal contact avatar"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    %error,
+                                    "Could not read a cached Signal contact avatar"
+                                );
+                            }
+                            None
+                        }
+                    }
+                } else {
+                    None
+                };
+                if let Some(avatar) = avatar {
                     let (avatar_data, checksum) = avatar_cache.prepare_avatar(avatar);
                     sink.emit(Event {
                         kind: EVENT_AVATAR,
@@ -992,6 +991,11 @@ pub(crate) async fn emit_contact_snapshot(
                 kind: EVENT_CONTACT_SYNC_END,
                 ..Event::default()
             });
+        }
+        Err(error) if error.is_transient() => {
+            sink.emit(Event::transient_error(format!(
+                "Could not read synchronized Signal contacts: {error}"
+            )));
         }
         Err(error) => {
             sink.emit(Event::error(
@@ -1034,7 +1038,7 @@ pub(crate) async fn emit_group_snapshot(
     metadata_cache: &MetadataCache,
 ) -> Result<(), String> {
     let repo = StorageRepository::new(manager.store().clone());
-    let groups = repo.groups().await?;
+    let groups = repo.groups().await.map_err(|error| error.to_string())?;
 
     sink.emit(Event {
         kind: EVENT_GROUP_SYNC_BEGIN,
@@ -1058,7 +1062,18 @@ pub(crate) async fn emit_group_snapshot(
             ..Event::default()
         });
         emitted_records += 1;
-        if let Some(avatar) = repo.group_avatar(key).await.ok().flatten() {
+        let avatar = match repo.group_avatar(key).await {
+            Ok(avatar) => avatar,
+            Err(error) => {
+                if sqlite_store_error_is_transient(&error) {
+                    tracing::warn!(%error, "Transient store contention reading a Signal group avatar");
+                } else {
+                    tracing::warn!(%error, "Could not read a Signal group avatar");
+                }
+                None
+            }
+        };
+        if let Some(avatar) = avatar {
             let (avatar_data, checksum) = avatar_cache.prepare_avatar(avatar);
             sink.emit(Event {
                 kind: EVENT_AVATAR,
@@ -1136,12 +1151,33 @@ pub(crate) async fn emit_identity_changes(
     }
 }
 
+/// Short bounded backoff for a transient failure or a not-yet-visible row when marking a
+/// just-sent message as already projected. Without this, a passing SQLite BUSY/lock error
+/// or a read racing the write that just committed permanently loses the projection marker:
+/// the message would then replay to the UI as newly received on the next start.
+const MARK_SENT_PROJECTED_RETRY_DELAYS_MS: [u64; 3] = [50, 200, 500];
+
 async fn mark_sent_message_projected(
     repo: &StorageRepository,
     sent: &SentMessage,
-) -> Result<(), String> {
-    repo.mark_sent_message_projected(&sent.thread, sent.timestamp)
-        .await
+) -> Result<(), StorageError> {
+    let mut attempt = 0;
+    loop {
+        match repo
+            .mark_sent_message_projected(&sent.thread, sent.timestamp)
+            .await
+        {
+            Ok(()) => return Ok(()),
+            Err(error) if error.is_transient() => {
+                let Some(delay) = MARK_SENT_PROJECTED_RETRY_DELAYS_MS.get(attempt) else {
+                    return Err(error);
+                };
+                tokio::time::sleep(Duration::from_millis(*delay)).await;
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 pub(crate) async fn mark_sent_message_projected_or_report(
@@ -1151,7 +1187,7 @@ pub(crate) async fn mark_sent_message_projected_or_report(
 ) {
     let repo = StorageRepository::new(manager.store().clone());
     if let Err(error) = mark_sent_message_projected(&repo, sent).await {
-        sink.emit(Event::error(error, false));
+        sink.emit(Event::error(error.to_string(), false));
     }
 }
 
@@ -2043,7 +2079,9 @@ async fn active_group_by_key(
     }
     let local_aci = manager.registration_data().service_ids.aci();
     let repo = StorageRepository::new(manager.store().clone());
-    repo.active_group(key, &local_aci).await
+    repo.active_group(key, &local_aci)
+        .await
+        .map_err(|error| error.to_string())
 }
 
 pub(crate) async fn resolve_active_group(
@@ -2074,7 +2112,7 @@ async fn resolve_active_group_in_store(
 ) -> Result<Option<([u8; 32], Group)>, String> {
     let local_aci = manager.registration_data().service_ids.aci();
     let repo = StorageRepository::new(manager.store().clone());
-    let groups = repo.groups().await?;
+    let groups = repo.groups().await.map_err(|error| error.to_string())?;
     Ok(groups.into_iter().find(|(key, group)| {
         group_identifier(key) == identifier && group_contains_local_aci(group, &local_aci)
     }))

@@ -4,13 +4,11 @@ use presage::store::Thread;
 use presage::{Manager, manager::Registered};
 use presage_store_sqlite::{ClientOutboxKind, ClientOutboxMessage, SqliteStore};
 
-use super::coordinator::{
-    DepartedGroups, MessageTimestampAllocator, SentMessage, sqlite_store_error_is_transient,
-    wall_clock_ms,
-};
+use super::coordinator::{DepartedGroups, MessageTimestampAllocator, SentMessage, wall_clock_ms};
 use crate::event::Event;
 use crate::event_queue::EventSink;
 use crate::store::StorageRepository;
+use crate::store::errors::sqlite_store_error_is_transient;
 
 #[derive(Debug)]
 pub(crate) struct OutboxAttemptError {

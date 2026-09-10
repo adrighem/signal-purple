@@ -10,12 +10,13 @@ use presage_store_sqlite::SqliteStore;
 
 use super::coordinator::{
     DepartedGroups, MessageTimestampAllocator, delivery_receipt_failure_action, handle_content,
-    projection_effect, sqlite_store_error_is_transient,
+    projection_effect,
 };
 use crate::acknowledgment::AcknowledgmentInbox;
 use crate::event::Event;
 use crate::event_queue::EventSink;
 use crate::store::StorageRepository;
+use crate::store::errors::sqlite_store_error_is_transient;
 
 pub(crate) const MAX_PENDING_MESSAGE_PROJECTIONS: usize = 64;
 pub(crate) const MAX_PENDING_DELIVERY_RECEIPTS: usize = 4096;

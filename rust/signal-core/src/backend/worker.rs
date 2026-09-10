@@ -265,7 +265,7 @@ async fn receive_and_command_loop(
     else {
         return Ok(());
     };
-    init_result?;
+    init_result.map_err(|error| error.to_string())?;
     let timestamps = MessageTimestampAllocator::default();
     let mut projection = MessageProjection::new(Arc::clone(&acknowledgments));
     let mut replay = MessageReplayQueue::default();
