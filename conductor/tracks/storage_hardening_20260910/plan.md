@@ -18,8 +18,8 @@
 
 ## Phase 3: Storage Repository Abstraction
 
-- [ ] Task: Encapsulate database interactions in a Storage Repository module
-  - [ ] Sub-task: Create `rust/signal-core/src/store/repository.rs` defining clean methods for outbox, projection, and identity queries
-  - [ ] Sub-task: Move raw SQL/Presage store invocations out of `backend.rs` into the repository
-  - [ ] Sub-task: Update backend worker loops to interact exclusively via the repository
-  - [ ] Sub-task: Run full check suite (`scripts/check.sh`) to verify regressions
+- [x] Task: Encapsulate database interactions in a Storage Repository module f5d88ff
+  - [x] Sub-task: Create `rust/signal-core/src/store/repository.rs` defining clean methods for outbox, projection, and identity queries
+  - [x] Sub-task: Move raw SQL/Presage store invocations out of `backend.rs` into the repository
+  - [x] Sub-task: Update backend worker loops to interact exclusively via the repository
+  - [x] Sub-task: Run full check suite (`scripts/check.sh`) to verify regressions

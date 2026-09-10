@@ -25,7 +25,7 @@ use presage::proto::{
     AttachmentPointer, EditMessage, ReceiptMessage, SyncMessage, TypingMessage, attachment_pointer,
     receipt_message, typing_message,
 };
-use presage::store::{ContentsStore, StateStore, Thread};
+use presage::store::{StateStore, Thread};
 use presage::{Manager, manager::Registered};
 use presage_store_sqlite::SqliteStore;
 use presage_store_sqlite::{ClientOutboxKind, ClientOutboxMessage};
@@ -48,8 +48,7 @@ use crate::event::{
     Event, FLAG_OUTGOING,
 };
 use crate::event_queue::EventSink;
-
-const MESSAGE_PROJECTION_CLIENT: &str = "signal-purple-v1";
+use crate::store::StorageRepository;
 const MAX_INLINE_MEDIA_BYTES: usize = 8 * 1024 * 1024;
 const MAX_INLINE_GIF_EDGE: usize = 8192;
 const MAX_INLINE_GIF_PIXELS: usize = 16 * 1000 * 1000;
@@ -269,6 +268,7 @@ pub(crate) struct MetadataCache {
     contact_names: Arc<Mutex<HashMap<String, String>>>,
 }
 
+#[allow(dead_code)]
 impl MetadataCache {
     pub(crate) fn new() -> Self {
         Self::default()
@@ -1064,8 +1064,15 @@ fn sqlx_error_is_transient(db_error: &sqlx::Error) -> bool {
                 // Primary: 5 (SQLITE_BUSY), 6 (SQLITE_LOCKED)
                 // Extended: 261 (BUSY_RECOVERY), 517 (LOCKED_SHAREDCACHE),
                 //           773 (BUSY_SNAPSHOT), 1029 (LOCKED_VTAB), 1032 (BUSY_TIMEOUT)
-                if code == "5" || code == "6" || code.starts_with("5_") || code.starts_with("6_")
-                    || code == "261" || code == "517" || code == "773" || code == "1029" || code == "1032"
+                if code == "5"
+                    || code == "6"
+                    || code.starts_with("5_")
+                    || code.starts_with("6_")
+                    || code == "261"
+                    || code == "517"
+                    || code == "773"
+                    || code == "1029"
+                    || code == "1032"
                 {
                     return true;
                 }
@@ -1105,9 +1112,7 @@ fn signal_protocol_error_is_transient(error: &SignalProtocolError) -> bool {
 
 fn sqlite_store_error_is_transient(error: &presage_store_sqlite::SqliteStoreError) -> bool {
     match error {
-        presage_store_sqlite::SqliteStoreError::Db(db_error) => {
-            sqlx_error_is_transient(db_error)
-        }
+        presage_store_sqlite::SqliteStoreError::Db(db_error) => sqlx_error_is_transient(db_error),
         presage_store_sqlite::SqliteStoreError::Io(_) => true,
         presage_store_sqlite::SqliteStoreError::Protocol(error) => {
             signal_protocol_error_is_transient(error)
@@ -1441,35 +1446,12 @@ async fn receive_and_command_loop(
     ready: Arc<AtomicBool>,
     avatar_cache: AvatarCache,
 ) -> Result<(), String> {
-    let Some(projection_initialization) = await_or_shutdown(
-        manager
-            .store()
-            .initialize_message_projection(MESSAGE_PROJECTION_CLIENT),
-        &mut shutdown,
-    )
-    .await
+    let repo = StorageRepository::new(manager.store().clone());
+    let Some(init_result) = await_or_shutdown(repo.initialize_subsystems(), &mut shutdown).await
     else {
         return Ok(());
     };
-    projection_initialization
-        .map_err(|error| format!("Could not initialize durable message replay: {error}"))?;
-    let Some(identity_initialization) = await_or_shutdown(
-        manager.store().initialize_identity_change_tracking(),
-        &mut shutdown,
-    )
-    .await
-    else {
-        return Ok(());
-    };
-    identity_initialization
-        .map_err(|error| format!("Could not initialize identity-change tracking: {error}"))?;
-    let Some(outbox_initialization) =
-        await_or_shutdown(manager.store().initialize_client_outbox(), &mut shutdown).await
-    else {
-        return Ok(());
-    };
-    outbox_initialization
-        .map_err(|error| format!("Could not initialize the encrypted outbox: {error}"))?;
+    init_result?;
     let timestamps = MessageTimestampAllocator::default();
     let mut projection = MessageProjection::new(Arc::clone(&acknowledgments));
     let mut replay = MessageReplayQueue::default();
@@ -1799,7 +1781,12 @@ async fn receive_and_command_loop(
 
         if !session.is_ready() {
             await_phase_or_stop!(emit_account_identity(&mut manager, &sink));
-            await_phase_or_stop!(emit_contact_snapshot(&manager, &sink, &avatar_cache, &metadata_cache));
+            await_phase_or_stop!(emit_contact_snapshot(
+                &manager,
+                &sink,
+                &avatar_cache,
+                &metadata_cache
+            ));
             if let Err(error) = await_phase_or_stop!(emit_group_snapshot(
                 &manager,
                 &sink,
@@ -2274,9 +2261,8 @@ async fn fetch_missing_avatars(
     avatar_cache: AvatarCache,
     metadata_cache: MetadataCache,
 ) {
-    if let Ok(contacts) = manager.store().contacts().await
-        && let Ok(contacts) = contacts.collect::<Result<Vec<_>, _>>()
-    {
+    let repo = StorageRepository::new(manager.store().clone());
+    if let Ok(contacts) = repo.contacts().await {
         for contact in contacts {
             tokio::task::yield_now().await;
             let profile_key = if contact.profile_key.len() == 32 {
@@ -2284,18 +2270,15 @@ async fn fetch_missing_avatars(
                 key_bytes.copy_from_slice(&contact.profile_key);
                 Some(ProfileKey::create(key_bytes))
             } else {
-                manager
-                    .store()
-                    .profile_key(&ServiceId::Aci(contact.uuid.into()))
+                repo.contact_profile_key(&ServiceId::Aci(contact.uuid.into()))
                     .await
                     .ok()
                     .flatten()
             };
 
             if let Some(key) = profile_key {
-                let is_cached = manager
-                    .store()
-                    .profile_avatar(contact.uuid, key)
+                let is_cached = repo
+                    .contact_avatar(contact.uuid, key)
                     .await
                     .ok()
                     .flatten()
@@ -2322,9 +2305,7 @@ async fn fetch_missing_avatars(
         }
     }
 
-    if let Ok(groups) = manager.store().groups().await
-        && let Ok(groups) = groups.collect::<Result<Vec<_>, _>>()
-    {
+    if let Ok(groups) = repo.groups().await {
         let local_aci = manager.registration_data().service_ids.aci();
         for (key, group) in groups {
             tokio::task::yield_now().await;
@@ -2332,13 +2313,7 @@ async fn fetch_missing_avatars(
                 continue;
             }
             metadata_cache.put_group_revision(key, group.revision);
-            let is_cached = manager
-                .store()
-                .group_avatar(key)
-                .await
-                .ok()
-                .flatten()
-                .is_some();
+            let is_cached = repo.group_avatar(key).await.ok().flatten().is_some();
             if !is_cached {
                 let revision = metadata_cache
                     .get_group_revision(&key)
@@ -2378,8 +2353,13 @@ async fn synchronize_groups_task(
     mut shutdown: watch::Receiver<bool>,
     result_tx: tokio_mpsc::Sender<Result<(), String>>,
 ) {
-    let sync =
-        synchronize_and_emit_group_snapshot(&mut manager, &sink, &departed_groups, &avatar_cache, &metadata_cache);
+    let sync = synchronize_and_emit_group_snapshot(
+        &mut manager,
+        &sink,
+        &departed_groups,
+        &avatar_cache,
+        &metadata_cache,
+    );
     tokio::select! {
         result = sync => {
             let _ = result_tx.send(result).await;
@@ -2647,80 +2627,65 @@ async fn emit_contact_snapshot(
     avatar_cache: &AvatarCache,
     metadata_cache: &MetadataCache,
 ) {
-    match manager.store().contacts().await {
-        Ok(contacts) => match contacts.collect::<Result<Vec<_>, _>>() {
-            Ok(contacts) => {
+    let repo = StorageRepository::new(manager.store().clone());
+    match repo.contacts().await {
+        Ok(contacts) => {
+            sink.emit(Event {
+                kind: EVENT_CONTACT_SYNC_BEGIN,
+                ..Event::default()
+            });
+            for (index, contact) in contacts.into_iter().enumerate() {
+                if index != 0 && index % SNAPSHOT_YIELD_INTERVAL == 0 {
+                    tokio::task::yield_now().await;
+                }
+                let peer = ServiceId::Aci(contact.uuid.into()).service_id_string();
+                let contact_title = if !contact.name.is_empty() {
+                    metadata_cache.put_contact_name(peer.clone(), contact.name.clone());
+                    Some(contact.name)
+                } else {
+                    metadata_cache.get_contact_name(&peer)
+                };
                 sink.emit(Event {
-                    kind: EVENT_CONTACT_SYNC_BEGIN,
+                    kind: EVENT_CONTACT,
+                    peer_id: Some(peer.clone()),
+                    title: contact_title,
+                    text: contact.phone_number.map(|number| number.to_string()),
                     ..Event::default()
                 });
-                for (index, contact) in contacts.into_iter().enumerate() {
-                    if index != 0 && index % SNAPSHOT_YIELD_INTERVAL == 0 {
-                        tokio::task::yield_now().await;
-                    }
-                    let peer = ServiceId::Aci(contact.uuid.into()).service_id_string();
-                    let contact_title = if !contact.name.is_empty() {
-                        metadata_cache.put_contact_name(peer.clone(), contact.name.clone());
-                        Some(contact.name)
-                    } else {
-                        metadata_cache.get_contact_name(&peer)
-                    };
+                let profile_key = if contact.profile_key.len() == 32 {
+                    let mut key_bytes = [0u8; 32];
+                    key_bytes.copy_from_slice(&contact.profile_key);
+                    Some(ProfileKey::create(key_bytes))
+                } else {
+                    repo.contact_profile_key(&ServiceId::Aci(contact.uuid.into()))
+                        .await
+                        .ok()
+                        .flatten()
+                };
+                if let Some(key) = profile_key
+                    && let Some(avatar) =
+                        repo.contact_avatar(contact.uuid, key).await.ok().flatten()
+                {
+                    let (avatar_data, checksum) = avatar_cache.prepare_avatar(avatar);
                     sink.emit(Event {
-                        kind: EVENT_CONTACT,
-                        peer_id: Some(peer.clone()),
-                        title: contact_title,
-                        text: contact.phone_number.map(|number| number.to_string()),
+                        kind: EVENT_AVATAR,
+                        peer_id: Some(peer),
+                        title: Some(checksum),
+                        data: avatar_data,
                         ..Event::default()
                     });
-                    let profile_key = if contact.profile_key.len() == 32 {
-                        let mut key_bytes = [0u8; 32];
-                        key_bytes.copy_from_slice(&contact.profile_key);
-                        Some(ProfileKey::create(key_bytes))
-                    } else {
-                        manager
-                            .store()
-                            .profile_key(&ServiceId::Aci(contact.uuid.into()))
-                            .await
-                            .ok()
-                            .flatten()
-                    };
-                    if let Some(key) = profile_key
-                        && let Some(avatar) = manager
-                            .store()
-                            .profile_avatar(contact.uuid, key)
-                            .await
-                            .ok()
-                            .flatten()
-                    {
-                        let (avatar_data, checksum) = avatar_cache.prepare_avatar(avatar);
-                        sink.emit(Event {
-                            kind: EVENT_AVATAR,
-                            peer_id: Some(peer),
-                            title: Some(checksum),
-                            data: avatar_data,
-                            ..Event::default()
-                        });
-                    }
                 }
-                sink.emit(Event {
-                    kind: EVENT_CONTACT_SYNC_END,
-                    ..Event::default()
-                });
             }
-            Err(error) => sink.emit(Event::error(
-                format!("Could not decode synchronized Signal contacts: {error}"),
-                false,
-            )),
-        },
+            sink.emit(Event {
+                kind: EVENT_CONTACT_SYNC_END,
+                ..Event::default()
+            });
+        }
         Err(error) => {
-            if sqlite_store_error_is_transient(&error) {
-                tracing::warn!(%error, "Transient store contention reading synchronized Signal contacts; deferring");
-            } else {
-                sink.emit(Event::error(
-                    format!("Could not read synchronized Signal contacts: {error}"),
-                    false,
-                ));
-            }
+            sink.emit(Event::error(
+                format!("Could not read synchronized Signal contacts: {error}"),
+                false,
+            ));
         }
     }
 }
@@ -2753,13 +2718,8 @@ async fn emit_group_snapshot(
     avatar_cache: &AvatarCache,
     metadata_cache: &MetadataCache,
 ) -> Result<(), String> {
-    let groups = manager
-        .store()
-        .groups()
-        .await
-        .map_err(|error| format!("Could not read synchronized Signal groups: {error}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("Could not decode synchronized Signal groups: {error}"))?;
+    let repo = StorageRepository::new(manager.store().clone());
+    let groups = repo.groups().await?;
 
     sink.emit(Event {
         kind: EVENT_GROUP_SYNC_BEGIN,
@@ -2783,7 +2743,7 @@ async fn emit_group_snapshot(
             ..Event::default()
         });
         emitted_records += 1;
-        if let Some(avatar) = manager.store().group_avatar(key).await.ok().flatten() {
+        if let Some(avatar) = repo.group_avatar(key).await.ok().flatten() {
             let (avatar_data, checksum) = avatar_cache.prepare_avatar(avatar);
             sink.emit(Event {
                 kind: EVENT_AVATAR,
@@ -2830,7 +2790,8 @@ async fn synchronize_and_emit_group_snapshot(
 }
 
 async fn emit_identity_changes(manager: &Manager<SqliteStore, Registered>, sink: &EventSink) {
-    match manager.store().identity_change_notices().await {
+    let repo = StorageRepository::new(manager.store().clone());
+    match repo.identity_change_notices().await {
         Ok(changes) => {
             for (index, change) in changes.into_iter().enumerate() {
                 if index != 0 && index % SNAPSHOT_YIELD_INTERVAL == 0 {
@@ -2924,18 +2885,11 @@ async fn attempt_outbox_message(
 }
 
 async fn mark_sent_message_projected(
-    store: &SqliteStore,
+    repo: &StorageRepository,
     sent: &SentMessage,
 ) -> Result<(), String> {
-    let content = store
-        .message(&sent.thread, sent.timestamp)
+    repo.mark_sent_message_projected(&sent.thread, sent.timestamp)
         .await
-        .map_err(|error| format!("Could not read the sent Signal message: {error}"))?
-        .ok_or_else(|| "The sent Signal message was not found in the encrypted store".to_owned())?;
-    store
-        .mark_message_projected(MESSAGE_PROJECTION_CLIENT, &content)
-        .await
-        .map_err(|error| format!("Could not record the sent Signal message: {error}"))
 }
 
 async fn mark_sent_message_projected_or_report(
@@ -2943,7 +2897,8 @@ async fn mark_sent_message_projected_or_report(
     sent: &SentMessage,
     sink: &EventSink,
 ) {
-    if let Err(error) = mark_sent_message_projected(manager.store(), sent).await {
+    let repo = StorageRepository::new(manager.store().clone());
+    if let Err(error) = mark_sent_message_projected(&repo, sent).await {
         sink.emit(Event::error(error, false));
     }
 }
@@ -2953,32 +2908,29 @@ async fn finish_outbox_attempt(
     message: &ClientOutboxMessage,
     result: &Result<SentMessage, OutboxAttemptError>,
 ) -> Result<(), String> {
+    let repo = StorageRepository::new(manager.store().clone());
     match result {
-        Ok(_) => manager
-            .store()
-            .complete_client_message(message.id)
+        Ok(_) => repo
+            .complete_outbox_message(message.id)
             .await
             .map_err(|error| {
                 format!("Message sent but its outbox entry could not be cleared: {error}")
             }),
-        Err(error) if !error.should_retry() => manager
-            .store()
-            .complete_client_message(message.id)
+        Err(error) if !error.should_retry() => repo
+            .complete_outbox_message(message.id)
             .await
             .map_err(|store_error| {
                 format!("Could not discard a terminal outbox entry: {store_error}")
             }),
         Err(_) => {
             let attempts = message.attempts.saturating_add(1);
-            manager
-                .store()
-                .defer_client_message(
-                    message.id,
-                    attempts,
-                    wall_clock_ms().saturating_add(retry_delay_ms(attempts)),
-                )
-                .await
-                .map_err(|error| format!("Could not schedule message retry: {error}"))
+            repo.defer_outbox_message(
+                message.id,
+                attempts,
+                wall_clock_ms().saturating_add(retry_delay_ms(attempts)),
+            )
+            .await
+            .map_err(|error| format!("Could not schedule message retry: {error}"))
         }
     }
 }
@@ -2989,7 +2941,8 @@ async fn retry_outbox(
     departed_groups: &DepartedGroups,
     groups_authoritative: bool,
 ) {
-    let messages = match manager.store().due_client_messages(wall_clock_ms()).await {
+    let repo = StorageRepository::new(manager.store().clone());
+    let messages = match repo.due_outbox_messages(wall_clock_ms()).await {
         Ok(messages) => messages,
         Err(error) => {
             if sqlite_store_error_is_transient(&error) {
@@ -3048,9 +3001,9 @@ async fn enqueue_and_send(
     timestamps: &MessageTimestampAllocator,
 ) -> Result<(), String> {
     let timestamp = timestamps.next();
-    let id = manager
-        .store()
-        .enqueue_client_message(kind, &recipient, &body, timestamp)
+    let repo = StorageRepository::new(manager.store().clone());
+    let id = repo
+        .enqueue_outbox_message(kind, &recipient, &body, timestamp)
         .await
         .map_err(|error| format!("Could not save the message in the encrypted outbox: {error}"))?;
     let message = ClientOutboxMessage {
@@ -3181,11 +3134,8 @@ async fn load_unprojected_messages(
     replay: &mut MessageReplayQueue,
     groups_authoritative: bool,
 ) {
-    let messages = match manager
-        .store()
-        .unprojected_messages(MESSAGE_PROJECTION_CLIENT)
-        .await
-    {
+    let repo = StorageRepository::new(manager.store().clone());
+    let messages = match repo.unprojected_messages().await {
         Ok(messages) => messages,
         Err(error) => {
             if sqlite_store_error_is_transient(&error) {
@@ -3238,11 +3188,8 @@ async fn project_content(
         projection.release(delivery_id);
         return;
     }
-    match manager
-        .store()
-        .mark_message_projected(MESSAGE_PROJECTION_CLIENT, &content)
-        .await
-    {
+    let repo = StorageRepository::new(manager.store().clone());
+    match repo.mark_message_projected(&content).await {
         Ok(()) => {
             projection.complete(delivery_id);
         }
@@ -3296,11 +3243,8 @@ async fn acknowledge_message(
         projection.acknowledgments.unregister(delivery_id);
         return true;
     };
-    match manager
-        .store()
-        .mark_message_projected(MESSAGE_PROJECTION_CLIENT, content)
-        .await
-    {
+    let repo = StorageRepository::new(manager.store().clone());
+    match repo.mark_message_projected(content).await {
         Ok(()) => {
             projection.complete(delivery_id);
             true
@@ -3453,9 +3397,10 @@ async fn handle_command(
         recipient,
     } = command
     {
-        match manager.store().accept_identity_change(&recipient).await {
+        let repo = StorageRepository::new(manager.store().clone());
+        match repo.accept_identity_change(&recipient).await {
             Ok(true) => {
-                if let Err(error) = manager.store().expedite_client_messages(&recipient).await {
+                if let Err(error) = repo.expedite_outbox_messages(&recipient).await {
                     sink.emit(Event::error(
                         format!("Could not expedite queued Signal messages: {error}"),
                         false,
@@ -3486,7 +3431,8 @@ async fn handle_command(
         recipient,
     } = command
     {
-        if let Err(error) = manager.store().dismiss_identity_change(&recipient).await {
+        let repo = StorageRepository::new(manager.store().clone());
+        if let Err(error) = repo.dismiss_identity_change(&recipient).await {
             sink.emit(Event::request_error(
                 request_id,
                 format!("Could not dismiss the Signal identity notice: {error}"),
@@ -3600,7 +3546,8 @@ async fn handle_command(
                     sink.emit(event);
                 }
                 drop(group_operation);
-                if let Err(error) = manager.store().expedite_client_messages(&group_key).await {
+                let repo = StorageRepository::new(manager.store().clone());
+                if let Err(error) = repo.expedite_outbox_messages(&group_key).await {
                     sink.emit(Event::error(
                         format!("Could not schedule stale group messages for cleanup: {error}"),
                         false,
@@ -4654,9 +4601,8 @@ async fn group_for_projection(
         });
     }
 
-    let local_aci = manager.registration_data().service_ids.aci();
-    let group = manager
-        .store()
+    let repo = StorageRepository::new(manager.store().clone());
+    let group = repo
         .group(key)
         .await
         .map_err(|error| format!("Could not read Signal group membership: {error}"))?;
@@ -4671,6 +4617,7 @@ async fn group_for_projection(
         });
     }
 
+    let local_aci = manager.registration_data().service_ids.aci();
     Ok(
         match group.filter(|group| group_contains_local_aci(group, &local_aci)) {
             Some(group) => ProjectionGroup::Active(group),
@@ -4688,12 +4635,8 @@ async fn active_group_by_key(
         return Ok(None);
     }
     let local_aci = manager.registration_data().service_ids.aci();
-    manager
-        .store()
-        .group(key)
-        .await
-        .map(|group| group.filter(|group| group_contains_local_aci(group, &local_aci)))
-        .map_err(|error| format!("Could not read Signal group membership: {error}"))
+    let repo = StorageRepository::new(manager.store().clone());
+    repo.active_group(key, &local_aci).await
 }
 
 async fn resolve_active_group(
@@ -4723,13 +4666,8 @@ async fn resolve_active_group_in_store(
     identifier: &str,
 ) -> Result<Option<([u8; 32], Group)>, String> {
     let local_aci = manager.registration_data().service_ids.aci();
-    let groups = manager
-        .store()
-        .groups()
-        .await
-        .map_err(|error| format!("Could not read Signal groups: {error}"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| format!("Could not decode Signal groups: {error}"))?;
+    let repo = StorageRepository::new(manager.store().clone());
+    let groups = repo.groups().await?;
     Ok(groups.into_iter().find(|(key, group)| {
         group_identifier(key) == identifier && group_contains_local_aci(group, &local_aci)
     }))
