@@ -87,6 +87,11 @@ pub(crate) async fn attempt_outbox_message<M: SignalProtocol>(
             })
         }
         ClientOutboxKind::Group => {
+            // Held across resolve+send so a concurrent LeaveGroup can't depart the
+            // group in the window between checking membership and actually sending,
+            // matching the same guard already taken around attachment group sends
+            // and around leaving a group.
+            let _operation = departed_groups.lock_operation().await;
             let (key, group) = super::coordinator::resolve_active_group(
                 manager,
                 &message.recipient,

@@ -728,8 +728,11 @@ impl ConnectionSession {
                 completed = self.projection.delivery_receipt_tasks.join_next(),
                     if !self.projection.delivery_receipt_tasks.is_empty() =>
                 {
+                    // The `if !is_empty()` guard should make this branch unreachable when
+                    // `join_next()` returns `None`, but a defensive `continue` costs nothing
+                    // and is safer than panicking the whole worker on a guard/poll mismatch.
                     let Some(completed) = completed else {
-                        unreachable!("a non-empty delivery receipt task set returned no task")
+                        continue;
                     };
                     match completed {
                         Ok(completion) => {

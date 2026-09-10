@@ -61,6 +61,11 @@ pub(crate) const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
 pub(crate) const RECEIVE_EVENT_QUEUE_CAPACITY: usize = 16;
 pub(crate) const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_YIELD_INTERVAL: usize = 64;
+/// Signal caps a single message at 32 attachments; anything beyond that in a
+/// decoded message is malformed or hostile, not just unusually large, so the
+/// rest are left undownloaded rather than serially downloading an unbounded
+/// attacker-controlled count.
+pub(crate) const MAX_ATTACHMENT_DOWNLOADS_PER_MESSAGE: usize = 32;
 
 #[derive(Clone, Default)]
 pub(crate) struct MessageTimestampAllocator {
@@ -361,7 +366,7 @@ impl DepartedGroups {
         state.departed.insert(identifier);
     }
 
-    async fn lock_operation(&self) -> tokio::sync::MutexGuard<'_, ()> {
+    pub(crate) async fn lock_operation(&self) -> tokio::sync::MutexGuard<'_, ()> {
         self.operation.lock().await
     }
 }
@@ -1253,54 +1258,57 @@ pub(crate) async fn upload_and_send_attachment<M: SignalProtocol>(
         )
         .await?;
     let timestamp = timestamps.next();
-    if group {
-        let (key, _) = group_target.expect("group target was resolved before upload");
-        let _operation = departed_groups.lock_operation().await;
-        let group = active_group_by_key(manager, key, departed_groups)
-            .await?
-            .ok_or_else(|| {
-                "Signal group became unavailable before the attachment could be sent".to_owned()
-            })?;
-        manager
-            .send_message_to_group(
-                &key,
-                DataMessage {
-                    attachments: vec![pointer],
-                    timestamp: Some(timestamp),
-                    group_v2: Some(GroupContextV2 {
-                        master_key: Some(key.to_vec()),
-                        revision: Some(group.revision),
+    match group_target {
+        Some((key, _)) => {
+            let _operation = departed_groups.lock_operation().await;
+            let group = active_group_by_key(manager, key, departed_groups)
+                .await?
+                .ok_or_else(|| {
+                    "Signal group became unavailable before the attachment could be sent".to_owned()
+                })?;
+            manager
+                .send_message_to_group(
+                    &key,
+                    DataMessage {
+                        attachments: vec![pointer],
+                        timestamp: Some(timestamp),
+                        group_v2: Some(GroupContextV2 {
+                            master_key: Some(key.to_vec()),
+                            revision: Some(group.revision),
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    }),
-                    ..Default::default()
-                }
-                .into(),
+                    }
+                    .into(),
+                    timestamp,
+                )
+                .await?;
+            Ok(SentMessage {
+                thread: Thread::Group(key),
                 timestamp,
-            )
-            .await?;
-        Ok(SentMessage {
-            thread: Thread::Group(key),
-            timestamp,
-        })
-    } else {
-        let recipient = parse_recipient(&recipient)
-            .ok_or_else(|| "Recipient is not a canonical Signal service identifier".to_owned())?;
-        manager
-            .send_message(
-                recipient,
-                DataMessage {
-                    attachments: vec![pointer],
-                    timestamp: Some(timestamp),
-                    ..Default::default()
-                }
-                .into(),
+            })
+        }
+        None => {
+            let recipient = parse_recipient(&recipient).ok_or_else(|| {
+                "Recipient is not a canonical Signal service identifier".to_owned()
+            })?;
+            manager
+                .send_message(
+                    recipient,
+                    DataMessage {
+                        attachments: vec![pointer],
+                        timestamp: Some(timestamp),
+                        ..Default::default()
+                    }
+                    .into(),
+                    timestamp,
+                )
+                .await?;
+            Ok(SentMessage {
+                thread: Thread::Contact(recipient),
                 timestamp,
-            )
-            .await?;
-        Ok(SentMessage {
-            thread: Thread::Contact(recipient),
-            timestamp,
-        })
+            })
+        }
     }
 }
 
@@ -1886,7 +1894,20 @@ async fn emit_data_message<M: SignalProtocol>(
     let flags = if outgoing { FLAG_OUTGOING } else { 0 };
     let mut downloaded = Vec::new();
     if !outgoing {
-        for (attachment_index, attachment) in attachments.iter().enumerate() {
+        if attachments.len() > MAX_ATTACHMENT_DOWNLOADS_PER_MESSAGE {
+            sink.emit(Event::error(
+                format!(
+                    "Ignored {} Signal attachments beyond the per-message limit of {MAX_ATTACHMENT_DOWNLOADS_PER_MESSAGE}",
+                    attachments.len() - MAX_ATTACHMENT_DOWNLOADS_PER_MESSAGE
+                ),
+                false,
+            ));
+        }
+        for (attachment_index, attachment) in attachments
+            .iter()
+            .enumerate()
+            .take(MAX_ATTACHMENT_DOWNLOADS_PER_MESSAGE)
+        {
             let download_pointer = attachment_pointer_without_sender_size_hint(attachment);
             match manager.get_attachment(&download_pointer).await {
                 Ok(mut data) => {
