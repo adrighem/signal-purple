@@ -1,0 +1,8 @@
+{
+  "track_id": "modular_backend_20260910",
+  "type": "refactor",
+  "status": "in_progress",
+  "created_at": "2026-09-10T15:45:00Z",
+  "updated_at": "2026-09-10T16:17:00Z",
+  "description": "Deconstruct monolithic backend.rs into modular subcomponents (media, outbox, projection, worker) and optimize attachment transfer memory usage across FFI."
+}
