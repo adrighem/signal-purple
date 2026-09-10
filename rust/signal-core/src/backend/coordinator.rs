@@ -92,31 +92,30 @@ impl MessageTimestampAllocator {
     }
 }
 
+/// Caches a Signal group's non-secret hashed identifier (see [`group_identifier`])
+/// alongside its master key, so a lookup by identifier does not need a full,
+/// every-group scan; and a contact's last known display name, used as a
+/// fallback when a later sync briefly reports an empty name for that contact.
 #[derive(Clone, Default)]
 pub(crate) struct MetadataCache {
-    group_revisions: Arc<Mutex<HashMap<[u8; 32], u32>>>,
+    group_index: Arc<Mutex<HashMap<String, [u8; 32]>>>,
     contact_names: Arc<Mutex<HashMap<String, String>>>,
 }
 
-#[allow(dead_code)]
 impl MetadataCache {
-    pub(crate) fn new() -> Self {
-        Self::default()
+    pub(crate) fn group_key_for_identifier(&self, identifier: &str) -> Option<[u8; 32]> {
+        self.group_index.lock().ok()?.get(identifier).copied()
     }
 
-    pub(crate) fn get_group_revision(&self, master_key: &[u8; 32]) -> Option<u32> {
-        self.group_revisions.lock().ok()?.get(master_key).copied()
-    }
-
-    pub(crate) fn put_group_revision(&self, master_key: [u8; 32], revision: u32) {
-        if let Ok(mut guard) = self.group_revisions.lock() {
-            guard.insert(master_key, revision);
+    pub(crate) fn index_group(&self, identifier: String, master_key: [u8; 32]) {
+        if let Ok(mut guard) = self.group_index.lock() {
+            guard.insert(identifier, master_key);
         }
     }
 
-    pub(crate) fn invalidate_group(&self, master_key: &[u8; 32]) {
-        if let Ok(mut guard) = self.group_revisions.lock() {
-            guard.remove(master_key);
+    pub(crate) fn remove_group_index(&self, identifier: &str) {
+        if let Ok(mut guard) = self.group_index.lock() {
+            guard.remove(identifier);
         }
     }
 
@@ -130,14 +129,16 @@ impl MetadataCache {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn invalidate_contact(&self, peer_id: &str) {
         if let Ok(mut guard) = self.contact_names.lock() {
             guard.remove(peer_id);
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn clear(&self) {
-        if let Ok(mut guard) = self.group_revisions.lock() {
+        if let Ok(mut guard) = self.group_index.lock() {
             guard.clear();
         }
         if let Ok(mut guard) = self.contact_names.lock() {
@@ -735,7 +736,7 @@ async fn fetch_missing_avatars(
             if !group_contains_local_aci(&group, &local_aci) || group.avatar.is_empty() {
                 continue;
             }
-            metadata_cache.put_group_revision(key, group.revision);
+            metadata_cache.index_group(group_identifier(&key), key);
             let is_cached = match repo.group_avatar(key).await {
                 Ok(avatar) => avatar.is_some(),
                 Err(error) if sqlite_store_error_is_transient(&error) => {
@@ -748,12 +749,9 @@ async fn fetch_missing_avatars(
                 }
             };
             if !is_cached {
-                let revision = metadata_cache
-                    .get_group_revision(&key)
-                    .unwrap_or(group.revision);
                 let context = GroupContextV2 {
                     master_key: Some(key.to_vec()),
-                    revision: Some(revision),
+                    revision: Some(group.revision),
                     ..Default::default()
                 };
                 let fetch = manager.retrieve_group_avatar(context);
@@ -881,6 +879,10 @@ pub(crate) struct AttachmentCompletion {
     pub(crate) permit: AttachmentPermit,
 }
 
+// A thin shutdown-race wrapper around `handle_command`: one parameter per
+// piece of session context `handle_command` itself needs, not worth bundling
+// into a context struct for a single forwarding call.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn handle_command_interruptibly(
     manager: &mut Manager<SqliteStore, Registered>,
     command: Command,
@@ -888,6 +890,7 @@ pub(crate) async fn handle_command_interruptibly(
     sink: &EventSink,
     departed_groups: &DepartedGroups,
     groups_authoritative: bool,
+    metadata_cache: &MetadataCache,
     timestamps: &MessageTimestampAllocator,
 ) -> bool {
     let mut operation = Box::pin(handle_command(
@@ -896,6 +899,7 @@ pub(crate) async fn handle_command_interruptibly(
         sink,
         departed_groups,
         groups_authoritative,
+        metadata_cache,
         timestamps,
     ));
 
@@ -1058,7 +1062,7 @@ pub(crate) async fn emit_group_snapshot(
         if departed_groups.contains(&chat_id) || !group_contains_local_aci(&group, &local_aci) {
             continue;
         }
-        metadata_cache.put_group_revision(key, group.revision);
+        metadata_cache.index_group(chat_id.clone(), key);
         sink.emit(Event {
             kind: EVENT_GROUP,
             chat_id: Some(chat_id.clone()),
@@ -1206,6 +1210,7 @@ pub(crate) async fn upload_and_send_attachment<M: SignalProtocol>(
     manager: &mut M,
     attachment: OutgoingAttachment,
     departed_groups: &DepartedGroups,
+    metadata_cache: &MetadataCache,
     timestamps: &MessageTimestampAllocator,
 ) -> Result<SentMessage, String> {
     let OutgoingAttachment {
@@ -1226,7 +1231,7 @@ pub(crate) async fn upload_and_send_attachment<M: SignalProtocol>(
     }
     let group_target = if group {
         Some(
-            resolve_active_group(manager, &recipient, departed_groups)
+            resolve_active_group(manager, &recipient, departed_groups, metadata_cache)
                 .await?
                 .ok_or_else(|| {
                     "Signal group is unavailable or this account is no longer a member".to_owned()
@@ -1335,6 +1340,7 @@ async fn handle_command<M: SignalProtocol>(
     sink: &EventSink,
     departed_groups: &DepartedGroups,
     groups_authoritative: bool,
+    metadata_cache: &MetadataCache,
     timestamps: &MessageTimestampAllocator,
 ) {
     let repo = StorageRepository::new(manager.store().clone());
@@ -1356,7 +1362,15 @@ async fn handle_command<M: SignalProtocol>(
                     peer_id: Some(recipient),
                     ..Event::default()
                 });
-                retry_outbox(manager, &repo, sink, departed_groups, groups_authoritative).await;
+                retry_outbox(
+                    manager,
+                    &repo,
+                    sink,
+                    departed_groups,
+                    metadata_cache,
+                    groups_authoritative,
+                )
+                .await;
             }
             Ok(false) => sink.emit(Event::request_error(
                 request_id,
@@ -1446,8 +1460,13 @@ async fn handle_command<M: SignalProtocol>(
                 return;
             }
             let group_operation = departed_groups.lock_operation().await;
-            let resolved =
-                resolve_active_group_for_leave(manager, &group_key, departed_groups).await;
+            let resolved = resolve_active_group_for_leave(
+                manager,
+                &group_key,
+                departed_groups,
+                metadata_cache,
+            )
+            .await;
             let Some((key, _)) = (match resolved {
                 Ok(group) => group,
                 Err(error) => {
@@ -1479,13 +1498,22 @@ async fn handle_command<M: SignalProtocol>(
                         sink.emit(event);
                     }
                     drop(group_operation);
+                    metadata_cache.remove_group_index(&group_key);
                     if let Err(error) = repo.expedite_outbox_messages(&group_key).await {
                         sink.emit(Event::error(
                             format!("Could not schedule stale group messages for cleanup: {error}"),
                             false,
                         ));
                     }
-                    retry_outbox(manager, &repo, sink, departed_groups, groups_authoritative).await;
+                    retry_outbox(
+                        manager,
+                        &repo,
+                        sink,
+                        departed_groups,
+                        metadata_cache,
+                        groups_authoritative,
+                    )
+                    .await;
                 }
                 Err(error) => {
                     for event in group_leave_completion_events(
@@ -1516,6 +1544,7 @@ async fn handle_command<M: SignalProtocol>(
                         body: message,
                     },
                     departed_groups,
+                    metadata_cache,
                     sink,
                     timestamps,
                 )
@@ -1538,7 +1567,9 @@ async fn handle_command<M: SignalProtocol>(
                         .into(),
                 )
             } else {
-                match resolve_active_group(manager, &group_key, departed_groups).await {
+                match resolve_active_group(manager, &group_key, departed_groups, metadata_cache)
+                    .await
+                {
                     Ok(Some(_)) => {
                         enqueue_and_send(
                             manager,
@@ -1549,6 +1580,7 @@ async fn handle_command<M: SignalProtocol>(
                                 body: message,
                             },
                             departed_groups,
+                            metadata_cache,
                             sink,
                             timestamps,
                         )
@@ -2077,34 +2109,54 @@ pub(crate) async fn resolve_active_group<M: SignalProtocol>(
     manager: &M,
     identifier: &str,
     departed_groups: &DepartedGroups,
+    metadata_cache: &MetadataCache,
 ) -> Result<Option<([u8; 32], Group)>, String> {
     if departed_groups.contains(identifier) {
         return Ok(None);
     }
-    resolve_active_group_in_store(manager, identifier).await
+    resolve_active_group_in_store(manager, identifier, metadata_cache).await
 }
 
 async fn resolve_active_group_for_leave<M: SignalProtocol>(
     manager: &M,
     identifier: &str,
     departed_groups: &DepartedGroups,
+    metadata_cache: &MetadataCache,
 ) -> Result<Option<([u8; 32], Group)>, String> {
     if departed_groups.is_departed(identifier) {
         return Ok(None);
     }
-    resolve_active_group_in_store(manager, identifier).await
+    resolve_active_group_in_store(manager, identifier, metadata_cache).await
 }
 
+/// Resolves a group by its hashed identifier. Checks `metadata_cache`'s
+/// identifier index first (an O(1) lookup plus one single-group store read)
+/// before falling back to a full scan of every group, which would otherwise
+/// run on every group send, leave, and outbox retry attempt.
 async fn resolve_active_group_in_store<M: SignalProtocol>(
     manager: &M,
     identifier: &str,
+    metadata_cache: &MetadataCache,
 ) -> Result<Option<([u8; 32], Group)>, String> {
     let local_aci = manager.local_aci();
     let repo = StorageRepository::new(manager.store().clone());
+    if let Some(key) = metadata_cache.group_key_for_identifier(identifier) {
+        let indexed = repo
+            .active_group(key, &local_aci)
+            .await
+            .map_err(|error| error.to_string())?;
+        if let Some(group) = indexed {
+            return Ok(Some((key, group)));
+        }
+    }
     let groups = repo.groups().await.map_err(|error| error.to_string())?;
-    Ok(groups.into_iter().find(|(key, group)| {
+    let found = groups.into_iter().find(|(key, group)| {
         group_identifier(key) == identifier && group_contains_local_aci(group, &local_aci)
-    }))
+    });
+    if let Some((key, _)) = &found {
+        metadata_cache.index_group(identifier.to_owned(), *key);
+    }
+    Ok(found)
 }
 
 fn content_timestamp(content: &Content) -> u64 {
@@ -2826,15 +2878,16 @@ mod tests {
     }
 
     #[test]
-    fn metadata_cache_caches_and_invalidates_group_revisions_and_contacts() {
-        let cache = MetadataCache::new();
+    fn metadata_cache_indexes_and_invalidates_groups_and_contacts() {
+        let cache = MetadataCache::default();
         let key = [42u8; 32];
-        assert_eq!(cache.get_group_revision(&key), None);
-        cache.put_group_revision(key, 5);
-        assert_eq!(cache.get_group_revision(&key), Some(5));
+        let identifier = group_identifier(&key);
+        assert_eq!(cache.group_key_for_identifier(&identifier), None);
+        cache.index_group(identifier.clone(), key);
+        assert_eq!(cache.group_key_for_identifier(&identifier), Some(key));
 
-        cache.invalidate_group(&key);
-        assert_eq!(cache.get_group_revision(&key), None);
+        cache.remove_group_index(&identifier);
+        assert_eq!(cache.group_key_for_identifier(&identifier), None);
 
         let peer = "00000000-0000-0000-0000-000000000001";
         assert_eq!(cache.get_contact_name(peer), None);
@@ -2844,10 +2897,10 @@ mod tests {
         cache.invalidate_contact(peer);
         assert_eq!(cache.get_contact_name(peer), None);
 
-        cache.put_group_revision(key, 12);
+        cache.index_group(identifier.clone(), key);
         cache.put_contact_name(peer.to_string(), "Bob".to_string());
         cache.clear();
-        assert_eq!(cache.get_group_revision(&key), None);
+        assert_eq!(cache.group_key_for_identifier(&identifier), None);
         assert_eq!(cache.get_contact_name(peer), None);
     }
 

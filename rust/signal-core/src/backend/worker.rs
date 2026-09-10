@@ -617,6 +617,7 @@ async fn receive_and_command_loop(
                 &repo,
                 &sink,
                 &departed_groups,
+                &metadata_cache,
                 session.groups_authoritative(),
             ));
             session.mark_ready();
@@ -763,6 +764,7 @@ async fn receive_and_command_loop(
                             }
                             let mut attachment_manager = manager.clone();
                             let attachment_departed_groups = departed_groups.clone();
+                            let attachment_metadata_cache = metadata_cache.clone();
                             let attachment_timestamps = timestamps.clone();
                             let control = permit.control();
                             let task = attachment_tasks.spawn_local(async move {
@@ -779,6 +781,7 @@ async fn receive_and_command_loop(
                                             group,
                                         },
                                         &attachment_departed_groups,
+                                        &attachment_metadata_cache,
                                         &attachment_timestamps,
                                     ),
                                 )
@@ -802,6 +805,7 @@ async fn receive_and_command_loop(
                                 &sink,
                                 &departed_groups,
                                 groups_authoritative,
+                                &metadata_cache,
                                 &timestamps,
                             ).await {
                                 stop_active_receive_loop(
@@ -864,6 +868,7 @@ async fn receive_and_command_loop(
                         &repo,
                         &sink,
                         &departed_groups,
+                        &metadata_cache,
                         groups_authoritative,
                     ));
                 }
@@ -884,6 +889,7 @@ async fn receive_and_command_loop(
                                 &repo,
                                 &sink,
                                 &departed_groups,
+                                &metadata_cache,
                                 true,
                             ));
                         }

@@ -58,6 +58,7 @@ pub(crate) async fn attempt_outbox_message<M: SignalProtocol>(
     manager: &mut M,
     message: &ClientOutboxMessage,
     departed_groups: &DepartedGroups,
+    metadata_cache: &super::coordinator::MetadataCache,
 ) -> Result<SentMessage, OutboxAttemptError> {
     match message.kind {
         ClientOutboxKind::Direct => {
@@ -90,6 +91,7 @@ pub(crate) async fn attempt_outbox_message<M: SignalProtocol>(
                 manager,
                 &message.recipient,
                 departed_groups,
+                metadata_cache,
             )
             .await
             .map_err(OutboxAttemptError::retryable)?
@@ -160,6 +162,7 @@ pub(crate) async fn retry_outbox<M: SignalProtocol>(
     repo: &impl StorageOps,
     sink: &EventSink,
     departed_groups: &DepartedGroups,
+    metadata_cache: &super::coordinator::MetadataCache,
     groups_authoritative: bool,
 ) {
     let messages = match repo.due_outbox_messages(wall_clock_ms()).await {
@@ -180,7 +183,8 @@ pub(crate) async fn retry_outbox<M: SignalProtocol>(
         if !outbox_message_is_attemptable(&message.kind, groups_authoritative) {
             continue;
         }
-        let result = attempt_outbox_message(manager, &message, departed_groups).await;
+        let result =
+            attempt_outbox_message(manager, &message, departed_groups, metadata_cache).await;
         if let Ok(sent) = &result {
             super::coordinator::mark_sent_message_projected_or_report(repo, sent, sink).await;
         }
@@ -218,6 +222,7 @@ pub(crate) async fn enqueue_and_send<M: SignalProtocol>(
     repo: &impl StorageOps,
     request: NewOutboxMessage,
     departed_groups: &DepartedGroups,
+    metadata_cache: &super::coordinator::MetadataCache,
     sink: &EventSink,
     timestamps: &MessageTimestampAllocator,
 ) -> Result<(), String> {
@@ -239,7 +244,7 @@ pub(crate) async fn enqueue_and_send<M: SignalProtocol>(
         timestamp,
         attempts: 0,
     };
-    let result = attempt_outbox_message(manager, &message, departed_groups).await;
+    let result = attempt_outbox_message(manager, &message, departed_groups, metadata_cache).await;
     if let Ok(sent) = &result {
         super::coordinator::mark_sent_message_projected_or_report(repo, sent, sink).await;
     }
