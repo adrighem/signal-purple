@@ -9,6 +9,12 @@ pub(crate) const MAX_ATTACHMENT_BYTES: usize = 25 * 1024 * 1024;
 const MAX_ADMITTED_OUTGOING_ATTACHMENT_BYTES: usize = 50 * 1024 * 1024;
 const MAX_ADMITTED_OUTGOING_ATTACHMENTS: usize = 2;
 
+#[derive(Debug)]
+pub(crate) enum AttachmentPayload {
+    Data(Vec<u8>),
+    Path(std::path::PathBuf),
+}
+
 #[derive(Debug, Eq, PartialEq)]
 pub(crate) enum AttachmentAdmissionError {
     Invalid,

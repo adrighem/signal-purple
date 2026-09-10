@@ -17,11 +17,12 @@ use presage::{Manager, manager::Registered};
 use presage_store_sqlite::SqliteStore;
 use tokio::sync::{mpsc as tokio_mpsc, watch};
 
+use super::command::{Command, Config, StorePassphrase, WorkerContext};
 use super::coordinator::{
-    ActiveReceiveTasks, AttachmentCompletion, AttachmentPayload, AttachmentTaskControl,
-    AttachmentTaskResult, DepartedGroups, GROUP_SYNC_RETRY_SECS, MessageTimestampAllocator,
-    MetadataCache, OutgoingAttachment, RECEIVE_EVENT_QUEUE_CAPACITY, ReceiveStartError,
-    RecoveryTransition, SHUTDOWN_CLEANUP_TIMEOUT, SentMessage, SessionState, emit_account_identity,
+    ActiveReceiveTasks, AttachmentCompletion, AttachmentTaskControl, AttachmentTaskResult,
+    DepartedGroups, GROUP_SYNC_RETRY_SECS, MessageTimestampAllocator, MetadataCache,
+    OutgoingAttachment, RECEIVE_EVENT_QUEUE_CAPACITY, ReceiveStartError, RecoveryTransition,
+    SHUTDOWN_CLEANUP_TIMEOUT, SentMessage, SessionState, emit_account_identity,
     emit_contact_snapshot, emit_group_snapshot, emit_identity_changes,
     fetch_missing_avatars_after_queue_drain, handle_attachment_completion,
     handle_command_interruptibly, load_unprojected_messages, qr_png, receive_error_is_transient,
@@ -34,77 +35,14 @@ use super::projection::{
     drain_acknowledgments, finish_delivery_receipt_attempt, process_acknowledgments,
     project_content, spawn_delivery_receipt_attempt,
 };
+use super::shutdown::{await_or_shutdown, finish_shutdown_cleanup, wait_for_shutdown};
 use crate::acknowledgment::AcknowledgmentInbox;
+#[cfg(test)]
+use crate::attachment::AttachmentPayload;
 use crate::attachment::AttachmentPermit;
 use crate::event::{EVENT_DISCONNECTED, EVENT_LINK_QR, EVENT_READY, EVENT_RECOVERING, Event};
 use crate::event_queue::EventSink;
 use crate::store::StorageRepository;
-
-pub use super::coordinator::StorePassphrase;
-
-pub struct Config {
-    pub store_path: String,
-    pub device_name: String,
-    pub passphrase: StorePassphrase,
-}
-
-pub struct WorkerContext {
-    pub config: Config,
-    pub commands: tokio_mpsc::Receiver<Command>,
-    pub acknowledgments: Arc<AcknowledgmentInbox>,
-    pub shutdown: watch::Receiver<bool>,
-    pub events: EventSink,
-    pub ready: Arc<AtomicBool>,
-}
-
-#[derive(Debug)]
-pub enum Command {
-    SendMessage {
-        request_id: u64,
-        recipient: String,
-        message: String,
-    },
-    SendGroupMessage {
-        request_id: u64,
-        group_key: String,
-        message: String,
-    },
-    LeaveGroup {
-        request_id: u64,
-        group_key: String,
-    },
-    SendAttachment {
-        request_id: u64,
-        recipient: String,
-        filename: String,
-        content_type: String,
-        data: AttachmentPayload,
-        group: bool,
-        permit: AttachmentPermit,
-    },
-    SetTyping {
-        request_id: u64,
-        recipient: String,
-        typing: bool,
-    },
-    AcceptIdentity {
-        request_id: u64,
-        recipient: String,
-    },
-    DismissIdentity {
-        request_id: u64,
-        recipient: String,
-    },
-    ResetSession {
-        request_id: u64,
-        recipient: String,
-    },
-    MarkRead {
-        request_id: u64,
-        recipient: String,
-        timestamp: u64,
-    },
-}
 
 pub fn run_worker(context: WorkerContext) {
     let WorkerContext {
@@ -222,38 +160,6 @@ pub(crate) async fn open_encrypted_store(
         Some(Err(error)) => Err(format!("Could not open encrypted Signal store: {error}")),
         None => Ok(None),
     }
-}
-
-pub(crate) async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
-    if *shutdown.borrow() {
-        return;
-    }
-    let _ = shutdown.changed().await;
-}
-
-pub(crate) async fn await_or_shutdown<F>(
-    future: F,
-    shutdown: &mut watch::Receiver<bool>,
-) -> Option<F::Output>
-where
-    F: Future,
-{
-    if *shutdown.borrow() {
-        return None;
-    }
-    pin_mut!(future);
-    tokio::select! {
-        biased;
-        _ = wait_for_shutdown(shutdown) => None,
-        output = &mut future => Some(output),
-    }
-}
-
-pub(crate) async fn finish_shutdown_cleanup<F>(future: F, timeout: Duration) -> bool
-where
-    F: Future<Output = ()>,
-{
-    tokio::time::timeout(timeout, future).await.is_ok()
 }
 
 pub(crate) fn shutdown_runtime(runtime: tokio::runtime::Runtime, timeout: Duration) {
@@ -1081,15 +987,6 @@ async fn stop_receive_driver(task: &mut tokio::task::JoinHandle<()>) {
     let _ = task.await;
 }
 
-pub(crate) async fn run_after_start_signal<F>(start: oneshot::Receiver<()>, operation: F)
-where
-    F: Future<Output = ()>,
-{
-    if start.await.is_ok() {
-        operation.await;
-    }
-}
-
 pub(crate) fn handle_recovery_command(command: Command, deferred_commands: &mut VecDeque<Command>) {
     match command {
         Command::SetTyping { .. } => {}
@@ -1340,14 +1237,6 @@ mod tests {
     use crate::event::EVENT_ATTACHMENT_SENT;
     use std::path::PathBuf;
 
-    struct DropFlag(Arc<AtomicBool>);
-
-    impl Drop for DropFlag {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-
     struct TestDirectory(PathBuf);
 
     impl TestDirectory {
@@ -1375,78 +1264,6 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
-    }
-
-    #[test]
-    fn shutdown_boundary_returns_completed_phase_output() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
-
-            assert_eq!(
-                await_or_shutdown(async { 42 }, &mut shutdown_rx).await,
-                Some(42)
-            );
-        });
-    }
-
-    #[test]
-    fn shutdown_boundary_does_not_poll_after_shutdown() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-            let polled = Arc::new(AtomicBool::new(false));
-            let phase_polled = Arc::clone(&polled);
-            shutdown_tx.send(true).unwrap();
-
-            let outcome = await_or_shutdown(
-                async move {
-                    phase_polled.store(true, Ordering::Release);
-                    42
-                },
-                &mut shutdown_rx,
-            )
-            .await;
-
-            assert_eq!(outcome, None);
-            assert!(!polled.load(Ordering::Acquire));
-        });
-    }
-
-    #[test]
-    fn contact_sync_work_waits_for_the_queue_drain_signal() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (start_tx, start_rx) = oneshot::channel();
-            let polled = Arc::new(AtomicBool::new(false));
-            let operation_polled = Arc::clone(&polled);
-            let gated = run_after_start_signal(start_rx, async move {
-                operation_polled.store(true, Ordering::Release);
-            });
-            pin_mut!(gated);
-
-            assert!(
-                tokio::time::timeout(Duration::from_millis(10), gated.as_mut())
-                    .await
-                    .is_err()
-            );
-            assert!(!polled.load(Ordering::Acquire));
-
-            start_tx.send(()).unwrap();
-            tokio::time::timeout(Duration::from_secs(1), gated.as_mut())
-                .await
-                .expect("contact sync gate did not open");
-            assert!(polled.load(Ordering::Acquire));
-        });
     }
 
     #[test]
@@ -1487,59 +1304,6 @@ mod tests {
             release.await.unwrap();
             forwarder.await.unwrap();
         }));
-    }
-
-    #[test]
-    fn shutdown_boundary_drops_a_pending_phase_promptly() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-            let (started_tx, started_rx) = oneshot::channel();
-            let dropped = Arc::new(AtomicBool::new(false));
-            let phase_dropped = Arc::clone(&dropped);
-            let phase = async move {
-                let _drop_flag = DropFlag(phase_dropped);
-                let _ = started_tx.send(());
-                std::future::pending::<()>().await;
-            };
-            let signal_shutdown = async move {
-                started_rx.await.expect("phase did not start");
-                shutdown_tx.send(true).expect("shutdown receiver closed");
-            };
-
-            let outcome = tokio::time::timeout(Duration::from_secs(1), async {
-                tokio::join!(await_or_shutdown(phase, &mut shutdown_rx), signal_shutdown).0
-            })
-            .await
-            .expect("shutdown boundary did not complete");
-
-            assert_eq!(outcome, None);
-            assert!(dropped.load(Ordering::Acquire));
-        });
-    }
-
-    #[test]
-    fn shutdown_cleanup_drops_work_after_its_deadline() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let dropped = Arc::new(AtomicBool::new(false));
-            let cleanup_dropped = Arc::clone(&dropped);
-            let cleanup = async move {
-                let _drop_flag = DropFlag(cleanup_dropped);
-                std::future::pending::<()>().await;
-            };
-
-            let completed = finish_shutdown_cleanup(cleanup, Duration::from_millis(10)).await;
-
-            assert!(!completed);
-            assert!(dropped.load(Ordering::Acquire));
-        });
     }
 
     #[test]

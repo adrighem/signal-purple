@@ -26,15 +26,18 @@ use qrcode::QrCode;
 use qrcode::types::Color;
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex as AsyncMutex, mpsc as tokio_mpsc, watch};
-use zeroize::{Zeroize, Zeroizing};
 
+use super::command::Command;
 use super::media::{
     AvatarCache, DownloadedAttachment, MAX_SIGNAL_GIF_TRANSCODES_PER_MESSAGE,
     attachment_display_name, should_inline_image, transcode_signal_gif_video,
 };
 use super::outbox::{enqueue_and_send, retry_outbox};
 use super::projection::*;
-use crate::attachment::{AttachmentControl, AttachmentPermit, MAX_ATTACHMENT_BYTES};
+use super::shutdown::{run_after_start_signal, wait_for_shutdown};
+use crate::attachment::{
+    AttachmentControl, AttachmentPayload, AttachmentPermit, MAX_ATTACHMENT_BYTES,
+};
 use crate::event::{
     EVENT_ACCOUNT, EVENT_ATTACHMENT, EVENT_ATTACHMENT_SENT, EVENT_AVATAR, EVENT_CONTACT,
     EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_GROUP, EVENT_GROUP_LEFT,
@@ -77,41 +80,6 @@ impl MessageTimestampAllocator {
                 Ok(_) => return next,
                 Err(observed) => previous = observed,
             }
-        }
-    }
-}
-
-pub struct StorePassphrase {
-    value: Zeroizing<String>,
-    #[cfg(test)]
-    drop_observer: Option<Arc<AtomicBool>>,
-}
-
-impl StorePassphrase {
-    pub fn new(value: String) -> Self {
-        Self {
-            value: Zeroizing::new(value),
-            #[cfg(test)]
-            drop_observer: None,
-        }
-    }
-
-    pub(crate) fn as_str(&self) -> &str {
-        self.value.as_str()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn observe_drop(&mut self, observer: Arc<AtomicBool>) {
-        self.drop_observer = Some(observer);
-    }
-}
-
-impl Drop for StorePassphrase {
-    fn drop(&mut self) {
-        self.value.zeroize();
-        #[cfg(test)]
-        if let Some(observer) = &self.drop_observer {
-            observer.store(true, Ordering::Release);
         }
     }
 }
@@ -169,8 +137,6 @@ impl MetadataCache {
         }
     }
 }
-
-pub(crate) use super::worker::Command;
 
 #[derive(Default)]
 pub(crate) struct RecoveryBackoff {
@@ -689,7 +655,7 @@ pub(crate) async fn request_contacts_after_queue_drain(
     shutdown: watch::Receiver<bool>,
     sink: EventSink,
 ) {
-    super::worker::run_after_start_signal(
+    run_after_start_signal(
         start,
         request_contacts_with_retries(manager, shutdown, sink),
     )
@@ -708,7 +674,7 @@ async fn request_contacts_with_retries(
             let mut request = Box::pin(manager.request_contacts());
             tokio::select! {
                 result = &mut request => result,
-                _ = super::worker::wait_for_shutdown(&mut shutdown) => return,
+                _ = wait_for_shutdown(&mut shutdown) => return,
             }
         };
         match result {
@@ -727,7 +693,7 @@ async fn request_contacts_with_retries(
                 if !delay.is_zero() {
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
-                        _ = super::worker::wait_for_shutdown(&mut shutdown) => return,
+                        _ = wait_for_shutdown(&mut shutdown) => return,
                     }
                 }
             }
@@ -743,7 +709,7 @@ pub(crate) async fn fetch_missing_avatars_after_queue_drain(
     avatar_cache: AvatarCache,
     metadata_cache: MetadataCache,
 ) {
-    super::worker::run_after_start_signal(
+    run_after_start_signal(
         start,
         fetch_missing_avatars(manager, shutdown, sink, avatar_cache, metadata_cache),
     )
@@ -783,7 +749,7 @@ async fn fetch_missing_avatars(
                     let fetch = manager.retrieve_profile_avatar_by_uuid(contact.uuid, key);
                     let result = tokio::select! {
                         res = fetch => res,
-                        _ = super::worker::wait_for_shutdown(&mut shutdown) => return,
+                        _ = wait_for_shutdown(&mut shutdown) => return,
                     };
                     if let Ok(Some(avatar)) = result {
                         let (avatar_data, checksum) = avatar_cache.prepare_avatar(avatar);
@@ -822,7 +788,7 @@ async fn fetch_missing_avatars(
                 let fetch = manager.retrieve_group_avatar(context);
                 let result = tokio::select! {
                     res = fetch => res,
-                    _ = super::worker::wait_for_shutdown(&mut shutdown) => return,
+                    _ = wait_for_shutdown(&mut shutdown) => return,
                 };
                 if let Ok(Some(avatar)) = result {
                     let (avatar_data, checksum) = avatar_cache.prepare_avatar(avatar);
@@ -860,7 +826,7 @@ async fn synchronize_groups_task(
         result = sync => {
             let _ = result_tx.send(result).await;
         }
-        _ = super::worker::wait_for_shutdown(&mut shutdown) => {}
+        _ = wait_for_shutdown(&mut shutdown) => {}
     }
 }
 
@@ -963,7 +929,7 @@ pub(crate) async fn handle_command_interruptibly(
 
     tokio::select! {
         () = &mut operation => false,
-        _ = super::worker::wait_for_shutdown(shutdown) => true,
+        _ = wait_for_shutdown(shutdown) => true,
     }
 }
 
@@ -1187,12 +1153,6 @@ pub(crate) async fn mark_sent_message_projected_or_report(
     if let Err(error) = mark_sent_message_projected(&repo, sent).await {
         sink.emit(Event::error(error, false));
     }
-}
-
-#[derive(Debug)]
-pub(crate) enum AttachmentPayload {
-    Data(Vec<u8>),
-    Path(std::path::PathBuf),
 }
 
 pub(crate) struct OutgoingAttachment {
