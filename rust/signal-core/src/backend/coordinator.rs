@@ -1,14 +1,12 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use std::collections::{HashMap, HashSet, VecDeque};
-use std::future::Future;
-use std::path::Path;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::{HashMap, HashSet};
+#[cfg(test)]
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use futures::{FutureExt, StreamExt, channel::oneshot, future::Abortable, pin_mut};
-use presage::libsignal_service::configuration::SignalServers;
+use futures::channel::oneshot;
 use presage::libsignal_service::content::{
     Content, ContentBody, DataMessage, GroupContextV2, ServiceError,
 };
@@ -17,12 +15,10 @@ use presage::libsignal_service::protocol::{Aci, ServiceId, SignalProtocolError};
 use presage::libsignal_service::sender::{AttachmentSpec, MessageSenderError};
 use presage::libsignal_service::zkgroup::profiles::ProfileKey;
 use presage::model::groups::Group;
-use presage::model::identity::OnNewIdentity;
-use presage::model::messages::Received;
 use presage::proto::{
     AttachmentPointer, EditMessage, SyncMessage, TypingMessage, receipt_message, typing_message,
 };
-use presage::store::{StateStore, Thread};
+use presage::store::Thread;
 use presage::{Manager, manager::Registered};
 use presage_store_sqlite::ClientOutboxKind;
 use presage_store_sqlite::SqliteStore;
@@ -38,26 +34,22 @@ use super::media::{
 };
 use super::outbox::{enqueue_and_send, retry_outbox};
 use super::projection::*;
-use crate::acknowledgment::AcknowledgmentInbox;
-#[cfg(test)]
-use crate::attachment::AttachmentAdmission;
 use crate::attachment::{AttachmentControl, AttachmentPermit, MAX_ATTACHMENT_BYTES};
 use crate::event::{
     EVENT_ACCOUNT, EVENT_ATTACHMENT, EVENT_ATTACHMENT_SENT, EVENT_AVATAR, EVENT_CONTACT,
-    EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_DISCONNECTED, EVENT_GROUP,
-    EVENT_GROUP_LEFT, EVENT_GROUP_MEMBER, EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN,
-    EVENT_GROUP_SYNC_END, EVENT_IDENTITY_ACCEPTED, EVENT_IDENTITY_CHANGE, EVENT_LINK_QR,
-    EVENT_MESSAGE, EVENT_READY, EVENT_RECEIPT, EVENT_RECOVERING, EVENT_SESSION_RESET, EVENT_TYPING,
-    Event, FLAG_OUTGOING,
+    EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_GROUP, EVENT_GROUP_LEFT,
+    EVENT_GROUP_MEMBER, EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN, EVENT_GROUP_SYNC_END,
+    EVENT_IDENTITY_ACCEPTED, EVENT_IDENTITY_CHANGE, EVENT_MESSAGE, EVENT_RECEIPT,
+    EVENT_SESSION_RESET, EVENT_TYPING, Event, FLAG_OUTGOING,
 };
 use crate::event_queue::EventSink;
 use crate::store::StorageRepository;
 
-const GROUP_SYNC_RETRY_SECS: u64 = 30;
-const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
-const RECEIVE_EVENT_QUEUE_CAPACITY: usize = 16;
-const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
-const SNAPSHOT_YIELD_INTERVAL: usize = 64;
+pub(crate) const GROUP_SYNC_RETRY_SECS: u64 = 30;
+pub(crate) const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
+pub(crate) const RECEIVE_EVENT_QUEUE_CAPACITY: usize = 16;
+pub(crate) const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const SNAPSHOT_YIELD_INTERVAL: usize = 64;
 
 #[derive(Clone, Default)]
 pub(crate) struct MessageTimestampAllocator {
@@ -89,14 +81,14 @@ impl MessageTimestampAllocator {
     }
 }
 
-pub(crate) struct StorePassphrase {
+pub struct StorePassphrase {
     value: Zeroizing<String>,
     #[cfg(test)]
     drop_observer: Option<Arc<AtomicBool>>,
 }
 
 impl StorePassphrase {
-    pub(crate) fn new(value: String) -> Self {
+    pub fn new(value: String) -> Self {
         Self {
             value: Zeroizing::new(value),
             #[cfg(test)]
@@ -178,77 +170,15 @@ impl MetadataCache {
     }
 }
 
-pub(crate) struct Config {
-    pub(crate) store_path: String,
-    pub(crate) device_name: String,
-    pub(crate) passphrase: StorePassphrase,
-}
-
-pub(crate) struct WorkerContext {
-    pub(crate) config: Config,
-    pub(crate) commands: tokio_mpsc::Receiver<Command>,
-    pub(crate) acknowledgments: Arc<AcknowledgmentInbox>,
-    pub(crate) shutdown: watch::Receiver<bool>,
-    pub(crate) events: EventSink,
-    pub(crate) ready: Arc<AtomicBool>,
-}
-
-#[derive(Debug)]
-pub enum Command {
-    SendMessage {
-        request_id: u64,
-        recipient: String,
-        message: String,
-    },
-    SendGroupMessage {
-        request_id: u64,
-        group_key: String,
-        message: String,
-    },
-    LeaveGroup {
-        request_id: u64,
-        group_key: String,
-    },
-    SendAttachment {
-        request_id: u64,
-        recipient: String,
-        filename: String,
-        content_type: String,
-        data: Vec<u8>,
-        group: bool,
-        permit: AttachmentPermit,
-    },
-    SetTyping {
-        request_id: u64,
-        recipient: String,
-        typing: bool,
-    },
-    AcceptIdentity {
-        request_id: u64,
-        recipient: String,
-    },
-    DismissIdentity {
-        request_id: u64,
-        recipient: String,
-    },
-    ResetSession {
-        request_id: u64,
-        recipient: String,
-    },
-    MarkRead {
-        request_id: u64,
-        recipient: String,
-        timestamp: u64,
-    },
-}
+pub(crate) use super::worker::Command;
 
 #[derive(Default)]
-struct RecoveryBackoff {
+pub(crate) struct RecoveryBackoff {
     next_delay: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum SessionPhase {
+pub(crate) enum SessionPhase {
     #[default]
     Initializing,
     Recovering,
@@ -256,7 +186,7 @@ enum SessionPhase {
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-enum GroupSnapshotState {
+pub(crate) enum GroupSnapshotState {
     #[default]
     Pending,
     Authoritative,
@@ -264,29 +194,29 @@ enum GroupSnapshotState {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum RecoveryTransition {
+pub(crate) enum RecoveryTransition {
     Entered,
     Continued,
 }
 
 #[derive(Default)]
-struct SessionState {
+pub(crate) struct SessionState {
     phase: SessionPhase,
     groups: GroupSnapshotState,
     recovery_backoff: RecoveryBackoff,
     last_recovery_error: Option<String>,
 }
 
-struct ReceiveStartError {
-    message: String,
-    transient: bool,
+pub(crate) struct ReceiveStartError {
+    pub(crate) message: String,
+    pub(crate) transient: bool,
 }
 
-struct ActiveReceiveTasks {
-    receive: tokio::task::JoinHandle<()>,
-    contact_sync: tokio::task::JoinHandle<()>,
-    avatar_fetch: tokio::task::JoinHandle<()>,
-    group_sync: Option<tokio::task::JoinHandle<()>>,
+pub(crate) struct ActiveReceiveTasks {
+    pub(crate) receive: tokio::task::JoinHandle<()>,
+    pub(crate) contact_sync: tokio::task::JoinHandle<()>,
+    pub(crate) avatar_fetch: tokio::task::JoinHandle<()>,
+    pub(crate) group_sync: Option<tokio::task::JoinHandle<()>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -431,7 +361,7 @@ impl DepartedGroups {
             .contains(identifier)
     }
 
-    fn begin_leave(&self, identifier: String) {
+    pub(crate) fn begin_leave(&self, identifier: String) {
         self.state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
@@ -518,46 +448,46 @@ impl RecoveryBackoff {
 }
 
 impl SessionState {
-    fn is_recovering(&self) -> bool {
+    pub(crate) fn is_recovering(&self) -> bool {
         self.phase == SessionPhase::Recovering
     }
 
-    fn is_ready(&self) -> bool {
+    pub(crate) fn is_ready(&self) -> bool {
         self.phase == SessionPhase::Ready
     }
 
-    fn groups_authoritative(&self) -> bool {
+    pub(crate) fn groups_authoritative(&self) -> bool {
         matches!(
             self.groups,
             GroupSnapshotState::Authoritative | GroupSnapshotState::Dirty
         )
     }
 
-    fn groups_dirty(&self) -> bool {
+    pub(crate) fn groups_dirty(&self) -> bool {
         self.groups == GroupSnapshotState::Dirty
     }
 
-    fn note_group_content(&mut self, has_group_context: bool) {
+    pub(crate) fn note_group_content(&mut self, has_group_context: bool) {
         if has_group_context && self.groups == GroupSnapshotState::Authoritative {
             self.groups = GroupSnapshotState::Dirty;
         }
     }
 
-    fn mark_groups_authoritative(&mut self) {
+    pub(crate) fn mark_groups_authoritative(&mut self) {
         self.groups = GroupSnapshotState::Authoritative;
     }
 
-    fn mark_groups_pending(&mut self) {
+    pub(crate) fn mark_groups_pending(&mut self) {
         self.groups = GroupSnapshotState::Pending;
     }
 
-    fn mark_ready(&mut self) {
+    pub(crate) fn mark_ready(&mut self) {
         debug_assert!(!self.is_ready());
         self.phase = SessionPhase::Ready;
         self.recovery_backoff.reset();
     }
 
-    fn enter_recovery(&mut self, error: String) -> RecoveryTransition {
+    pub(crate) fn enter_recovery(&mut self, error: String) -> RecoveryTransition {
         let transition = if self.is_recovering() {
             RecoveryTransition::Continued
         } else {
@@ -569,16 +499,16 @@ impl SessionState {
         transition
     }
 
-    fn next_recovery_delay(&mut self) -> Option<Duration> {
+    pub(crate) fn next_recovery_delay(&mut self) -> Option<Duration> {
         debug_assert!(self.is_recovering());
         self.recovery_backoff.next_delay()
     }
 
-    fn recovery_has_remaining(&self) -> bool {
+    pub(crate) fn recovery_has_remaining(&self) -> bool {
         self.recovery_backoff.has_remaining()
     }
 
-    fn last_recovery_error(&self) -> Option<&str> {
+    pub(crate) fn last_recovery_error(&self) -> Option<&str> {
         self.last_recovery_error.as_deref()
     }
 }
@@ -704,7 +634,7 @@ fn message_sender_error_is_transient(error: &MessageSenderError) -> bool {
     }
 }
 
-fn receive_error_is_transient(
+pub(crate) fn receive_error_is_transient(
     error: &presage::Error<presage_store_sqlite::SqliteStoreError>,
 ) -> bool {
     match error {
@@ -753,999 +683,13 @@ pub(crate) fn delivery_receipt_failure_action(
     }
 }
 
-pub(crate) fn run_worker(context: WorkerContext) {
-    let WorkerContext {
-        config,
-        commands,
-        acknowledgments,
-        shutdown,
-        events,
-        ready,
-    } = context;
-    let sink = events;
-    let worker_acknowledgments = Arc::clone(&acknowledgments);
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .map_err(|error| error.to_string())?;
-        let local = tokio::task::LocalSet::new();
-        match run_local_future(
-            runtime,
-            local,
-            Box::pin(run(
-                config,
-                commands,
-                worker_acknowledgments,
-                shutdown,
-                sink.clone(),
-                Arc::clone(&ready),
-            )),
-            SHUTDOWN_CLEANUP_TIMEOUT,
-        ) {
-            Ok(result) => result,
-            Err(panic) => std::panic::resume_unwind(panic),
-        }
-    }));
-
-    acknowledgments.close();
-    ready.store(false, Ordering::Release);
-    match result {
-        Ok(Ok(())) => {}
-        Ok(Err(error)) => sink.emit(Event::error(error, true)),
-        Err(_) => sink.emit(Event::error("The Signal backend panicked", true)),
-    }
-}
-
-async fn run(
-    config: Config,
-    commands: tokio_mpsc::Receiver<Command>,
-    acknowledgments: Arc<AcknowledgmentInbox>,
-    mut shutdown: watch::Receiver<bool>,
-    sink: EventSink,
-    ready: Arc<AtomicBool>,
-) -> Result<(), String> {
-    let Config {
-        store_path,
-        device_name,
-        passphrase,
-    } = config;
-    let avatar_cache = AvatarCache::new(Some(&store_path));
-    let Some(store) = open_encrypted_store(&store_path, passphrase, &mut shutdown).await? else {
-        return Ok(());
-    };
-    drop(store_path);
-
-    let Some(is_registered) = await_or_shutdown(store.is_registered(), &mut shutdown).await else {
-        return Ok(());
-    };
-    let manager = if is_registered {
-        let load = Manager::load_registered(store);
-        pin_mut!(load);
-        tokio::select! {
-            result = &mut load => {
-                result.map_err(|error| {
-                    format!("Could not load linked Signal device: {error}")
-                })?
-            }
-            _ = wait_for_shutdown(&mut shutdown) => return Ok(()),
-        }
-    } else {
-        match link_device(store, &device_name, &mut shutdown, &sink).await? {
-            Some(manager) => manager,
-            None => return Ok(()),
-        }
-    };
-
-    Box::pin(receive_and_command_loop(
-        manager,
-        commands,
-        acknowledgments,
-        shutdown,
-        sink,
-        ready,
-        avatar_cache,
-    ))
-    .await
-}
-
-async fn open_encrypted_store(
-    store_path: &str,
-    passphrase: StorePassphrase,
-    shutdown: &mut watch::Receiver<bool>,
-) -> Result<Option<SqliteStore>, String> {
-    let result = {
-        let open_store = SqliteStore::open_with_passphrase(
-            store_path,
-            Some(passphrase.as_str()),
-            OnNewIdentity::TrustUnverified,
-        );
-        await_or_shutdown(open_store, shutdown).await
-    };
-    drop(passphrase);
-
-    match result {
-        Some(Ok(store)) => Ok(Some(store)),
-        Some(Err(error)) => Err(format!("Could not open encrypted Signal store: {error}")),
-        None => Ok(None),
-    }
-}
-
-async fn wait_for_shutdown(shutdown: &mut watch::Receiver<bool>) {
-    if *shutdown.borrow() {
-        return;
-    }
-    let _ = shutdown.changed().await;
-}
-
-async fn await_or_shutdown<F>(future: F, shutdown: &mut watch::Receiver<bool>) -> Option<F::Output>
-where
-    F: Future,
-{
-    if *shutdown.borrow() {
-        return None;
-    }
-    pin_mut!(future);
-    tokio::select! {
-        biased;
-        _ = wait_for_shutdown(shutdown) => None,
-        output = &mut future => Some(output),
-    }
-}
-
-async fn finish_shutdown_cleanup<F>(future: F, timeout: Duration) -> bool
-where
-    F: Future<Output = ()>,
-{
-    tokio::time::timeout(timeout, future).await.is_ok()
-}
-
-fn shutdown_runtime(runtime: tokio::runtime::Runtime, timeout: Duration) {
-    runtime.shutdown_timeout(timeout);
-}
-
-fn run_local_future<F>(
-    runtime: tokio::runtime::Runtime,
-    local: tokio::task::LocalSet,
-    mut future: Pin<Box<F>>,
-    shutdown_timeout: Duration,
-) -> std::thread::Result<F::Output>
-where
-    F: Future + ?Sized,
-{
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        runtime.block_on(local.run_until(&mut future))
-    }));
-    drop(local);
-    shutdown_runtime(runtime, shutdown_timeout);
-    result
-}
-
-pub(crate) fn ensure_store_parent(store_path: &str) -> Result<(), String> {
-    let Some(parent) = Path::new(store_path).parent() else {
-        return Ok(());
-    };
-    if !parent.exists() {
-        std::fs::create_dir_all(parent)
-            .map_err(|error| format!("Could not create Signal store directory: {error}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-                .map_err(|error| format!("Could not secure Signal store directory: {error}"))?;
-        }
-    }
-    Ok(())
-}
-
-async fn link_device(
-    store: SqliteStore,
-    device_name: &str,
-    shutdown: &mut watch::Receiver<bool>,
-    sink: &EventSink,
-) -> Result<Option<Manager<SqliteStore, Registered>>, String> {
-    let (link_tx, link_rx) = oneshot::channel();
-    let link = Manager::link_secondary_device(
-        store,
-        SignalServers::Production,
-        device_name.to_owned(),
-        link_tx,
-    );
-    pin_mut!(link);
-
-    let qr_sink = sink.clone();
-    let qr = async move {
-        if let Ok(url) = link_rx.await {
-            let uri = url.to_string();
-            match qr_png(uri.as_bytes()) {
-                Ok(data) => qr_sink.emit(Event {
-                    kind: EVENT_LINK_QR,
-                    text: Some(uri),
-                    data,
-                    ..Event::default()
-                }),
-                Err(error) => qr_sink.emit(Event::error(
-                    format!("Could not render the linking QR code: {error}"),
-                    true,
-                )),
-            }
-        }
-    };
-    pin_mut!(qr);
-    let mut qr_finished = false;
-
-    loop {
-        tokio::select! {
-            result = &mut link => {
-                return result
-                    .map(Some)
-                    .map_err(|error| format!("Signal device linking failed: {error}"));
-            }
-            () = &mut qr, if !qr_finished => {
-                qr_finished = true;
-            }
-            _ = wait_for_shutdown(shutdown) => return Ok(None),
-        }
-    }
-}
-
-async fn receive_and_command_loop(
-    mut manager: Manager<SqliteStore, Registered>,
-    mut commands: tokio_mpsc::Receiver<Command>,
-    acknowledgments: Arc<AcknowledgmentInbox>,
-    mut shutdown: watch::Receiver<bool>,
-    sink: EventSink,
-    ready: Arc<AtomicBool>,
-    avatar_cache: AvatarCache,
-) -> Result<(), String> {
-    let repo = StorageRepository::new(manager.store().clone());
-    let Some(init_result) = await_or_shutdown(repo.initialize_subsystems(), &mut shutdown).await
-    else {
-        return Ok(());
-    };
-    init_result?;
-    let timestamps = MessageTimestampAllocator::default();
-    let mut projection = MessageProjection::new(Arc::clone(&acknowledgments));
-    let mut replay = MessageReplayQueue::default();
-    let mut deferred_commands = VecDeque::new();
-    let mut attachment_tasks = tokio::task::JoinSet::new();
-    let mut attachment_aborts = HashMap::new();
-    let mut receive_generation = 0u64;
-    let departed_groups = DepartedGroups::default();
-    let metadata_cache = MetadataCache::default();
-    let mut retry_tick = tokio::time::interval(std::time::Duration::from_secs(5));
-    retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut acknowledgment_retry_tick = tokio::time::interval(std::time::Duration::from_secs(5));
-    acknowledgment_retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    acknowledgment_retry_tick.reset();
-    let mut group_sync_retry_tick =
-        tokio::time::interval(std::time::Duration::from_secs(GROUP_SYNC_RETRY_SECS));
-    group_sync_retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    group_sync_retry_tick.reset();
-    let mut session = SessionState::default();
-
-    macro_rules! await_recovery_phase_or_stop {
-        ($phase:expr) => {
-            match await_or_shutdown($phase, &mut shutdown).await {
-                Some(output) => output,
-                None => {
-                    stop_attachments_and_drain_acknowledgments(
-                        &manager,
-                        &sink,
-                        &mut attachment_tasks,
-                        &mut attachment_aborts,
-                        &acknowledgments,
-                        &mut projection,
-                    )
-                    .await;
-                    return Ok(());
-                }
-            }
-        };
-    }
-
-    loop {
-        if session.is_recovering() {
-            if drain_recovery_commands(&mut commands, &mut deferred_commands) {
-                stop_attachments_and_drain_acknowledgments(
-                    &manager,
-                    &sink,
-                    &mut attachment_tasks,
-                    &mut attachment_aborts,
-                    &acknowledgments,
-                    &mut projection,
-                )
-                .await;
-                return Ok(());
-            }
-            let Some(delay) = session.next_recovery_delay() else {
-                let error = session
-                    .last_recovery_error()
-                    .unwrap_or("Signal message reception did not recover")
-                    .to_owned();
-                fail_deferred_commands(
-                    &sink,
-                    &mut deferred_commands,
-                    "Signal connection recovery was exhausted before the request could be sent",
-                );
-                sink.emit(Event {
-                    kind: EVENT_DISCONNECTED,
-                    text: Some(error),
-                    ..Event::default()
-                });
-                stop_attachments_and_drain_acknowledgments(
-                    &manager,
-                    &sink,
-                    &mut attachment_tasks,
-                    &mut attachment_aborts,
-                    &acknowledgments,
-                    &mut projection,
-                )
-                .await;
-                return Ok(());
-            };
-            if !delay.is_zero() {
-                let sleep = tokio::time::sleep(delay);
-                pin_mut!(sleep);
-                loop {
-                    tokio::select! {
-                        _ = &mut sleep => break,
-                        command = commands.recv() => {
-                            let Some(command) = command else {
-                                stop_attachments_and_drain_acknowledgments(
-                                    &manager,
-                                    &sink,
-                                    &mut attachment_tasks,
-                                    &mut attachment_aborts,
-                                    &acknowledgments,
-                                    &mut projection,
-                                ).await;
-                                return Ok(());
-                            };
-                            handle_recovery_command(command, &mut deferred_commands);
-                        }
-                        _ = acknowledgments.wait() => {
-                            await_recovery_phase_or_stop!(process_acknowledgments(
-                                &manager,
-                                &acknowledgments,
-                                &sink,
-                                &mut projection,
-                                true,
-                            ));
-                        }
-                        _ = acknowledgment_retry_tick.tick() => {
-                            acknowledgments.activate_retries();
-                        }
-                        completed = attachment_tasks.join_next(),
-                            if !attachment_tasks.is_empty() =>
-                        {
-                            if let Some(completed) = completed {
-                                await_recovery_phase_or_stop!(handle_attachment_completion(
-                                    &manager,
-                                    &sink,
-                                    &mut attachment_aborts,
-                                    completed,
-                                ));
-                            }
-                        }
-                        _ = wait_for_shutdown(&mut shutdown) => {
-                            stop_attachments_and_drain_acknowledgments(
-                                &manager,
-                                &sink,
-                                &mut attachment_tasks,
-                                &mut attachment_aborts,
-                                &acknowledgments,
-                                &mut projection,
-                            ).await;
-                            return Ok(());
-                        },
-                    }
-                }
-            }
-        }
-
-        // Keep Presage's stream scheduled independently. Its retained unfold
-        // future can own the sole SQLite connection while pending, so parking
-        // it while the actor awaits other store work would self-starve.
-        let (receive_started, mut messages, mut receive_task) =
-            spawn_receive_driver(manager.clone());
-        let mut receive_started = Box::pin(receive_started);
-
-        macro_rules! await_receive_start_phase_or_stop {
-            ($phase:expr) => {
-                match await_or_shutdown($phase, &mut shutdown).await {
-                    Some(output) => output,
-                    None => {
-                        stop_receive_driver(&mut receive_task).await;
-                        stop_attachments_and_drain_acknowledgments(
-                            &manager,
-                            &sink,
-                            &mut attachment_tasks,
-                            &mut attachment_aborts,
-                            &acknowledgments,
-                            &mut projection,
-                        )
-                        .await;
-                        return Ok(());
-                    }
-                }
-            };
-        }
-
-        let receive_started = loop {
-            tokio::select! {
-                result = &mut receive_started => {
-                    break result.unwrap_or_else(|_| {
-                        Err(ReceiveStartError {
-                            message: "Signal message reception stopped during startup".to_owned(),
-                            transient: true,
-                        })
-                    });
-                }
-                command = commands.recv(), if session.is_recovering() => {
-                    let Some(command) = command else {
-                        stop_receive_driver(&mut receive_task).await;
-                        stop_attachments_and_drain_acknowledgments(
-                            &manager,
-                            &sink,
-                            &mut attachment_tasks,
-                            &mut attachment_aborts,
-                            &acknowledgments,
-                            &mut projection,
-                        ).await;
-                        return Ok(());
-                    };
-                    handle_recovery_command(command, &mut deferred_commands);
-                }
-                _ = acknowledgments.wait() => {
-                    await_receive_start_phase_or_stop!(process_acknowledgments(
-                        &manager,
-                        &acknowledgments,
-                        &sink,
-                        &mut projection,
-                        true,
-                    ));
-                }
-                _ = acknowledgment_retry_tick.tick() => {
-                    acknowledgments.activate_retries();
-                }
-                completed = attachment_tasks.join_next(),
-                    if session.is_recovering() && !attachment_tasks.is_empty() =>
-                {
-                    if let Some(completed) = completed {
-                        await_receive_start_phase_or_stop!(handle_attachment_completion(
-                            &manager,
-                            &sink,
-                            &mut attachment_aborts,
-                            completed,
-                        ));
-                    }
-                }
-                _ = wait_for_shutdown(&mut shutdown) => {
-                    stop_receive_driver(&mut receive_task).await;
-                    stop_attachments_and_drain_acknowledgments(
-                        &manager,
-                        &sink,
-                        &mut attachment_tasks,
-                        &mut attachment_aborts,
-                        &acknowledgments,
-                        &mut projection,
-                    ).await;
-                    return Ok(());
-                },
-            }
-        };
-        if let Err(ReceiveStartError { message, transient }) = receive_started {
-            stop_receive_driver(&mut receive_task).await;
-            let error = message;
-            ready.store(false, Ordering::Release);
-            if !transient {
-                fail_deferred_commands(
-                    &sink,
-                    &mut deferred_commands,
-                    "Signal connection recovery stopped before the request could be sent",
-                );
-                stop_attachments_and_drain_acknowledgments(
-                    &manager,
-                    &sink,
-                    &mut attachment_tasks,
-                    &mut attachment_aborts,
-                    &acknowledgments,
-                    &mut projection,
-                )
-                .await;
-                return Err(error);
-            }
-            let transition = session.enter_recovery(error.clone());
-            if transition == RecoveryTransition::Entered {
-                sink.emit(Event {
-                    kind: EVENT_RECOVERING,
-                    ..Event::default()
-                });
-            }
-            let status = if session.recovery_has_remaining() {
-                "retrying automatically"
-            } else {
-                "automatic retries exhausted"
-            };
-            sink.emit(Event::transient_error(format!("{error}; {status}")));
-            continue;
-        }
-        receive_generation = receive_generation.wrapping_add(1).max(1);
-
-        // Keep background tasks completely unpolled until the first
-        // QueueEmpty path has finished its startup store work.
-        let (contact_sync_start, contact_sync_wait) = oneshot::channel();
-        let mut contact_sync_start = Some(contact_sync_start);
-        let contact_sync = tokio::task::spawn_local(request_contacts_after_queue_drain(
-            contact_sync_wait,
-            manager.clone(),
-            shutdown.clone(),
-            sink.clone(),
-        ));
-        let (avatar_fetch_start, avatar_fetch_wait) = oneshot::channel();
-        let mut avatar_fetch_start = Some(avatar_fetch_start);
-        let avatar_fetch = tokio::task::spawn_local(fetch_missing_avatars_after_queue_drain(
-            avatar_fetch_wait,
-            manager.clone(),
-            shutdown.clone(),
-            sink.clone(),
-            avatar_cache.clone(),
-            metadata_cache.clone(),
-        ));
-        let (group_sync_tx, mut group_sync_rx) = tokio_mpsc::channel(1);
-        let group_sync = spawn_group_sync(
-            manager.clone(),
-            sink.clone(),
-            departed_groups.clone(),
-            avatar_cache.clone(),
-            metadata_cache.clone(),
-            shutdown.clone(),
-            group_sync_tx.clone(),
-        );
-        let mut receive_tasks = ActiveReceiveTasks {
-            receive: receive_task,
-            contact_sync,
-            avatar_fetch,
-            group_sync: Some(group_sync),
-        };
-
-        macro_rules! await_phase_or_stop {
-            ($phase:expr) => {
-                match await_or_shutdown($phase, &mut shutdown).await {
-                    Some(output) => output,
-                    None => {
-                        stop_active_receive_loop(
-                            &mut receive_tasks,
-                            &manager,
-                            &sink,
-                            &mut attachment_tasks,
-                            &mut attachment_aborts,
-                            &acknowledgments,
-                            &mut projection,
-                        )
-                        .await;
-                        return Ok(());
-                    }
-                }
-            };
-        }
-
-        if !session.is_ready() {
-            await_phase_or_stop!(emit_account_identity(&mut manager, &sink));
-            await_phase_or_stop!(emit_contact_snapshot(
-                &manager,
-                &sink,
-                &avatar_cache,
-                &metadata_cache
-            ));
-            if let Err(error) = await_phase_or_stop!(emit_group_snapshot(
-                &manager,
-                &sink,
-                &departed_groups,
-                &avatar_cache,
-                &metadata_cache,
-            )) {
-                sink.emit(Event::transient_error(error));
-            }
-            await_phase_or_stop!(load_unprojected_messages(
-                &manager,
-                &sink,
-                &mut replay,
-                session.groups_authoritative(),
-            ));
-            await_phase_or_stop!(emit_identity_changes(&manager, &sink));
-            await_phase_or_stop!(retry_outbox(
-                &mut manager,
-                &sink,
-                &departed_groups,
-                session.groups_authoritative(),
-            ));
-            session.mark_ready();
-            projection.delivery_receipts.activate_retries();
-            ready.store(true, Ordering::Release);
-            sink.emit(Event {
-                kind: EVENT_READY,
-                ..Event::default()
-            });
-        }
-
-        let recovery_error = loop {
-            let session_ready = session.is_ready();
-            let groups_authoritative = session.groups_authoritative();
-            let groups_dirty = session.groups_dirty();
-            if groups_authoritative {
-                replay.activate_groups();
-            }
-            if projection.has_capacity()
-                && let Some(content) = replay.pop_ready()
-            {
-                await_phase_or_stop!(project_content(
-                    &mut manager,
-                    content,
-                    &sink,
-                    &mut projection,
-                    &departed_groups,
-                    groups_authoritative,
-                    &timestamps,
-                ));
-                continue;
-            }
-            if projection.delivery_receipt_tasks.is_empty()
-                && let Some(receipt) = projection.delivery_receipts.start_next(session_ready)
-            {
-                spawn_delivery_receipt_attempt(
-                    &mut projection.delivery_receipt_tasks,
-                    manager.clone(),
-                    receive_generation,
-                    receipt,
-                );
-            }
-            tokio::select! {
-                _ = acknowledgments.wait() => {
-                    await_phase_or_stop!(process_acknowledgments(
-                        &manager,
-                        &acknowledgments,
-                        &sink,
-                        &mut projection,
-                        true,
-                    ));
-                }
-                received = messages.recv(), if projection.has_capacity()
-                    && replay.can_accept_live_message() => {
-                    match received {
-                        Some(Received::QueueEmpty) => {
-                            if let Some(start) = contact_sync_start.take() {
-                                let _ = start.send(());
-                            }
-                            if let Some(start) = avatar_fetch_start.take() {
-                                let _ = start.send(());
-                            }
-                            if groups_dirty {
-                                match await_phase_or_stop!(emit_group_snapshot(
-                                    &manager,
-                                    &sink,
-                                    &departed_groups,
-                                    &avatar_cache,
-                                    &metadata_cache,
-                                )) {
-                                    Ok(()) => session.mark_groups_authoritative(),
-                                    Err(error) => {
-                                        session.mark_groups_pending();
-                                        group_sync_retry_tick.reset();
-                                        sink.emit(Event::transient_error(error));
-                                    }
-                                }
-                            }
-                        }
-                        Some(Received::Contacts) => {
-                            await_phase_or_stop!(emit_contact_snapshot(
-                                &manager,
-                                &sink,
-                                &avatar_cache,
-                                &metadata_cache,
-                            ));
-                        }
-                        Some(Received::Content(content)) => {
-                            session.note_group_content(content_has_group_context(&content.body));
-                            if session_ready {
-                                replay.push(*content, groups_authoritative);
-                                await_phase_or_stop!(emit_identity_changes(&manager, &sink));
-                            }
-                        }
-                        None => break "Signal's message stream ended unexpectedly".to_owned(),
-                    }
-                }
-                command = async {
-                    if session_ready
-                        && let Some(command) = deferred_commands.pop_front()
-                    {
-                        Some(command)
-                    } else {
-                        commands.recv().await
-                    }
-                } => {
-                    let Some(command) = command else {
-                        stop_active_receive_loop(
-                            &mut receive_tasks,
-                            &manager,
-                            &sink,
-                            &mut attachment_tasks,
-                            &mut attachment_aborts,
-                            &acknowledgments,
-                            &mut projection,
-                        ).await;
-                        return Ok(());
-                    };
-                    if !session_ready {
-                        handle_recovery_command(command, &mut deferred_commands);
-                        continue;
-                    }
-                    match command {
-                        Command::SendAttachment {
-                            request_id,
-                            recipient,
-                            filename,
-                            content_type,
-                            data,
-                            group,
-                            permit,
-                        } => {
-                            if permit.is_cancelled() {
-                                continue;
-                            }
-                            if group && !groups_authoritative {
-                                if permit.claim_terminal() {
-                                    sink.emit(Event::request_error(
-                                        request_id,
-                                        "Signal groups are temporarily unavailable until authoritative synchronization succeeds",
-                                    ));
-                                }
-                                continue;
-                            }
-                            let mut attachment_manager = manager.clone();
-                            let attachment_departed_groups = departed_groups.clone();
-                            let attachment_timestamps = timestamps.clone();
-                            let control = permit.control();
-                            let task = attachment_tasks.spawn_local(async move {
-                                attachment_task_result(
-                                    request_id,
-                                    permit,
-                                    upload_and_send_attachment(
-                                        &mut attachment_manager,
-                                        OutgoingAttachment {
-                                            recipient,
-                                            filename,
-                                            content_type,
-                                            data,
-                                            group,
-                                        },
-                                        &attachment_departed_groups,
-                                        &attachment_timestamps,
-                                    ),
-                                )
-                                .await
-                            });
-                            attachment_aborts.insert(
-                                request_id,
-                                AttachmentTaskControl { task, control },
-                            );
-                        }
-                        command => {
-                            if groups_authoritative
-                                && let Command::LeaveGroup { group_key, .. } = &command
-                            {
-                                departed_groups.begin_leave(group_key.clone());
-                            }
-                            if handle_command_interruptibly(
-                                &mut manager,
-                                command,
-                                &mut shutdown,
-                                &sink,
-                                &departed_groups,
-                                groups_authoritative,
-                                &timestamps,
-                            ).await {
-                                stop_active_receive_loop(
-                                    &mut receive_tasks,
-                                    &manager,
-                                    &sink,
-                                    &mut attachment_tasks,
-                                    &mut attachment_aborts,
-                                    &acknowledgments,
-                                    &mut projection,
-                                ).await;
-                                return Ok(());
-                            }
-                            await_phase_or_stop!(emit_identity_changes(&manager, &sink));
-                        }
-                    }
-                }
-                completed = attachment_tasks.join_next(), if !attachment_tasks.is_empty() => {
-                    if let Some(completed) = completed {
-                        await_phase_or_stop!(handle_attachment_completion(
-                            &manager,
-                            &sink,
-                            &mut attachment_aborts,
-                            completed,
-                        ));
-                    }
-                }
-                completed = projection.delivery_receipt_tasks.join_next(),
-                    if !projection.delivery_receipt_tasks.is_empty() =>
-                {
-                    let Some(completed) = completed else {
-                        unreachable!("a non-empty delivery receipt task set returned no task")
-                    };
-                    match completed {
-                        Ok(completion) => {
-                            let generation = completion.generation;
-                            if let Some(error) = finish_delivery_receipt_attempt(
-                                &mut projection.delivery_receipts,
-                                &sink,
-                                &completion,
-                            ) && generation == receive_generation {
-                                break error;
-                            }
-                        }
-                        Err(error) => {
-                            projection.delivery_receipts.release_in_flight();
-                            sink.emit(Event::error(
-                                format!(
-                                    "Signal delivery receipt worker stopped unexpectedly: {error}"
-                                ),
-                                false,
-                            ));
-                        }
-                    }
-                }
-                _ = retry_tick.tick(), if session_ready => {
-                    projection.delivery_receipts.activate_retries();
-                    await_phase_or_stop!(retry_outbox(
-                        &mut manager,
-                        &sink,
-                        &departed_groups,
-                        groups_authoritative,
-                    ));
-                }
-                _ = acknowledgment_retry_tick.tick() => {
-                    acknowledgments.activate_retries();
-                }
-                result = group_sync_rx.recv() => {
-                    let Some(result) = result else {
-                        continue;
-                    };
-                    receive_tasks.group_sync = None;
-                    match result {
-                        Ok(()) => {
-                            session.mark_groups_authoritative();
-                            replay.activate_groups();
-                            await_phase_or_stop!(retry_outbox(
-                                &mut manager,
-                                &sink,
-                                &departed_groups,
-                                true,
-                            ));
-                        }
-                        Err(error) => {
-                            session.mark_groups_pending();
-                            sink.emit(Event::transient_error(error));
-                            group_sync_retry_tick.reset();
-                        }
-                    }
-                }
-                _ = group_sync_retry_tick.tick(), if session_ready && !groups_authoritative && receive_tasks.group_sync.is_none() => {
-                    receive_tasks.group_sync = Some(spawn_group_sync(
-                        manager.clone(),
-                        sink.clone(),
-                        departed_groups.clone(),
-                        avatar_cache.clone(),
-                        metadata_cache.clone(),
-                        shutdown.clone(),
-                        group_sync_tx.clone(),
-                    ));
-                }
-                _ = wait_for_shutdown(&mut shutdown) => {
-                    stop_active_receive_loop(
-                        &mut receive_tasks,
-                        &manager,
-                        &sink,
-                        &mut attachment_tasks,
-                        &mut attachment_aborts,
-                        &acknowledgments,
-                        &mut projection,
-                    ).await;
-                    return Ok(());
-                },
-            }
-        };
-
-        ready.store(false, Ordering::Release);
-        let error = recovery_error;
-        let transition = session.enter_recovery(error.clone());
-        if transition == RecoveryTransition::Entered {
-            sink.emit(Event {
-                kind: EVENT_RECOVERING,
-                ..Event::default()
-            });
-        }
-        stop_receive_tasks(
-            &mut receive_tasks,
-            &manager,
-            &sink,
-            &mut attachment_tasks,
-            &mut attachment_aborts,
-            std::future::ready(()),
-        )
-        .await;
-        sink.emit(Event::transient_error(format!(
-            "{error}; reconnecting automatically"
-        )));
-    }
-}
-
-fn spawn_receive_driver(
-    mut manager: Manager<SqliteStore, Registered>,
-) -> (
-    oneshot::Receiver<Result<(), ReceiveStartError>>,
-    tokio_mpsc::Receiver<Received>,
-    tokio::task::JoinHandle<()>,
-) {
-    let (started_tx, started_rx) = oneshot::channel();
-    let (messages_tx, messages_rx) = tokio_mpsc::channel(RECEIVE_EVENT_QUEUE_CAPACITY);
-    let task = tokio::task::spawn_local(async move {
-        let messages = match manager.receive_messages().await {
-            Ok(messages) => messages,
-            Err(error) => {
-                let transient = receive_error_is_transient(&error);
-                let _ = started_tx.send(Err(ReceiveStartError {
-                    message: format!("Could not start Signal message reception: {error}"),
-                    transient,
-                }));
-                return;
-            }
-        };
-        if started_tx.send(Ok(())).is_err() {
-            return;
-        }
-        forward_stream_to_channel(messages, messages_tx).await;
-    });
-    (started_rx, messages_rx, task)
-}
-
-async fn forward_stream_to_channel<S, T>(stream: S, sender: tokio_mpsc::Sender<T>)
-where
-    S: futures::Stream<Item = T>,
-{
-    pin_mut!(stream);
-    while let Some(item) = stream.next().await {
-        if sender.send(item).await.is_err() {
-            return;
-        }
-    }
-}
-
-async fn stop_receive_driver(task: &mut tokio::task::JoinHandle<()>) {
-    task.abort();
-    let _ = task.await;
-}
-
-async fn run_after_start_signal<F>(start: oneshot::Receiver<()>, operation: F)
-where
-    F: Future<Output = ()>,
-{
-    if start.await.is_ok() {
-        operation.await;
-    }
-}
-
-async fn request_contacts_after_queue_drain(
+pub(crate) async fn request_contacts_after_queue_drain(
     start: oneshot::Receiver<()>,
     manager: Manager<SqliteStore, Registered>,
     shutdown: watch::Receiver<bool>,
     sink: EventSink,
 ) {
-    run_after_start_signal(
+    super::worker::run_after_start_signal(
         start,
         request_contacts_with_retries(manager, shutdown, sink),
     )
@@ -1764,7 +708,7 @@ async fn request_contacts_with_retries(
             let mut request = Box::pin(manager.request_contacts());
             tokio::select! {
                 result = &mut request => result,
-                _ = wait_for_shutdown(&mut shutdown) => return,
+                _ = super::worker::wait_for_shutdown(&mut shutdown) => return,
             }
         };
         match result {
@@ -1783,7 +727,7 @@ async fn request_contacts_with_retries(
                 if !delay.is_zero() {
                     tokio::select! {
                         _ = tokio::time::sleep(delay) => {}
-                        _ = wait_for_shutdown(&mut shutdown) => return,
+                        _ = super::worker::wait_for_shutdown(&mut shutdown) => return,
                     }
                 }
             }
@@ -1791,7 +735,7 @@ async fn request_contacts_with_retries(
     }
 }
 
-async fn fetch_missing_avatars_after_queue_drain(
+pub(crate) async fn fetch_missing_avatars_after_queue_drain(
     start: oneshot::Receiver<()>,
     manager: Manager<SqliteStore, Registered>,
     shutdown: watch::Receiver<bool>,
@@ -1799,7 +743,7 @@ async fn fetch_missing_avatars_after_queue_drain(
     avatar_cache: AvatarCache,
     metadata_cache: MetadataCache,
 ) {
-    run_after_start_signal(
+    super::worker::run_after_start_signal(
         start,
         fetch_missing_avatars(manager, shutdown, sink, avatar_cache, metadata_cache),
     )
@@ -1839,7 +783,7 @@ async fn fetch_missing_avatars(
                     let fetch = manager.retrieve_profile_avatar_by_uuid(contact.uuid, key);
                     let result = tokio::select! {
                         res = fetch => res,
-                        _ = wait_for_shutdown(&mut shutdown) => return,
+                        _ = super::worker::wait_for_shutdown(&mut shutdown) => return,
                     };
                     if let Ok(Some(avatar)) = result {
                         let (avatar_data, checksum) = avatar_cache.prepare_avatar(avatar);
@@ -1878,7 +822,7 @@ async fn fetch_missing_avatars(
                 let fetch = manager.retrieve_group_avatar(context);
                 let result = tokio::select! {
                     res = fetch => res,
-                    _ = wait_for_shutdown(&mut shutdown) => return,
+                    _ = super::worker::wait_for_shutdown(&mut shutdown) => return,
                 };
                 if let Ok(Some(avatar)) = result {
                     let (avatar_data, checksum) = avatar_cache.prepare_avatar(avatar);
@@ -1916,11 +860,11 @@ async fn synchronize_groups_task(
         result = sync => {
             let _ = result_tx.send(result).await;
         }
-        _ = wait_for_shutdown(&mut shutdown) => {}
+        _ = super::worker::wait_for_shutdown(&mut shutdown) => {}
     }
 }
 
-fn spawn_group_sync(
+pub(crate) fn spawn_group_sync(
     manager: Manager<SqliteStore, Registered>,
     sink: EventSink,
     departed_groups: DepartedGroups,
@@ -1940,7 +884,7 @@ fn spawn_group_sync(
     ))
 }
 
-async fn handle_attachment_completion(
+pub(crate) async fn handle_attachment_completion(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
     attachment_aborts: &mut HashMap<u64, AttachmentTaskControl>,
@@ -1951,7 +895,7 @@ async fn handle_attachment_completion(
     }
 }
 
-fn finish_attachment_completion(
+pub(crate) fn finish_attachment_completion(
     sink: &EventSink,
     attachment_aborts: &mut HashMap<u64, AttachmentTaskControl>,
     completed: Result<AttachmentCompletion, tokio::task::JoinError>,
@@ -1983,173 +927,23 @@ fn finish_attachment_completion(
     sent
 }
 
-enum AttachmentTaskResult {
+pub(crate) enum AttachmentTaskResult {
     Finished(Result<SentMessage, String>),
     Cancelled,
 }
 
-struct AttachmentTaskControl {
-    task: tokio::task::AbortHandle,
-    control: AttachmentControl,
+pub(crate) struct AttachmentTaskControl {
+    pub(crate) task: tokio::task::AbortHandle,
+    pub(crate) control: AttachmentControl,
 }
 
-struct AttachmentCompletion {
-    request_id: u64,
-    result: AttachmentTaskResult,
-    permit: AttachmentPermit,
+pub(crate) struct AttachmentCompletion {
+    pub(crate) request_id: u64,
+    pub(crate) result: AttachmentTaskResult,
+    pub(crate) permit: AttachmentPermit,
 }
 
-async fn attachment_task_result(
-    request_id: u64,
-    mut permit: AttachmentPermit,
-    task: impl Future<Output = Result<SentMessage, String>>,
-) -> AttachmentCompletion {
-    let cancellation = permit.take_cancellation_registration();
-    let task = std::panic::AssertUnwindSafe(task).catch_unwind();
-    let result = match Abortable::new(task, cancellation).await {
-        Ok(result) => {
-            let result = result
-                .unwrap_or_else(|_| Err("Signal attachment task failed unexpectedly".to_owned()));
-            if permit.claim_terminal() || result.is_ok() {
-                AttachmentTaskResult::Finished(result)
-            } else {
-                AttachmentTaskResult::Cancelled
-            }
-        }
-        Err(_) => AttachmentTaskResult::Cancelled,
-    };
-    AttachmentCompletion {
-        request_id,
-        result,
-        permit,
-    }
-}
-
-async fn abort_in_flight_attachments(
-    manager: &Manager<SqliteStore, Registered>,
-    sink: &EventSink,
-    attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
-    attachment_aborts: &mut HashMap<u64, AttachmentTaskControl>,
-) {
-    let completions = abort_and_drain_tasks(
-        attachment_tasks,
-        attachment_aborts.values().map(|control| &control.task),
-    )
-    .await;
-    let mut sent_messages = Vec::new();
-    for completed in completions {
-        if let Some(sent) = finish_attachment_completion(sink, attachment_aborts, completed) {
-            sent_messages.push(sent);
-        }
-    }
-    for sent in sent_messages {
-        mark_sent_message_projected_or_report(manager, &sent, sink).await;
-    }
-    interrupt_remaining_attachments(sink, attachment_aborts);
-}
-
-fn interrupt_remaining_attachments(
-    sink: &EventSink,
-    attachment_controls: &mut HashMap<u64, AttachmentTaskControl>,
-) {
-    for (request_id, control) in attachment_controls.drain() {
-        if let Some(event) = interrupted_attachment_event(request_id, &control.control) {
-            sink.emit(event);
-        }
-    }
-}
-
-fn abandon_timed_out_attachments(
-    sink: &EventSink,
-    attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
-    attachment_controls: &mut HashMap<u64, AttachmentTaskControl>,
-) {
-    let mut abandoned_tasks = std::mem::replace(attachment_tasks, tokio::task::JoinSet::new());
-    abandoned_tasks.abort_all();
-    drop(abandoned_tasks);
-    interrupt_remaining_attachments(sink, attachment_controls);
-}
-
-fn interrupted_attachment_event(request_id: u64, control: &AttachmentControl) -> Option<Event> {
-    if control.is_cancelled() {
-        None
-    } else {
-        let _ = control.claim_terminal();
-        Some(Event::request_error(
-            request_id,
-            "Signal connection was interrupted before the attachment completed",
-        ))
-    }
-}
-
-async fn abort_and_drain_tasks<T: Send + 'static>(
-    tasks: &mut tokio::task::JoinSet<T>,
-    aborts: impl Iterator<Item = &tokio::task::AbortHandle>,
-) -> Vec<Result<T, tokio::task::JoinError>> {
-    for abort in aborts {
-        abort.abort();
-    }
-    tasks.abort_all();
-    let mut completions = Vec::with_capacity(tasks.len());
-    while let Some(completed) = tasks.join_next().await {
-        completions.push(completed);
-    }
-    completions
-}
-
-fn deferred_command_failure(command: Command, message: &str) -> Option<Event> {
-    match command {
-        Command::LeaveGroup {
-            request_id,
-            group_key,
-        } => Some(Event::group_request_error(request_id, group_key, message)),
-        Command::SendMessage { request_id, .. }
-        | Command::SendGroupMessage { request_id, .. }
-        | Command::AcceptIdentity { request_id, .. }
-        | Command::DismissIdentity { request_id, .. }
-        | Command::ResetSession { request_id, .. } => {
-            Some(Event::request_error(request_id, message))
-        }
-        Command::SendAttachment {
-            request_id, permit, ..
-        } if permit.claim_terminal() => Some(Event::request_error(request_id, message)),
-        Command::SendAttachment { .. } => None,
-        Command::SetTyping { .. } => None,
-        Command::MarkRead { .. } => None,
-    }
-}
-
-fn fail_deferred_commands(sink: &EventSink, commands: &mut VecDeque<Command>, message: &str) {
-    while let Some(command) = commands.pop_front() {
-        if let Some(event) = deferred_command_failure(command, message) {
-            sink.emit(event);
-        }
-    }
-}
-
-fn handle_recovery_command(command: Command, deferred_commands: &mut VecDeque<Command>) {
-    match command {
-        Command::SetTyping { .. } => {}
-        command => {
-            deferred_commands.push_back(command);
-        }
-    }
-}
-
-fn drain_recovery_commands(
-    commands: &mut tokio_mpsc::Receiver<Command>,
-    deferred_commands: &mut VecDeque<Command>,
-) -> bool {
-    loop {
-        match commands.try_recv() {
-            Ok(command) => handle_recovery_command(command, deferred_commands),
-            Err(tokio_mpsc::error::TryRecvError::Empty) => return false,
-            Err(tokio_mpsc::error::TryRecvError::Disconnected) => return true,
-        }
-    }
-}
-
-async fn handle_command_interruptibly(
+pub(crate) async fn handle_command_interruptibly(
     manager: &mut Manager<SqliteStore, Registered>,
     command: Command,
     shutdown: &mut watch::Receiver<bool>,
@@ -2169,11 +963,11 @@ async fn handle_command_interruptibly(
 
     tokio::select! {
         () = &mut operation => false,
-        _ = wait_for_shutdown(shutdown) => true,
+        _ = super::worker::wait_for_shutdown(shutdown) => true,
     }
 }
 
-async fn emit_contact_snapshot(
+pub(crate) async fn emit_contact_snapshot(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
     avatar_cache: &AvatarCache,
@@ -2251,7 +1045,10 @@ fn account_identity_event(aci: Aci, profile_name: Option<String>) -> Event {
     }
 }
 
-async fn emit_account_identity(manager: &mut Manager<SqliteStore, Registered>, sink: &EventSink) {
+pub(crate) async fn emit_account_identity(
+    manager: &mut Manager<SqliteStore, Registered>,
+    sink: &EventSink,
+) {
     let local_aci = manager.registration_data().service_ids.aci();
     let profile_name = manager
         .retrieve_profile()
@@ -2263,7 +1060,7 @@ async fn emit_account_identity(manager: &mut Manager<SqliteStore, Registered>, s
     sink.emit(account_identity_event(local_aci, profile_name));
 }
 
-async fn emit_group_snapshot(
+pub(crate) async fn emit_group_snapshot(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
     departed_groups: &DepartedGroups,
@@ -2341,7 +1138,10 @@ async fn synchronize_and_emit_group_snapshot(
     emit_group_snapshot(manager, sink, departed_groups, avatar_cache, metadata_cache).await
 }
 
-async fn emit_identity_changes(manager: &Manager<SqliteStore, Registered>, sink: &EventSink) {
+pub(crate) async fn emit_identity_changes(
+    manager: &Manager<SqliteStore, Registered>,
+    sink: &EventSink,
+) {
     let repo = StorageRepository::new(manager.store().clone());
     match repo.identity_change_notices().await {
         Ok(changes) => {
@@ -2389,15 +1189,15 @@ pub(crate) async fn mark_sent_message_projected_or_report(
     }
 }
 
-struct OutgoingAttachment {
-    recipient: String,
-    filename: String,
-    content_type: String,
-    data: Vec<u8>,
-    group: bool,
+pub(crate) struct OutgoingAttachment {
+    pub(crate) recipient: String,
+    pub(crate) filename: String,
+    pub(crate) content_type: String,
+    pub(crate) data: Vec<u8>,
+    pub(crate) group: bool,
 }
 
-async fn upload_and_send_attachment(
+pub(crate) async fn upload_and_send_attachment(
     manager: &mut Manager<SqliteStore, Registered>,
     attachment: OutgoingAttachment,
     departed_groups: &DepartedGroups,
@@ -2495,7 +1295,7 @@ async fn upload_and_send_attachment(
     }
 }
 
-async fn load_unprojected_messages(
+pub(crate) async fn load_unprojected_messages(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
     replay: &mut MessageReplayQueue,
@@ -2518,89 +1318,6 @@ async fn load_unprojected_messages(
     };
 
     replay.replace(messages, groups_authoritative);
-}
-
-async fn stop_attachments_and_drain_acknowledgments(
-    manager: &Manager<SqliteStore, Registered>,
-    sink: &EventSink,
-    attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
-    attachment_controls: &mut HashMap<u64, AttachmentTaskControl>,
-    acknowledgments: &AcknowledgmentInbox,
-    projection: &mut MessageProjection,
-) {
-    acknowledgments.close();
-    let cleanup = async {
-        abort_delivery_receipt_tasks(
-            &mut projection.delivery_receipt_tasks,
-            &mut projection.delivery_receipts,
-        )
-        .await;
-        abort_in_flight_attachments(manager, sink, attachment_tasks, attachment_controls).await;
-        drain_acknowledgments(manager, acknowledgments, sink, projection).await;
-    };
-    if !finish_shutdown_cleanup(cleanup, SHUTDOWN_CLEANUP_TIMEOUT).await {
-        abandon_timed_out_attachments(sink, attachment_tasks, attachment_controls);
-    }
-}
-
-async fn stop_receive_tasks<F>(
-    tasks: &mut ActiveReceiveTasks,
-    manager: &Manager<SqliteStore, Registered>,
-    sink: &EventSink,
-    attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
-    attachment_controls: &mut HashMap<u64, AttachmentTaskControl>,
-    final_cleanup: F,
-) where
-    F: Future<Output = ()>,
-{
-    tasks.receive.abort();
-    tasks.contact_sync.abort();
-    tasks.avatar_fetch.abort();
-    if let Some(group_sync) = tasks.group_sync.as_mut() {
-        group_sync.abort();
-    }
-    let cleanup = async {
-        let _ = (&mut tasks.receive).await;
-        let _ = (&mut tasks.contact_sync).await;
-        let _ = (&mut tasks.avatar_fetch).await;
-        if let Some(group_sync) = tasks.group_sync.as_mut() {
-            let _ = group_sync.await;
-        }
-        abort_in_flight_attachments(manager, sink, attachment_tasks, attachment_controls).await;
-        final_cleanup.await;
-    };
-    if !finish_shutdown_cleanup(cleanup, SHUTDOWN_CLEANUP_TIMEOUT).await {
-        abandon_timed_out_attachments(sink, attachment_tasks, attachment_controls);
-    }
-}
-
-async fn stop_active_receive_loop(
-    tasks: &mut ActiveReceiveTasks,
-    manager: &Manager<SqliteStore, Registered>,
-    sink: &EventSink,
-    attachment_tasks: &mut tokio::task::JoinSet<AttachmentCompletion>,
-    attachment_controls: &mut HashMap<u64, AttachmentTaskControl>,
-    acknowledgments: &AcknowledgmentInbox,
-    projection: &mut MessageProjection,
-) {
-    acknowledgments.close();
-    let final_cleanup = async {
-        abort_delivery_receipt_tasks(
-            &mut projection.delivery_receipt_tasks,
-            &mut projection.delivery_receipts,
-        )
-        .await;
-        drain_acknowledgments(manager, acknowledgments, sink, projection).await;
-    };
-    stop_receive_tasks(
-        tasks,
-        manager,
-        sink,
-        attachment_tasks,
-        attachment_controls,
-        final_cleanup,
-    )
-    .await;
 }
 
 async fn handle_command(
@@ -3417,7 +2134,7 @@ pub(crate) fn wall_clock_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn qr_png(value: &[u8]) -> Result<Vec<u8>, String> {
+pub(crate) fn qr_png(value: &[u8]) -> Result<Vec<u8>, String> {
     const BORDER_MODULES: usize = 4;
     const SCALE: usize = 6;
 
@@ -3456,336 +2173,6 @@ fn qr_png(value: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    struct DropFlag(Arc<AtomicBool>);
-
-    impl Drop for DropFlag {
-        fn drop(&mut self) {
-            self.0.store(true, Ordering::Release);
-        }
-    }
-
-    struct TestDirectory(PathBuf);
-
-    impl TestDirectory {
-        fn new(label: &str) -> Self {
-            static NEXT_ID: AtomicU64 = AtomicU64::new(0);
-
-            loop {
-                let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-                let path = std::env::temp_dir()
-                    .join(format!("signal-purple-{label}-{}-{id}", std::process::id()));
-                match std::fs::create_dir(&path) {
-                    Ok(()) => return Self(path),
-                    Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
-                    Err(error) => panic!("could not create test directory: {error}"),
-                }
-            }
-        }
-
-        fn join(&self, path: &str) -> PathBuf {
-            self.0.join(path)
-        }
-    }
-
-    impl Drop for TestDirectory {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
-
-    #[test]
-    fn shutdown_boundary_returns_completed_phase_output() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
-
-            assert_eq!(
-                await_or_shutdown(async { 42 }, &mut shutdown_rx).await,
-                Some(42)
-            );
-        });
-    }
-
-    #[test]
-    fn shutdown_boundary_does_not_poll_after_shutdown() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-            let polled = Arc::new(AtomicBool::new(false));
-            let phase_polled = Arc::clone(&polled);
-            shutdown_tx.send(true).unwrap();
-
-            let outcome = await_or_shutdown(
-                async move {
-                    phase_polled.store(true, Ordering::Release);
-                    42
-                },
-                &mut shutdown_rx,
-            )
-            .await;
-
-            assert_eq!(outcome, None);
-            assert!(!polled.load(Ordering::Acquire));
-        });
-    }
-
-    #[test]
-    fn contact_sync_work_waits_for_the_queue_drain_signal() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (start_tx, start_rx) = oneshot::channel();
-            let polled = Arc::new(AtomicBool::new(false));
-            let operation_polled = Arc::clone(&polled);
-            let gated = run_after_start_signal(start_rx, async move {
-                operation_polled.store(true, Ordering::Release);
-            });
-            pin_mut!(gated);
-
-            assert!(
-                tokio::time::timeout(Duration::from_millis(10), gated.as_mut())
-                    .await
-                    .is_err()
-            );
-            assert!(!polled.load(Ordering::Acquire));
-
-            start_tx.send(()).unwrap();
-            tokio::time::timeout(Duration::from_secs(1), gated.as_mut())
-                .await
-                .expect("contact sync gate did not open");
-            assert!(polled.load(Ordering::Acquire));
-        });
-    }
-
-    #[test]
-    fn receive_forwarder_keeps_store_owner_scheduled_while_actor_waits() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let local = tokio::task::LocalSet::new();
-        runtime.block_on(local.run_until(async {
-            let store_slot = Arc::new(tokio::sync::Semaphore::new(1));
-            let stream_store_slot = Arc::clone(&store_slot);
-            let (stream_started_tx, stream_started_rx) = oneshot::channel();
-            let (release_stream_tx, release_stream_rx) = oneshot::channel();
-            let stream = futures::stream::once(async move {
-                let permit = stream_store_slot.acquire_owned().await.unwrap();
-                stream_started_tx.send(()).unwrap();
-                release_stream_rx.await.unwrap();
-                drop(permit);
-                42
-            });
-            let (messages_tx, mut messages_rx) = tokio_mpsc::channel(1);
-            let forwarder =
-                tokio::task::spawn_local(forward_stream_to_channel(stream, messages_tx));
-
-            stream_started_rx.await.unwrap();
-            let release = tokio::task::spawn_local(async move {
-                tokio::time::sleep(Duration::from_millis(10)).await;
-                release_stream_tx.send(()).unwrap();
-            });
-            let actor_permit = tokio::time::timeout(Duration::from_secs(1), store_slot.acquire())
-                .await
-                .expect("the independently polled receive stream retained the store slot")
-                .unwrap();
-            drop(actor_permit);
-
-            assert_eq!(messages_rx.recv().await, Some(42));
-            release.await.unwrap();
-            forwarder.await.unwrap();
-        }));
-    }
-
-    #[test]
-    fn shutdown_boundary_drops_a_pending_phase_promptly() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-            let (started_tx, started_rx) = oneshot::channel();
-            let dropped = Arc::new(AtomicBool::new(false));
-            let phase_dropped = Arc::clone(&dropped);
-            let phase = async move {
-                let _drop_flag = DropFlag(phase_dropped);
-                let _ = started_tx.send(());
-                std::future::pending::<()>().await;
-            };
-            let signal_shutdown = async move {
-                started_rx.await.expect("phase did not start");
-                shutdown_tx.send(true).expect("shutdown receiver closed");
-            };
-
-            let outcome = tokio::time::timeout(Duration::from_secs(1), async {
-                tokio::join!(await_or_shutdown(phase, &mut shutdown_rx), signal_shutdown).0
-            })
-            .await
-            .expect("shutdown boundary did not complete");
-
-            assert_eq!(outcome, None);
-            assert!(dropped.load(Ordering::Acquire));
-        });
-    }
-
-    #[test]
-    fn shutdown_cleanup_drops_work_after_its_deadline() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let dropped = Arc::new(AtomicBool::new(false));
-            let cleanup_dropped = Arc::clone(&dropped);
-            let cleanup = async move {
-                let _drop_flag = DropFlag(cleanup_dropped);
-                std::future::pending::<()>().await;
-            };
-
-            let completed = finish_shutdown_cleanup(cleanup, Duration::from_millis(10)).await;
-
-            assert!(!completed);
-            assert!(dropped.load(Ordering::Acquire));
-        });
-    }
-
-    #[test]
-    fn runtime_shutdown_stops_waiting_for_blocking_work_after_its_deadline() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
-        runtime.block_on(async {
-            let task = tokio::task::spawn_blocking(move || {
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                finished_tx.send(()).unwrap();
-            });
-            started_rx.recv().unwrap();
-            drop(task);
-        });
-
-        let started = std::time::Instant::now();
-        shutdown_runtime(runtime, Duration::from_millis(10));
-        assert!(started.elapsed() < Duration::from_secs(1));
-
-        release_tx.send(()).unwrap();
-        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    }
-
-    #[test]
-    fn runtime_shutdown_is_bounded_after_worker_panic() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let local = tokio::task::LocalSet::new();
-        let (started_tx, started_rx) = std::sync::mpsc::channel();
-        let (release_tx, release_rx) = std::sync::mpsc::channel();
-        let (finished_tx, finished_rx) = std::sync::mpsc::channel();
-        let future = async move {
-            let task = tokio::task::spawn_blocking(move || {
-                started_tx.send(()).unwrap();
-                release_rx.recv().unwrap();
-                finished_tx.send(()).unwrap();
-            });
-            started_rx.recv().unwrap();
-            drop(task);
-            panic!("test worker panic");
-        };
-
-        let started = std::time::Instant::now();
-        let result = run_local_future(runtime, local, Box::pin(future), Duration::from_millis(10));
-        assert!(result.is_err());
-        assert!(started.elapsed() < Duration::from_secs(1));
-
-        release_tx.send(()).unwrap();
-        finished_rx.recv_timeout(Duration::from_secs(1)).unwrap();
-    }
-
-    #[test]
-    fn encrypted_store_open_drops_passphrase_before_returning() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let directory = TestDirectory::new("credential-lifetime");
-        let store_path = directory.join("store.db3");
-        runtime.block_on(async {
-            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
-            let dropped = Arc::new(AtomicBool::new(false));
-            let mut passphrase = StorePassphrase::new("test-store-passphrase".to_owned());
-            passphrase.observe_drop(Arc::clone(&dropped));
-
-            let store =
-                open_encrypted_store(store_path.to_str().unwrap(), passphrase, &mut shutdown_rx)
-                    .await
-                    .unwrap()
-                    .expect("store opening was interrupted");
-
-            assert!(dropped.load(Ordering::Acquire));
-            drop(store);
-        });
-    }
-
-    #[test]
-    fn encrypted_store_shutdown_drops_passphrase_without_polling_open() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let (shutdown_tx, mut shutdown_rx) = watch::channel(false);
-            let dropped = Arc::new(AtomicBool::new(false));
-            let mut passphrase = StorePassphrase::new("test-store-passphrase".to_owned());
-            passphrase.observe_drop(Arc::clone(&dropped));
-            shutdown_tx.send(true).unwrap();
-
-            let store = open_encrypted_store("/not/polled", passphrase, &mut shutdown_rx)
-                .await
-                .unwrap();
-
-            assert!(store.is_none());
-            assert!(dropped.load(Ordering::Acquire));
-        });
-    }
-
-    #[test]
-    fn encrypted_store_error_drops_passphrase_before_returning() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let directory = TestDirectory::new("credential-error");
-        let store_path = directory.join("missing-parent").join("store.db3");
-        runtime.block_on(async {
-            let (_shutdown_tx, mut shutdown_rx) = watch::channel(false);
-            let dropped = Arc::new(AtomicBool::new(false));
-            let mut passphrase = StorePassphrase::new("test-store-passphrase".to_owned());
-            passphrase.observe_drop(Arc::clone(&dropped));
-
-            let result =
-                open_encrypted_store(store_path.to_str().unwrap(), passphrase, &mut shutdown_rx)
-                    .await;
-
-            assert!(result.is_err());
-            assert!(dropped.load(Ordering::Acquire));
-        });
-    }
 
     #[test]
     fn message_timestamps_advance_when_wall_clock_stalls() {
@@ -4253,324 +2640,6 @@ mod tests {
         // Remote group synchronization finishes again
         session.mark_groups_authoritative();
         assert!(session.groups_authoritative());
-    }
-
-    #[test]
-    fn preserves_completed_attachment_results_when_aborting_a_generation() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let mut tasks = tokio::task::JoinSet::new();
-            let mut aborts = HashMap::new();
-            let (completed_tx, completed_rx) = oneshot::channel();
-
-            let completed = tasks.spawn(async move {
-                let _ = completed_tx.send(());
-                (41, "sent")
-            });
-            aborts.insert(41, completed);
-            let pending = tasks.spawn(async {
-                futures::future::pending::<()>().await;
-                (42, "sent")
-            });
-            aborts.insert(42, pending);
-
-            completed_rx.await.unwrap();
-            let results = abort_and_drain_tasks(&mut tasks, aborts.values()).await;
-            let mut completed_ids = Vec::new();
-            let mut cancelled = 0;
-            for result in results {
-                match result {
-                    Ok((request_id, _)) => completed_ids.push(request_id),
-                    Err(error) if error.is_cancelled() => cancelled += 1,
-                    Err(error) => panic!("unexpected task failure: {error}"),
-                }
-            }
-
-            assert_eq!(completed_ids, [41]);
-            assert_eq!(cancelled, 1);
-        });
-    }
-
-    #[test]
-    fn attachment_task_panics_keep_the_request_identity() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let admission = AttachmentAdmission::for_test(1, 1);
-        let completed = runtime.block_on(async {
-            let mut tasks = tokio::task::JoinSet::new();
-            tasks.spawn(attachment_task_result(
-                41,
-                admission.try_reserve(41, 1).unwrap(),
-                async {
-                    panic!("test attachment panic");
-                },
-            ));
-            tasks.join_next().await.unwrap()
-        });
-        let Ok(AttachmentCompletion {
-            request_id, result, ..
-        }) = completed
-        else {
-            panic!("attachment panic escaped its task boundary");
-        };
-
-        assert_eq!(request_id, 41);
-        let AttachmentTaskResult::Finished(Err(error)) = result else {
-            panic!("panicking attachment task unexpectedly succeeded");
-        };
-        assert_eq!(error, "Signal attachment task failed unexpectedly");
-    }
-
-    #[test]
-    fn cancellation_overtakes_a_queued_attachment() {
-        let admission = AttachmentAdmission::for_test(1024, 1);
-        let mut commands = VecDeque::from([
-            Command::SendMessage {
-                request_id: 40,
-                recipient: "recipient".into(),
-                message: "message".into(),
-            },
-            Command::SendAttachment {
-                request_id: 41,
-                recipient: "recipient".into(),
-                filename: "attachment.txt".into(),
-                content_type: "text/plain".into(),
-                data: b"attachment".to_vec(),
-                group: false,
-                permit: admission.try_reserve(41, b"attachment".len()).unwrap(),
-            },
-        ]);
-
-        assert!(admission.cancel(41));
-        assert!(matches!(
-            commands.pop_front(),
-            Some(Command::SendMessage { request_id: 40, .. })
-        ));
-        let Some(Command::SendAttachment { permit, .. }) = commands.pop_front() else {
-            panic!("queued attachment was lost");
-        };
-        assert!(permit.is_cancelled());
-        drop(permit);
-        assert_eq!(admission.usage(), (0, 0));
-    }
-
-    #[test]
-    fn cancellation_stops_an_active_attachment_task_and_releases_admission() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        let admission = AttachmentAdmission::for_test(1024, 1);
-        let permit = admission.try_reserve(41, 10).unwrap();
-        let cancellation_admission = Arc::clone(&admission);
-        let (started_tx, started_rx) = oneshot::channel();
-        let polls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let task_polls = Arc::clone(&polls);
-
-        let (completion, ()) = runtime.block_on(async {
-            tokio::join!(
-                attachment_task_result(41, permit, {
-                    let mut started_tx = Some(started_tx);
-                    futures::future::poll_fn(move |_context| {
-                        task_polls.fetch_add(1, Ordering::Relaxed);
-                        if let Some(started_tx) = started_tx.take() {
-                            let _ = started_tx.send(());
-                        }
-                        std::task::Poll::<Result<SentMessage, String>>::Pending
-                    })
-                }),
-                async move {
-                    started_rx.await.unwrap();
-                    assert!(cancellation_admission.cancel(41));
-                },
-            )
-        });
-
-        assert!(matches!(completion.result, AttachmentTaskResult::Cancelled));
-        assert_eq!(polls.load(Ordering::Relaxed), 1);
-        assert_eq!(admission.usage(), (10, 1));
-        drop(completion);
-        assert_eq!(admission.usage(), (0, 0));
-    }
-
-    #[test]
-    fn recovery_reports_every_non_cancelled_unreported_attachment() {
-        let active_admission = AttachmentAdmission::for_test(2, 1);
-        let active = active_admission.try_reserve(41, 1).unwrap();
-        assert!(interrupted_attachment_event(41, &active.control()).is_some());
-
-        let cancelled_admission = AttachmentAdmission::for_test(2, 1);
-        let cancelled = cancelled_admission.try_reserve(42, 1).unwrap();
-        assert!(cancelled_admission.cancel(42));
-        assert!(interrupted_attachment_event(42, &cancelled.control()).is_none());
-
-        let terminal_admission = AttachmentAdmission::for_test(2, 1);
-        let terminal = terminal_admission.try_reserve(43, 1).unwrap();
-        assert!(terminal.claim_terminal());
-        assert!(interrupted_attachment_event(43, &terminal.control()).is_some());
-    }
-
-    #[test]
-    fn completed_attachment_reports_terminal_event_before_projection() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let admission = AttachmentAdmission::for_test(2, 1);
-            let permit = admission.try_reserve(41, 1).unwrap();
-            let control = permit.control();
-            assert!(permit.claim_terminal());
-            let mut tasks = tokio::task::JoinSet::new();
-            let task = tasks.spawn(std::future::pending::<()>());
-            let mut controls = HashMap::from([(41, AttachmentTaskControl { task, control })]);
-            let (sink, queue) = crate::event_queue::event_queue(1).unwrap();
-            let sent = finish_attachment_completion(
-                &sink,
-                &mut controls,
-                Ok(AttachmentCompletion {
-                    request_id: 41,
-                    result: AttachmentTaskResult::Finished(Ok(SentMessage {
-                        thread: Thread::Group([0; 32]),
-                        timestamp: 1,
-                    })),
-                    permit,
-                }),
-            );
-
-            assert!(sent.is_some());
-            assert!(controls.is_empty());
-            let crate::event_queue::EventPoll::Event(event) = queue.poll() else {
-                panic!("expected an attachment terminal event");
-            };
-            assert_eq!(event.kind, EVENT_ATTACHMENT_SENT);
-            assert_eq!(event.request_id, 41);
-
-            tasks.abort_all();
-            while tasks.join_next().await.is_some() {}
-        });
-    }
-
-    #[test]
-    fn timed_out_cleanup_discards_ready_terminal_completions() {
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .build()
-            .unwrap();
-        runtime.block_on(async {
-            let admission = AttachmentAdmission::for_test(2, 1);
-            let permit = admission.try_reserve(41, 1).unwrap();
-            let control = permit.control();
-            assert!(permit.claim_terminal());
-            let (ready_tx, ready_rx) = oneshot::channel();
-            let mut tasks = tokio::task::JoinSet::new();
-            let task = tasks.spawn(async move {
-                let _ = ready_tx.send(());
-                AttachmentCompletion {
-                    request_id: 41,
-                    result: AttachmentTaskResult::Finished(Ok(SentMessage {
-                        thread: Thread::Group([0; 32]),
-                        timestamp: 1,
-                    })),
-                    permit,
-                }
-            });
-            let mut controls = HashMap::from([(41, AttachmentTaskControl { task, control })]);
-            let (sink, queue) = crate::event_queue::event_queue(2).unwrap();
-            ready_rx.await.unwrap();
-            tokio::task::yield_now().await;
-
-            abandon_timed_out_attachments(&sink, &mut tasks, &mut controls);
-
-            assert!(tasks.is_empty());
-            assert!(controls.is_empty());
-            let crate::event_queue::EventPoll::Event(event) = queue.poll() else {
-                panic!("expected one attachment interruption event");
-            };
-            assert_eq!(event.kind, crate::event::EVENT_ERROR);
-            assert_eq!(event.request_id, 41);
-            assert!(matches!(queue.poll(), crate::event_queue::EventPoll::Empty));
-            assert!(tasks.join_next().await.is_none());
-        });
-    }
-
-    #[test]
-    fn deferred_failure_does_not_report_a_cancelled_attachment() {
-        let admission = AttachmentAdmission::for_test(16, 1);
-        let permit = admission.try_reserve(41, 1).unwrap();
-        assert!(admission.cancel(41));
-
-        assert!(
-            deferred_command_failure(
-                Command::SendAttachment {
-                    request_id: 41,
-                    recipient: "recipient".into(),
-                    filename: "attachment.txt".into(),
-                    content_type: "text/plain".into(),
-                    data: vec![1],
-                    group: false,
-                    permit,
-                },
-                "recovery stopped",
-            )
-            .is_none()
-        );
-    }
-
-    #[test]
-    fn fails_deferred_requests_but_drops_ephemeral_typing_and_read_receipts() {
-        let send = deferred_command_failure(
-            Command::SendGroupMessage {
-                request_id: 41,
-                group_key: "group".into(),
-                message: "message".into(),
-            },
-            "recovery stopped",
-        )
-        .unwrap();
-        let leave = deferred_command_failure(
-            Command::LeaveGroup {
-                request_id: 42,
-                group_key: "group".into(),
-            },
-            "recovery stopped",
-        )
-        .unwrap();
-        let typing = deferred_command_failure(
-            Command::SetTyping {
-                request_id: 43,
-                recipient: "recipient".into(),
-                typing: true,
-            },
-            "recovery stopped",
-        );
-        let read = deferred_command_failure(
-            Command::MarkRead {
-                request_id: 45,
-                recipient: "recipient".into(),
-                timestamp: 12345,
-            },
-            "recovery stopped",
-        );
-
-        let reset_session = deferred_command_failure(
-            Command::ResetSession {
-                request_id: 44,
-                recipient: "recipient".into(),
-            },
-            "recovery stopped",
-        )
-        .unwrap();
-
-        assert_eq!(send.request_id, 41);
-        assert_eq!(send.text.as_deref(), Some("recovery stopped"));
-        assert_eq!(leave.request_id, 42);
-        assert_eq!(leave.chat_id.as_deref(), Some("group"));
-        assert!(typing.is_none());
-        assert!(read.is_none());
-        assert_eq!(reset_session.request_id, 44);
-        assert_eq!(reset_session.text.as_deref(), Some("recovery stopped"));
     }
 
     #[test]
