@@ -263,6 +263,59 @@ impl AvatarCache {
     }
 }
 
+#[derive(Clone, Default)]
+pub(crate) struct MetadataCache {
+    group_revisions: Arc<Mutex<HashMap<[u8; 32], u32>>>,
+    contact_names: Arc<Mutex<HashMap<String, String>>>,
+}
+
+impl MetadataCache {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn get_group_revision(&self, master_key: &[u8; 32]) -> Option<u32> {
+        self.group_revisions.lock().ok()?.get(master_key).copied()
+    }
+
+    pub(crate) fn put_group_revision(&self, master_key: [u8; 32], revision: u32) {
+        if let Ok(mut guard) = self.group_revisions.lock() {
+            guard.insert(master_key, revision);
+        }
+    }
+
+    pub(crate) fn invalidate_group(&self, master_key: &[u8; 32]) {
+        if let Ok(mut guard) = self.group_revisions.lock() {
+            guard.remove(master_key);
+        }
+    }
+
+    pub(crate) fn get_contact_name(&self, peer_id: &str) -> Option<String> {
+        self.contact_names.lock().ok()?.get(peer_id).cloned()
+    }
+
+    pub(crate) fn put_contact_name(&self, peer_id: String, name: String) {
+        if let Ok(mut guard) = self.contact_names.lock() {
+            guard.insert(peer_id, name);
+        }
+    }
+
+    pub(crate) fn invalidate_contact(&self, peer_id: &str) {
+        if let Ok(mut guard) = self.contact_names.lock() {
+            guard.remove(peer_id);
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        if let Ok(mut guard) = self.group_revisions.lock() {
+            guard.clear();
+        }
+        if let Ok(mut guard) = self.contact_names.lock() {
+            guard.clear();
+        }
+    }
+}
+
 pub(crate) struct Config {
     pub(crate) store_path: String,
     pub(crate) device_name: String,
@@ -1425,6 +1478,7 @@ async fn receive_and_command_loop(
     let mut attachment_aborts = HashMap::new();
     let mut receive_generation = 0u64;
     let departed_groups = DepartedGroups::default();
+    let metadata_cache = MetadataCache::default();
     let mut retry_tick = tokio::time::interval(std::time::Duration::from_secs(5));
     retry_tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
     let mut acknowledgment_retry_tick = tokio::time::interval(std::time::Duration::from_secs(5));
@@ -1703,6 +1757,7 @@ async fn receive_and_command_loop(
             shutdown.clone(),
             sink.clone(),
             avatar_cache.clone(),
+            metadata_cache.clone(),
         ));
         let (group_sync_tx, mut group_sync_rx) = tokio_mpsc::channel(1);
         let group_sync = spawn_group_sync(
@@ -1710,6 +1765,7 @@ async fn receive_and_command_loop(
             sink.clone(),
             departed_groups.clone(),
             avatar_cache.clone(),
+            metadata_cache.clone(),
             shutdown.clone(),
             group_sync_tx.clone(),
         );
@@ -1743,12 +1799,13 @@ async fn receive_and_command_loop(
 
         if !session.is_ready() {
             await_phase_or_stop!(emit_account_identity(&mut manager, &sink));
-            await_phase_or_stop!(emit_contact_snapshot(&manager, &sink, &avatar_cache));
+            await_phase_or_stop!(emit_contact_snapshot(&manager, &sink, &avatar_cache, &metadata_cache));
             if let Err(error) = await_phase_or_stop!(emit_group_snapshot(
                 &manager,
                 &sink,
                 &departed_groups,
                 &avatar_cache,
+                &metadata_cache,
             )) {
                 sink.emit(Event::transient_error(error));
             }
@@ -1831,6 +1888,7 @@ async fn receive_and_command_loop(
                                     &sink,
                                     &departed_groups,
                                     &avatar_cache,
+                                    &metadata_cache,
                                 )) {
                                     Ok(()) => session.mark_groups_authoritative(),
                                     Err(error) => {
@@ -1842,7 +1900,12 @@ async fn receive_and_command_loop(
                             }
                         }
                         Some(Received::Contacts) => {
-                            await_phase_or_stop!(emit_contact_snapshot(&manager, &sink, &avatar_cache));
+                            await_phase_or_stop!(emit_contact_snapshot(
+                                &manager,
+                                &sink,
+                                &avatar_cache,
+                                &metadata_cache,
+                            ));
                         }
                         Some(Received::Content(content)) => {
                             session.note_group_content(content_has_group_context(&content.body));
@@ -2038,6 +2101,7 @@ async fn receive_and_command_loop(
                         sink.clone(),
                         departed_groups.clone(),
                         avatar_cache.clone(),
+                        metadata_cache.clone(),
                         shutdown.clone(),
                         group_sync_tx.clone(),
                     ));
@@ -2194,10 +2258,11 @@ async fn fetch_missing_avatars_after_queue_drain(
     shutdown: watch::Receiver<bool>,
     sink: EventSink,
     avatar_cache: AvatarCache,
+    metadata_cache: MetadataCache,
 ) {
     run_after_start_signal(
         start,
-        fetch_missing_avatars(manager, shutdown, sink, avatar_cache),
+        fetch_missing_avatars(manager, shutdown, sink, avatar_cache, metadata_cache),
     )
     .await;
 }
@@ -2207,6 +2272,7 @@ async fn fetch_missing_avatars(
     mut shutdown: watch::Receiver<bool>,
     sink: EventSink,
     avatar_cache: AvatarCache,
+    metadata_cache: MetadataCache,
 ) {
     if let Ok(contacts) = manager.store().contacts().await
         && let Ok(contacts) = contacts.collect::<Result<Vec<_>, _>>()
@@ -2265,6 +2331,7 @@ async fn fetch_missing_avatars(
             if !group_contains_local_aci(&group, &local_aci) || group.avatar.is_empty() {
                 continue;
             }
+            metadata_cache.put_group_revision(key, group.revision);
             let is_cached = manager
                 .store()
                 .group_avatar(key)
@@ -2273,9 +2340,12 @@ async fn fetch_missing_avatars(
                 .flatten()
                 .is_some();
             if !is_cached {
+                let revision = metadata_cache
+                    .get_group_revision(&key)
+                    .unwrap_or(group.revision);
                 let context = GroupContextV2 {
                     master_key: Some(key.to_vec()),
-                    revision: Some(group.revision),
+                    revision: Some(revision),
                     ..Default::default()
                 };
                 let fetch = manager.retrieve_group_avatar(context);
@@ -2304,11 +2374,12 @@ async fn synchronize_groups_task(
     sink: EventSink,
     departed_groups: DepartedGroups,
     avatar_cache: AvatarCache,
+    metadata_cache: MetadataCache,
     mut shutdown: watch::Receiver<bool>,
     result_tx: tokio_mpsc::Sender<Result<(), String>>,
 ) {
     let sync =
-        synchronize_and_emit_group_snapshot(&mut manager, &sink, &departed_groups, &avatar_cache);
+        synchronize_and_emit_group_snapshot(&mut manager, &sink, &departed_groups, &avatar_cache, &metadata_cache);
     tokio::select! {
         result = sync => {
             let _ = result_tx.send(result).await;
@@ -2322,6 +2393,7 @@ fn spawn_group_sync(
     sink: EventSink,
     departed_groups: DepartedGroups,
     avatar_cache: AvatarCache,
+    metadata_cache: MetadataCache,
     shutdown: watch::Receiver<bool>,
     result_tx: tokio_mpsc::Sender<Result<(), String>>,
 ) -> tokio::task::JoinHandle<()> {
@@ -2330,6 +2402,7 @@ fn spawn_group_sync(
         sink,
         departed_groups,
         avatar_cache,
+        metadata_cache,
         shutdown,
         result_tx,
     ))
@@ -2572,6 +2645,7 @@ async fn emit_contact_snapshot(
     manager: &Manager<SqliteStore, Registered>,
     sink: &EventSink,
     avatar_cache: &AvatarCache,
+    metadata_cache: &MetadataCache,
 ) {
     match manager.store().contacts().await {
         Ok(contacts) => match contacts.collect::<Result<Vec<_>, _>>() {
@@ -2585,10 +2659,16 @@ async fn emit_contact_snapshot(
                         tokio::task::yield_now().await;
                     }
                     let peer = ServiceId::Aci(contact.uuid.into()).service_id_string();
+                    let contact_title = if !contact.name.is_empty() {
+                        metadata_cache.put_contact_name(peer.clone(), contact.name.clone());
+                        Some(contact.name)
+                    } else {
+                        metadata_cache.get_contact_name(&peer)
+                    };
                     sink.emit(Event {
                         kind: EVENT_CONTACT,
                         peer_id: Some(peer.clone()),
-                        title: (!contact.name.is_empty()).then_some(contact.name),
+                        title: contact_title,
                         text: contact.phone_number.map(|number| number.to_string()),
                         ..Event::default()
                     });
@@ -2671,6 +2751,7 @@ async fn emit_group_snapshot(
     sink: &EventSink,
     departed_groups: &DepartedGroups,
     avatar_cache: &AvatarCache,
+    metadata_cache: &MetadataCache,
 ) -> Result<(), String> {
     let groups = manager
         .store()
@@ -2694,6 +2775,7 @@ async fn emit_group_snapshot(
         if departed_groups.contains(&chat_id) || !group_contains_local_aci(&group, &local_aci) {
             continue;
         }
+        metadata_cache.put_group_revision(key, group.revision);
         sink.emit(Event {
             kind: EVENT_GROUP,
             chat_id: Some(chat_id.clone()),
@@ -2738,12 +2820,13 @@ async fn synchronize_and_emit_group_snapshot(
     sink: &EventSink,
     departed_groups: &DepartedGroups,
     avatar_cache: &AvatarCache,
+    metadata_cache: &MetadataCache,
 ) -> Result<(), String> {
     manager
         .synchronize_storage_groups()
         .await
         .map_err(|error| format!("Could not synchronize Signal groups: {error}"))?;
-    emit_group_snapshot(manager, sink, departed_groups, avatar_cache).await
+    emit_group_snapshot(manager, sink, departed_groups, avatar_cache, metadata_cache).await
 }
 
 async fn emit_identity_changes(manager: &Manager<SqliteStore, Registered>, sink: &EventSink) {
@@ -6615,5 +6698,31 @@ mod tests {
         let (processed, checksum) = cache.prepare_avatar(corrupt_data.clone());
         assert_eq!(processed, corrupt_data);
         assert_eq!(checksum, hex::encode(Sha256::digest(&corrupt_data)));
+    }
+
+    #[test]
+    fn metadata_cache_caches_and_invalidates_group_revisions_and_contacts() {
+        let cache = MetadataCache::new();
+        let key = [42u8; 32];
+        assert_eq!(cache.get_group_revision(&key), None);
+        cache.put_group_revision(key, 5);
+        assert_eq!(cache.get_group_revision(&key), Some(5));
+
+        cache.invalidate_group(&key);
+        assert_eq!(cache.get_group_revision(&key), None);
+
+        let peer = "00000000-0000-0000-0000-000000000001";
+        assert_eq!(cache.get_contact_name(peer), None);
+        cache.put_contact_name(peer.to_string(), "Alice".to_string());
+        assert_eq!(cache.get_contact_name(peer), Some("Alice".to_string()));
+
+        cache.invalidate_contact(peer);
+        assert_eq!(cache.get_contact_name(peer), None);
+
+        cache.put_group_revision(key, 12);
+        cache.put_contact_name(peer.to_string(), "Bob".to_string());
+        cache.clear();
+        assert_eq!(cache.get_group_revision(&key), None);
+        assert_eq!(cache.get_contact_name(peer), None);
     }
 }
