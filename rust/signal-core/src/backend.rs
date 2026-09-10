@@ -15,7 +15,7 @@ use presage::libsignal_service::content::{
     Content, ContentBody, DataMessage, GroupContextV2, ServiceError,
 };
 use presage::libsignal_service::groups_v2::Role;
-use presage::libsignal_service::protocol::{Aci, ServiceId};
+use presage::libsignal_service::protocol::{Aci, ServiceId, SignalProtocolError};
 use presage::libsignal_service::sender::{AttachmentSpec, MessageSenderError};
 use presage::libsignal_service::zkgroup::profiles::ProfileKey;
 use presage::model::groups::Group;
@@ -1002,6 +1002,36 @@ fn websocket_error_is_transient(error: &reqwest_websocket::Error) -> bool {
     }
 }
 
+fn signal_protocol_error_is_transient(error: &SignalProtocolError) -> bool {
+    match error {
+        SignalProtocolError::InvalidState(scope, message) => {
+            (*scope == "sqlite" || *scope == "presage sqlite store error")
+                && (message.contains("pool timed out")
+                    || message.contains("timed out")
+                    || message.contains("locked")
+                    || message.contains("busy"))
+        }
+        _ => false,
+    }
+}
+
+fn sqlite_store_error_is_transient(error: &presage_store_sqlite::SqliteStoreError) -> bool {
+    match error {
+        presage_store_sqlite::SqliteStoreError::Db(db_error) => {
+            let message = db_error.to_string();
+            message.contains("pool timed out")
+                || message.contains("timed out")
+                || message.contains("locked")
+                || message.contains("busy")
+        }
+        presage_store_sqlite::SqliteStoreError::Io(_) => true,
+        presage_store_sqlite::SqliteStoreError::Protocol(error) => {
+            signal_protocol_error_is_transient(error)
+        }
+        _ => false,
+    }
+}
+
 fn service_error_is_transient(error: &ServiceError) -> bool {
     match error {
         ServiceError::Timeout { .. }
@@ -1020,6 +1050,15 @@ fn service_error_is_transient(error: &ServiceError) -> bool {
                     .status()
                     .is_some_and(|status| retryable_http_status(status.as_u16()))
         }
+        ServiceError::SignalProtocolError(error) => signal_protocol_error_is_transient(error),
+        _ => false,
+    }
+}
+
+fn message_sender_error_is_transient(error: &MessageSenderError) -> bool {
+    match error {
+        MessageSenderError::ServiceError(error) => service_error_is_transient(error),
+        MessageSenderError::ProtocolError(error) => signal_protocol_error_is_transient(error),
         _ => false,
     }
 }
@@ -1033,9 +1072,10 @@ fn receive_error_is_transient(
         | presage::Error::MessagePipeInterruptedError => true,
         presage::Error::ServiceError(error) => service_error_is_transient(error),
         presage::Error::MessageSenderError(error) => {
-            matches!(error.as_ref(), MessageSenderError::ServiceError(error)
-                if service_error_is_transient(error))
+            message_sender_error_is_transient(error.as_ref())
         }
+        presage::Error::ProtocolError(error) => signal_protocol_error_is_transient(error),
+        presage::Error::Store(error) => sqlite_store_error_is_transient(error),
         _ => false,
     }
 }
@@ -2141,6 +2181,7 @@ async fn fetch_missing_avatars(
         && let Ok(contacts) = contacts.collect::<Result<Vec<_>, _>>()
     {
         for contact in contacts {
+            tokio::task::yield_now().await;
             let profile_key = if contact.profile_key.len() == 32 {
                 let mut key_bytes = [0u8; 32];
                 key_bytes.copy_from_slice(&contact.profile_key);
@@ -2189,6 +2230,7 @@ async fn fetch_missing_avatars(
     {
         let local_aci = manager.registration_data().service_ids.aci();
         for (key, group) in groups {
+            tokio::task::yield_now().await;
             if !group_contains_local_aci(&group, &local_aci) || group.avatar.is_empty() {
                 continue;
             }
@@ -2559,10 +2601,16 @@ async fn emit_contact_snapshot(
                 false,
             )),
         },
-        Err(error) => sink.emit(Event::error(
-            format!("Could not read synchronized Signal contacts: {error}"),
-            false,
-        )),
+        Err(error) => {
+            if sqlite_store_error_is_transient(&error) {
+                tracing::warn!(%error, "Transient store contention reading synchronized Signal contacts; deferring");
+            } else {
+                sink.emit(Event::error(
+                    format!("Could not read synchronized Signal contacts: {error}"),
+                    false,
+                ));
+            }
+        }
     }
 }
 
@@ -2682,10 +2730,16 @@ async fn emit_identity_changes(manager: &Manager<SqliteStore, Registered>, sink:
                 });
             }
         }
-        Err(error) => sink.emit(Event::error(
-            format!("Could not read Signal identity changes: {error}"),
-            false,
-        )),
+        Err(error) => {
+            if sqlite_store_error_is_transient(&error) {
+                tracing::warn!(%error, "Transient store contention reading Signal identity changes; deferring");
+            } else {
+                sink.emit(Event::error(
+                    format!("Could not read Signal identity changes: {error}"),
+                    false,
+                ));
+            }
+        }
     }
 }
 
@@ -2824,10 +2878,14 @@ async fn retry_outbox(
     let messages = match manager.store().due_client_messages(wall_clock_ms()).await {
         Ok(messages) => messages,
         Err(error) => {
-            sink.emit(Event::error(
-                format!("Could not read the encrypted Signal outbox: {error}"),
-                false,
-            ));
+            if sqlite_store_error_is_transient(&error) {
+                tracing::warn!(%error, "Transient store contention reading encrypted Signal outbox; deferring");
+            } else {
+                sink.emit(Event::error(
+                    format!("Could not read the encrypted Signal outbox: {error}"),
+                    false,
+                ));
+            }
             return;
         }
     };
@@ -3016,10 +3074,14 @@ async fn load_unprojected_messages(
     {
         Ok(messages) => messages,
         Err(error) => {
-            sink.emit(Event::error(
-                format!("Could not read pending Signal messages: {error}"),
-                false,
-            ));
+            if sqlite_store_error_is_transient(&error) {
+                tracing::warn!(%error, "Transient store contention reading pending Signal messages; deferring");
+            } else {
+                sink.emit(Event::error(
+                    format!("Could not read pending Signal messages: {error}"),
+                    false,
+                ));
+            }
             return;
         }
     };
@@ -3072,10 +3134,14 @@ async fn project_content(
         }
         Err(error) => {
             projection.release(delivery_id);
-            sink.emit(Event::error(
-                format!("Could not record a handled Signal message: {error}"),
-                false,
-            ));
+            if sqlite_store_error_is_transient(&error) {
+                tracing::warn!(%error, "Transient store contention recording handled Signal message; releasing for replay");
+            } else {
+                sink.emit(Event::error(
+                    format!("Could not record a handled Signal message: {error}"),
+                    false,
+                ));
+            }
         }
     }
 }
@@ -3126,10 +3192,14 @@ async fn acknowledge_message(
             true
         }
         Err(error) => {
-            sink.emit(Event::error(
-                format!("Could not acknowledge a displayed Signal message: {error}"),
-                false,
-            ));
+            if sqlite_store_error_is_transient(&error) {
+                tracing::warn!(%error, "Transient store contention acknowledging displayed Signal message; will retry");
+            } else {
+                sink.emit(Event::error(
+                    format!("Could not acknowledge a displayed Signal message: {error}"),
+                    false,
+                ));
+            }
             false
         }
     }
@@ -6074,6 +6144,56 @@ mod tests {
         assert!(!receive_error_is_transient(&unauthorized));
         assert!(!receive_error_is_transient(&websocket_unauthorized));
         assert!(!receive_error_is_transient(&relink));
+    }
+
+    #[test]
+    fn retries_sqlite_store_and_protocol_pool_timeout_failures() {
+        let pool_timeout_protocol = || {
+            SignalProtocolError::InvalidState(
+                "sqlite",
+                "pool timed out while waiting for an open connection".into(),
+            )
+        };
+        let sender_pool_timeout_service =
+            presage::Error::<presage_store_sqlite::SqliteStoreError>::MessageSenderError(Box::new(
+                MessageSenderError::ServiceError(ServiceError::SignalProtocolError(
+                    pool_timeout_protocol(),
+                )),
+            ));
+        let sender_pool_timeout_proto =
+            presage::Error::<presage_store_sqlite::SqliteStoreError>::MessageSenderError(Box::new(
+                MessageSenderError::ProtocolError(pool_timeout_protocol()),
+            ));
+        let store_pool_timeout =
+            presage::Error::<presage_store_sqlite::SqliteStoreError>::ProtocolError(
+                pool_timeout_protocol(),
+            );
+        let permanent_protocol =
+            presage::Error::<presage_store_sqlite::SqliteStoreError>::ProtocolError(
+                SignalProtocolError::InvalidProtobufEncoding,
+            );
+
+        assert!(receive_error_is_transient(&sender_pool_timeout_service));
+        assert!(receive_error_is_transient(&sender_pool_timeout_proto));
+        assert!(receive_error_is_transient(&store_pool_timeout));
+        assert!(!receive_error_is_transient(&permanent_protocol));
+
+        assert_eq!(
+            delivery_receipt_failure_action(&sender_pool_timeout_service),
+            DeliveryReceiptFailureAction::Retry
+        );
+        assert_eq!(
+            delivery_receipt_failure_action(&sender_pool_timeout_proto),
+            DeliveryReceiptFailureAction::Retry
+        );
+        assert_eq!(
+            delivery_receipt_failure_action(&store_pool_timeout),
+            DeliveryReceiptFailureAction::Retry
+        );
+        assert_eq!(
+            delivery_receipt_failure_action(&permanent_protocol),
+            DeliveryReceiptFailureAction::Discard
+        );
     }
 
     #[test]
