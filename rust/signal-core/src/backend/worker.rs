@@ -41,7 +41,7 @@ use crate::acknowledgment::AcknowledgmentInbox;
 #[cfg(test)]
 use crate::attachment::AttachmentPayload;
 use crate::attachment::AttachmentPermit;
-use crate::event::{EVENT_DISCONNECTED, EVENT_LINK_QR, EVENT_READY, EVENT_RECOVERING, Event};
+use crate::event::{EVENT_LINK_QR, EVENT_READY, EVENT_RECOVERING, Event};
 use crate::event_queue::EventSink;
 use crate::store::StorageRepository;
 
@@ -312,9 +312,13 @@ impl ConnectionSession {
 
     /// Runs while `session.is_recovering()`: drains deferred commands, then
     /// waits out the backoff delay while still servicing acks and attachment
-    /// completions. `Break` means the worker should exit outright (recovery
-    /// exhausted, shutdown, or the command channel closed); `Continue` means
-    /// recovery is no longer in effect and the caller should (re)connect.
+    /// completions. `Break` means the worker should exit outright (shutdown,
+    /// or the command channel closed); `Continue` means recovery is no longer
+    /// in effect and the caller should (re)connect. There is no exhaustion
+    /// path here: `next_recovery_delay` keeps retrying indefinitely for as
+    /// long as the underlying error stays transient (see its doc comment) -
+    /// a permanent give-up only happens earlier, for errors already
+    /// classified non-transient.
     async fn wait_out_recovery(&mut self) -> ControlFlow<Result<(), String>> {
         if !self.session.is_recovering() {
             return ControlFlow::Continue(());
@@ -323,25 +327,7 @@ impl ConnectionSession {
             self.stop_and_drain().await;
             return ControlFlow::Break(Ok(()));
         }
-        let Some(delay) = self.session.next_recovery_delay() else {
-            let error = self
-                .session
-                .last_recovery_error()
-                .unwrap_or("Signal message reception did not recover")
-                .to_owned();
-            fail_deferred_commands(
-                &self.sink,
-                &mut self.deferred_commands,
-                "Signal connection recovery was exhausted before the request could be sent",
-            );
-            self.sink.emit(Event {
-                kind: EVENT_DISCONNECTED,
-                text: Some(error),
-                ..Event::default()
-            });
-            self.stop_and_drain().await;
-            return ControlFlow::Break(Ok(()));
-        };
+        let delay = self.session.next_recovery_delay();
         if delay.is_zero() {
             return ControlFlow::Continue(());
         }
@@ -862,13 +848,9 @@ impl ConnectionSession {
                         ..Event::default()
                     });
                 }
-                let status = if self.session.recovery_has_remaining() {
-                    "retrying automatically"
-                } else {
-                    "automatic retries exhausted"
-                };
-                self.sink
-                    .emit(Event::transient_error(format!("{error}; {status}")));
+                self.sink.emit(Event::transient_error(format!(
+                    "{error}; retrying automatically"
+                )));
                 continue;
             }
             self.receive_generation = self.receive_generation.wrapping_add(1).max(1);

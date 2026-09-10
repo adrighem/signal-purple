@@ -407,18 +407,21 @@ fn group_leave_completion_events(
 }
 
 impl RecoveryBackoff {
-    fn next_delay(&mut self) -> Option<Duration> {
-        let seconds = *RECOVERY_RETRY_DELAYS_SECS.get(self.next_delay)?;
-        self.next_delay += 1;
-        Some(Duration::from_secs(seconds))
+    /// Returns the next backoff delay. Once the fixed table is exhausted this
+    /// keeps repeating its last (longest) entry indefinitely rather than
+    /// signalling exhaustion: reconnection is retried for as long as the
+    /// underlying error stays transient, since a network outage or a laptop
+    /// suspend can easily outlast a fixed handful of retries, and giving up
+    /// permanently there would force the user into a full manual reconnect
+    /// for what is, from the account's perspective, just a slow network.
+    fn next_delay(&mut self) -> Duration {
+        let index = self.next_delay.min(RECOVERY_RETRY_DELAYS_SECS.len() - 1);
+        self.next_delay = self.next_delay.saturating_add(1);
+        Duration::from_secs(RECOVERY_RETRY_DELAYS_SECS[index])
     }
 
     fn reset(&mut self) {
         self.next_delay = 0;
-    }
-
-    fn has_remaining(&self) -> bool {
-        self.next_delay < RECOVERY_RETRY_DELAYS_SECS.len()
     }
 }
 
@@ -474,15 +477,12 @@ impl SessionState {
         transition
     }
 
-    pub(crate) fn next_recovery_delay(&mut self) -> Option<Duration> {
+    pub(crate) fn next_recovery_delay(&mut self) -> Duration {
         debug_assert!(self.is_recovering());
         self.recovery_backoff.next_delay()
     }
 
-    pub(crate) fn recovery_has_remaining(&self) -> bool {
-        self.recovery_backoff.has_remaining()
-    }
-
+    #[cfg(test)]
     pub(crate) fn last_recovery_error(&self) -> Option<&str> {
         self.last_recovery_error.as_deref()
     }
@@ -622,12 +622,7 @@ async fn request_contacts_with_retries(
             Ok(()) => return,
             Err(error) => {
                 let error = format!("Could not request Signal contact synchronization: {error}");
-                let Some(delay) = backoff.next_delay() else {
-                    sink.emit(Event::transient_error(format!(
-                        "{error}; automatic retries exhausted"
-                    )));
-                    return;
-                };
+                let delay = backoff.next_delay();
                 sink.emit(Event::transient_error(format!(
                     "{error}; retrying automatically"
                 )));
@@ -2587,19 +2582,18 @@ mod tests {
     fn bounds_and_resets_connection_recovery_backoff() {
         let mut backoff = RecoveryBackoff::default();
 
-        assert_eq!(
-            std::iter::from_fn(|| backoff.next_delay())
-                .map(|delay| delay.as_secs())
-                .collect::<Vec<_>>(),
-            RECOVERY_RETRY_DELAYS_SECS
-        );
-        assert!(!backoff.has_remaining());
-        assert_eq!(backoff.next_delay(), None);
+        let table_delays: Vec<u64> = (0..RECOVERY_RETRY_DELAYS_SECS.len())
+            .map(|_| backoff.next_delay().as_secs())
+            .collect();
+        assert_eq!(table_delays, RECOVERY_RETRY_DELAYS_SECS);
+
+        let longest = *RECOVERY_RETRY_DELAYS_SECS.last().unwrap();
+        assert_eq!(backoff.next_delay(), Duration::from_secs(longest));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(longest));
 
         backoff.reset();
-        assert!(backoff.has_remaining());
-        assert_eq!(backoff.next_delay(), Some(Duration::ZERO));
-        assert_eq!(backoff.next_delay(), Some(Duration::from_secs(1)));
+        assert_eq!(backoff.next_delay(), Duration::ZERO);
+        assert_eq!(backoff.next_delay(), Duration::from_secs(1));
     }
 
     #[test]
@@ -2636,14 +2630,14 @@ mod tests {
         assert!(!session.is_ready());
         assert!(!session.groups_authoritative());
         assert_eq!(session.last_recovery_error(), Some("stream ended"));
-        assert_eq!(session.next_recovery_delay(), Some(Duration::ZERO));
+        assert_eq!(session.next_recovery_delay(), Duration::ZERO);
 
         assert_eq!(
             session.enter_recovery("still unavailable".to_owned()),
             RecoveryTransition::Continued
         );
         assert_eq!(session.last_recovery_error(), Some("still unavailable"));
-        assert_eq!(session.next_recovery_delay(), Some(Duration::from_secs(1)));
+        assert_eq!(session.next_recovery_delay(), Duration::from_secs(1));
 
         session.mark_groups_authoritative();
         session.mark_ready();
@@ -2652,7 +2646,7 @@ mod tests {
             session.enter_recovery("stream ended again".to_owned()),
             RecoveryTransition::Entered
         );
-        assert_eq!(session.next_recovery_delay(), Some(Duration::ZERO));
+        assert_eq!(session.next_recovery_delay(), Duration::ZERO);
     }
 
     #[test]
