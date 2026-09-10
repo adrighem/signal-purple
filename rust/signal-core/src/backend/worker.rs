@@ -614,6 +614,7 @@ async fn receive_and_command_loop(
             await_phase_or_stop!(emit_identity_changes(&manager, &sink));
             await_phase_or_stop!(retry_outbox(
                 &mut manager,
+                &repo,
                 &sink,
                 &departed_groups,
                 session.groups_authoritative(),
@@ -860,6 +861,7 @@ async fn receive_and_command_loop(
                     projection.delivery_receipts.activate_retries();
                     await_phase_or_stop!(retry_outbox(
                         &mut manager,
+                        &repo,
                         &sink,
                         &departed_groups,
                         groups_authoritative,
@@ -879,6 +881,7 @@ async fn receive_and_command_loop(
                             replay.activate_groups();
                             await_phase_or_stop!(retry_outbox(
                                 &mut manager,
+                                &repo,
                                 &sink,
                                 &departed_groups,
                                 true,
@@ -1067,8 +1070,11 @@ pub(crate) async fn abort_in_flight_attachments(
             sent_messages.push(sent);
         }
     }
-    for sent in sent_messages {
-        super::coordinator::mark_sent_message_projected_or_report(manager, &sent, sink).await;
+    if !sent_messages.is_empty() {
+        let repo = StorageRepository::new(manager.store().clone());
+        for sent in sent_messages {
+            super::coordinator::mark_sent_message_projected_or_report(&repo, &sent, sink).await;
+        }
     }
     interrupt_remaining_attachments(sink, attachment_aborts);
 }

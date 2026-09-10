@@ -18,7 +18,8 @@ use presage::libsignal_service::sender::{AttachmentSpec, MessageSenderError};
 use presage::libsignal_service::zkgroup::profiles::ProfileKey;
 use presage::model::groups::Group;
 use presage::proto::{
-    AttachmentPointer, EditMessage, SyncMessage, TypingMessage, receipt_message, typing_message,
+    AttachmentPointer, EditMessage, ReceiptMessage, SyncMessage, TypingMessage, receipt_message,
+    typing_message,
 };
 use presage::store::Thread;
 use presage::{Manager, manager::Registered};
@@ -34,8 +35,9 @@ use super::media::{
     AvatarCache, DownloadedAttachment, MAX_SIGNAL_GIF_TRANSCODES_PER_MESSAGE,
     attachment_display_name, should_inline_image, transcode_signal_gif_video,
 };
-use super::outbox::{enqueue_and_send, retry_outbox};
+use super::outbox::{NewOutboxMessage, enqueue_and_send, retry_outbox};
 use super::projection::*;
+use super::protocol::SignalProtocol;
 use super::shutdown::{run_after_start_signal, wait_for_shutdown};
 use crate::attachment::{
     AttachmentControl, AttachmentPayload, AttachmentPermit, MAX_ATTACHMENT_BYTES,
@@ -52,6 +54,7 @@ use crate::store::StorageRepository;
 use crate::store::errors::{
     StorageError, signal_protocol_error_is_transient, sqlite_store_error_is_transient,
 };
+use crate::store::traits::StorageOps;
 
 pub(crate) const GROUP_SYNC_RETRY_SECS: u64 = 30;
 pub(crate) const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
@@ -825,7 +828,8 @@ pub(crate) async fn handle_attachment_completion(
     completed: Result<AttachmentCompletion, tokio::task::JoinError>,
 ) {
     if let Some(sent) = finish_attachment_completion(sink, attachment_aborts, completed) {
-        mark_sent_message_projected_or_report(manager, &sent, sink).await;
+        let repo = StorageRepository::new(manager.store().clone());
+        mark_sent_message_projected_or_report(&repo, &sent, sink).await;
     }
 }
 
@@ -1158,7 +1162,7 @@ pub(crate) async fn emit_identity_changes(
 const MARK_SENT_PROJECTED_RETRY_DELAYS_MS: [u64; 3] = [50, 200, 500];
 
 async fn mark_sent_message_projected(
-    repo: &StorageRepository,
+    repo: &impl StorageOps,
     sent: &SentMessage,
 ) -> Result<(), StorageError> {
     let mut attempt = 0;
@@ -1181,12 +1185,11 @@ async fn mark_sent_message_projected(
 }
 
 pub(crate) async fn mark_sent_message_projected_or_report(
-    manager: &Manager<SqliteStore, Registered>,
+    repo: &impl StorageOps,
     sent: &SentMessage,
     sink: &EventSink,
 ) {
-    let repo = StorageRepository::new(manager.store().clone());
-    if let Err(error) = mark_sent_message_projected(&repo, sent).await {
+    if let Err(error) = mark_sent_message_projected(repo, sent).await {
         sink.emit(Event::error(error.to_string(), false));
     }
 }
@@ -1199,8 +1202,8 @@ pub(crate) struct OutgoingAttachment {
     pub(crate) group: bool,
 }
 
-pub(crate) async fn upload_and_send_attachment(
-    manager: &mut Manager<SqliteStore, Registered>,
+pub(crate) async fn upload_and_send_attachment<M: SignalProtocol>(
+    manager: &mut M,
     attachment: OutgoingAttachment,
     departed_groups: &DepartedGroups,
     timestamps: &MessageTimestampAllocator,
@@ -1248,9 +1251,7 @@ pub(crate) async fn upload_and_send_attachment(
             },
             data,
         )
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
+        .await?;
     let timestamp = timestamps.next();
     if group {
         let (key, _) = group_target.expect("group target was resolved before upload");
@@ -1272,11 +1273,11 @@ pub(crate) async fn upload_and_send_attachment(
                         ..Default::default()
                     }),
                     ..Default::default()
-                },
+                }
+                .into(),
                 timestamp,
             )
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
         Ok(SentMessage {
             thread: Thread::Group(key),
             timestamp,
@@ -1291,11 +1292,11 @@ pub(crate) async fn upload_and_send_attachment(
                     attachments: vec![pointer],
                     timestamp: Some(timestamp),
                     ..Default::default()
-                },
+                }
+                .into(),
                 timestamp,
             )
-            .await
-            .map_err(|error| error.to_string())?;
+            .await?;
         Ok(SentMessage {
             thread: Thread::Contact(recipient),
             timestamp,
@@ -1328,21 +1329,20 @@ pub(crate) async fn load_unprojected_messages(
     replay.replace(messages, groups_authoritative);
 }
 
-async fn handle_command(
-    manager: &mut Manager<SqliteStore, Registered>,
+async fn handle_command<M: SignalProtocol>(
+    manager: &mut M,
     command: Command,
     sink: &EventSink,
     departed_groups: &DepartedGroups,
     groups_authoritative: bool,
     timestamps: &MessageTimestampAllocator,
 ) {
-    if let Command::AcceptIdentity {
-        request_id,
-        recipient,
-    } = command
-    {
-        let repo = StorageRepository::new(manager.store().clone());
-        match repo.accept_identity_change(&recipient).await {
+    let repo = StorageRepository::new(manager.store().clone());
+    match command {
+        Command::AcceptIdentity {
+            request_id,
+            recipient,
+        } => match repo.accept_identity_change(&recipient).await {
             Ok(true) => {
                 if let Err(error) = repo.expedite_outbox_messages(&recipient).await {
                     sink.emit(Event::error(
@@ -1356,7 +1356,7 @@ async fn handle_command(
                     peer_id: Some(recipient),
                     ..Event::default()
                 });
-                retry_outbox(manager, sink, departed_groups, groups_authoritative).await;
+                retry_outbox(manager, &repo, sink, departed_groups, groups_authoritative).await;
             }
             Ok(false) => sink.emit(Event::request_error(
                 request_id,
@@ -1366,176 +1366,166 @@ async fn handle_command(
                 request_id,
                 format!("Could not accept the Signal identity change: {error}"),
             )),
+        },
+        Command::DismissIdentity {
+            request_id,
+            recipient,
+        } => {
+            if let Err(error) = repo.dismiss_identity_change(&recipient).await {
+                sink.emit(Event::request_error(
+                    request_id,
+                    format!("Could not dismiss the Signal identity notice: {error}"),
+                ));
+            }
         }
-        return;
-    }
-
-    if let Command::DismissIdentity {
-        request_id,
-        recipient,
-    } = command
-    {
-        let repo = StorageRepository::new(manager.store().clone());
-        if let Err(error) = repo.dismiss_identity_change(&recipient).await {
-            sink.emit(Event::request_error(
-                request_id,
-                format!("Could not dismiss the Signal identity notice: {error}"),
-            ));
-        }
-        return;
-    }
-
-    if let Command::ResetSession {
-        request_id,
-        recipient,
-    } = command
-    {
-        let service_id = match parse_recipient(&recipient) {
-            Some(service_id) => service_id,
-            None => {
+        Command::ResetSession {
+            request_id,
+            recipient,
+        } => {
+            let Some(service_id) = parse_recipient(&recipient) else {
                 sink.emit(Event::request_error(
                     request_id,
                     "The recipient identifier could not be parsed as a Signal service ID",
                 ));
                 return;
-            }
-        };
-        match manager.clear_sessions(&service_id).await {
-            Ok(()) => {
-                sink.emit(Event {
-                    kind: EVENT_SESSION_RESET,
-                    request_id,
-                    peer_id: Some(recipient),
-                    ..Event::default()
-                });
-            }
-            Err(error) => {
-                sink.emit(Event::request_error(
-                    request_id,
-                    format!("Could not reset the Signal session: {error}"),
-                ));
-            }
-        }
-        return;
-    }
-
-    if let Command::MarkRead {
-        request_id,
-        recipient,
-        timestamp,
-    } = command
-    {
-        let result = match parse_recipient(&recipient) {
-            Some(recipient) => send_receipt(
-                manager,
-                recipient,
-                timestamp,
-                receipt_message::Type::Read,
-                timestamps,
-            )
-            .await
-            .map_err(|error| error.to_string()),
-            None => Err("Recipient is not a canonical Signal service identifier".into()),
-        };
-        if let Err(error) = result {
-            sink.emit(Event::transient_request_error(request_id, error));
-        }
-        return;
-    }
-
-    if let Command::LeaveGroup {
-        request_id,
-        group_key,
-    } = command
-    {
-        if !groups_authoritative {
-            departed_groups.cancel_leave(&group_key);
-            sink.emit(Event::group_request_error(
-                request_id,
-                group_key,
-                "Signal groups are temporarily unavailable until authoritative synchronization succeeds",
-            ));
-            return;
-        }
-        let group_operation = departed_groups.lock_operation().await;
-        let resolved = resolve_active_group_for_leave(manager, &group_key, departed_groups).await;
-        let Some((key, _)) = (match resolved {
-            Ok(group) => group,
-            Err(error) => {
-                departed_groups.cancel_leave(&group_key);
-                sink.emit(Event::group_request_error(request_id, group_key, error));
-                return;
-            }
-        }) else {
-            departed_groups.cancel_leave(&group_key);
-            sink.emit(Event::group_request_error(
-                request_id,
-                group_key,
-                "Signal group is unavailable or this account is no longer a member",
-            ));
-            return;
-        };
-
-        match Box::pin(manager.leave_group(&key)).await {
-            Ok(outcome) => {
-                for event in group_leave_completion_events(
-                    departed_groups,
-                    request_id,
-                    &group_key,
-                    GroupLeaveCompletion::Accepted {
-                        peer_notification_sent: outcome.peer_notification_sent,
-                        local_group_removed: outcome.local_group_removed,
-                    },
-                ) {
-                    sink.emit(event);
+            };
+            match manager.clear_sessions(&service_id).await {
+                Ok(()) => {
+                    sink.emit(Event {
+                        kind: EVENT_SESSION_RESET,
+                        request_id,
+                        peer_id: Some(recipient),
+                        ..Event::default()
+                    });
                 }
-                drop(group_operation);
-                let repo = StorageRepository::new(manager.store().clone());
-                if let Err(error) = repo.expedite_outbox_messages(&group_key).await {
-                    sink.emit(Event::error(
-                        format!("Could not schedule stale group messages for cleanup: {error}"),
-                        false,
+                Err(error) => {
+                    sink.emit(Event::request_error(
+                        request_id,
+                        format!("Could not reset the Signal session: {error}"),
                     ));
                 }
-                retry_outbox(manager, sink, departed_groups, groups_authoritative).await;
             }
-            Err(error) => {
-                for event in group_leave_completion_events(
-                    departed_groups,
+        }
+        Command::MarkRead {
+            request_id,
+            recipient,
+            timestamp,
+        } => {
+            let result = match parse_recipient(&recipient) {
+                Some(recipient) => {
+                    let send_timestamp = timestamps.next();
+                    manager
+                        .send_message(
+                            recipient,
+                            ReceiptMessage {
+                                r#type: Some(receipt_message::Type::Read.into()),
+                                timestamp: vec![timestamp],
+                            }
+                            .into(),
+                            send_timestamp,
+                        )
+                        .await
+                }
+                None => Err("Recipient is not a canonical Signal service identifier".into()),
+            };
+            if let Err(error) = result {
+                sink.emit(Event::transient_request_error(request_id, error));
+            }
+        }
+        Command::LeaveGroup {
+            request_id,
+            group_key,
+        } => {
+            if !groups_authoritative {
+                departed_groups.cancel_leave(&group_key);
+                sink.emit(Event::group_request_error(
                     request_id,
-                    &group_key,
-                    GroupLeaveCompletion::Failed(format!(
-                        "Could not leave the Signal group: {error}"
-                    )),
-                ) {
-                    sink.emit(event);
+                    group_key,
+                    "Signal groups are temporarily unavailable until authoritative synchronization succeeds",
+                ));
+                return;
+            }
+            let group_operation = departed_groups.lock_operation().await;
+            let resolved =
+                resolve_active_group_for_leave(manager, &group_key, departed_groups).await;
+            let Some((key, _)) = (match resolved {
+                Ok(group) => group,
+                Err(error) => {
+                    departed_groups.cancel_leave(&group_key);
+                    sink.emit(Event::group_request_error(request_id, group_key, error));
+                    return;
+                }
+            }) else {
+                departed_groups.cancel_leave(&group_key);
+                sink.emit(Event::group_request_error(
+                    request_id,
+                    group_key,
+                    "Signal group is unavailable or this account is no longer a member",
+                ));
+                return;
+            };
+
+            match manager.leave_group(&key).await {
+                Ok(outcome) => {
+                    for event in group_leave_completion_events(
+                        departed_groups,
+                        request_id,
+                        &group_key,
+                        GroupLeaveCompletion::Accepted {
+                            peer_notification_sent: outcome.peer_notification_sent,
+                            local_group_removed: outcome.local_group_removed,
+                        },
+                    ) {
+                        sink.emit(event);
+                    }
+                    drop(group_operation);
+                    if let Err(error) = repo.expedite_outbox_messages(&group_key).await {
+                        sink.emit(Event::error(
+                            format!("Could not schedule stale group messages for cleanup: {error}"),
+                            false,
+                        ));
+                    }
+                    retry_outbox(manager, &repo, sink, departed_groups, groups_authoritative).await;
+                }
+                Err(error) => {
+                    for event in group_leave_completion_events(
+                        departed_groups,
+                        request_id,
+                        &group_key,
+                        GroupLeaveCompletion::Failed(format!(
+                            "Could not leave the Signal group: {error}"
+                        )),
+                    ) {
+                        sink.emit(event);
+                    }
                 }
             }
         }
-        return;
-    }
-
-    let (request_id, result) = match command {
         Command::SendMessage {
             request_id,
             recipient,
             message,
         } => {
             let result = if parse_recipient(&recipient).is_some() {
-                Box::pin(enqueue_and_send(
+                enqueue_and_send(
                     manager,
-                    ClientOutboxKind::Direct,
-                    recipient,
-                    message,
+                    &repo,
+                    NewOutboxMessage {
+                        kind: ClientOutboxKind::Direct,
+                        recipient,
+                        body: message,
+                    },
                     departed_groups,
                     sink,
                     timestamps,
-                ))
+                )
                 .await
             } else {
                 Err("Recipient is not a canonical Signal service identifier".into())
             };
-            (request_id, result)
+            if let Err(error) = result {
+                sink.emit(Event::transient_request_error(request_id, error));
+            }
         }
         Command::SendGroupMessage {
             request_id,
@@ -1550,15 +1540,18 @@ async fn handle_command(
             } else {
                 match resolve_active_group(manager, &group_key, departed_groups).await {
                     Ok(Some(_)) => {
-                        Box::pin(enqueue_and_send(
+                        enqueue_and_send(
                             manager,
-                            ClientOutboxKind::Group,
-                            group_key,
-                            message,
+                            &repo,
+                            NewOutboxMessage {
+                                kind: ClientOutboxKind::Group,
+                                recipient: group_key,
+                                body: message,
+                            },
                             departed_groups,
                             sink,
                             timestamps,
-                        ))
+                        )
                         .await
                     }
                     Ok(None) => Err(
@@ -1567,7 +1560,9 @@ async fn handle_command(
                     Err(error) => Err(error),
                 }
             };
-            (request_id, result)
+            if let Err(error) = result {
+                sink.emit(Event::transient_request_error(request_id, error));
+            }
         }
         Command::SetTyping {
             request_id,
@@ -1577,41 +1572,39 @@ async fn handle_command(
             let result = match parse_recipient(&recipient) {
                 Some(recipient) => {
                     let timestamp = timestamps.next();
-                    Box::pin(manager.send_message(
-                        recipient,
-                        TypingMessage {
-                            timestamp: Some(timestamp),
-                            action: Some(if typing {
-                                typing_message::Action::Started.into()
-                            } else {
-                                typing_message::Action::Stopped.into()
-                            }),
-                            group_id: None,
-                        },
-                        timestamp,
-                    ))
-                    .await
-                    .map_err(|error| error.to_string())
+                    manager
+                        .send_message(
+                            recipient,
+                            TypingMessage {
+                                timestamp: Some(timestamp),
+                                action: Some(if typing {
+                                    typing_message::Action::Started.into()
+                                } else {
+                                    typing_message::Action::Stopped.into()
+                                }),
+                                group_id: None,
+                            }
+                            .into(),
+                            timestamp,
+                        )
+                        .await
                 }
                 None => Err("Recipient is not a canonical Signal service identifier".into()),
             };
-            (request_id, result)
+            if let Err(error) = result {
+                sink.emit(Event::transient_request_error(request_id, error));
+            }
         }
-        Command::SendAttachment { .. } => unreachable!(),
-        Command::LeaveGroup { .. } => unreachable!(),
-        Command::AcceptIdentity { .. }
-        | Command::DismissIdentity { .. }
-        | Command::ResetSession { .. } => unreachable!(),
-        Command::MarkRead { .. } => unreachable!(),
-    };
-
-    if let Err(error) = result {
-        sink.emit(Event::transient_request_error(request_id, error));
+        Command::SendAttachment { .. } => {
+            unreachable!(
+                "SendAttachment is routed directly by the worker loop and never reaches handle_command"
+            )
+        }
     }
 }
 
-pub(crate) async fn handle_content(
-    manager: &mut Manager<SqliteStore, Registered>,
+pub(crate) async fn handle_content<M: SignalProtocol>(
+    manager: &mut M,
     content: Content,
     delivery_id: u64,
     sink: &EventSink,
@@ -1621,7 +1614,7 @@ pub(crate) async fn handle_content(
 ) -> ProjectionDisposition {
     let timestamp = content_timestamp(&content);
     let sender = content.metadata.sender.service_id_string();
-    let local_aci = manager.registration_data().service_ids.aci();
+    let local_aci = manager.local_aci();
 
     match &content.body {
         ContentBody::DataMessage(message) => {
@@ -1817,8 +1810,8 @@ fn projected_data_message_text<'a>(
     (!text.is_empty()).then_some(text)
 }
 
-async fn emit_data_message(
-    manager: &Manager<SqliteStore, Registered>,
+async fn emit_data_message<M: SignalProtocol>(
+    manager: &M,
     projection: DataMessageProjection<'_>,
     sink: &EventSink,
     departed_groups: &DepartedGroups,
@@ -1937,11 +1930,7 @@ async fn emit_data_message(
     };
 
     if let (Some(group_key), Some(text)) = (group_key, text.as_ref()) {
-        let group_peer = group_message_peer(
-            outgoing,
-            peer,
-            manager.registration_data().service_ids.aci(),
-        );
+        let group_peer = group_message_peer(outgoing, peer, manager.local_aci());
         sink.emit(Event {
             kind: EVENT_GROUP_MESSAGE,
             request_id: message_delivery_id,
@@ -2028,8 +2017,8 @@ fn group_contains_local_aci(group: &Group, local_aci: &Aci) -> bool {
     contains_local_aci(group.members.iter().map(|member| &member.aci), local_aci)
 }
 
-async fn group_for_projection(
-    manager: &Manager<SqliteStore, Registered>,
+async fn group_for_projection<M: SignalProtocol>(
+    manager: &M,
     key: [u8; 32],
     departed_groups: &DepartedGroups,
 ) -> Result<ProjectionGroup, String> {
@@ -2060,7 +2049,7 @@ async fn group_for_projection(
         });
     }
 
-    let local_aci = manager.registration_data().service_ids.aci();
+    let local_aci = manager.local_aci();
     Ok(
         match group.filter(|group| group_contains_local_aci(group, &local_aci)) {
             Some(group) => ProjectionGroup::Active(group),
@@ -2069,23 +2058,23 @@ async fn group_for_projection(
     )
 }
 
-async fn active_group_by_key(
-    manager: &Manager<SqliteStore, Registered>,
+async fn active_group_by_key<M: SignalProtocol>(
+    manager: &M,
     key: [u8; 32],
     departed_groups: &DepartedGroups,
 ) -> Result<Option<Group>, String> {
     if departed_groups.contains(&group_identifier(&key)) {
         return Ok(None);
     }
-    let local_aci = manager.registration_data().service_ids.aci();
+    let local_aci = manager.local_aci();
     let repo = StorageRepository::new(manager.store().clone());
     repo.active_group(key, &local_aci)
         .await
         .map_err(|error| error.to_string())
 }
 
-pub(crate) async fn resolve_active_group(
-    manager: &Manager<SqliteStore, Registered>,
+pub(crate) async fn resolve_active_group<M: SignalProtocol>(
+    manager: &M,
     identifier: &str,
     departed_groups: &DepartedGroups,
 ) -> Result<Option<([u8; 32], Group)>, String> {
@@ -2095,8 +2084,8 @@ pub(crate) async fn resolve_active_group(
     resolve_active_group_in_store(manager, identifier).await
 }
 
-async fn resolve_active_group_for_leave(
-    manager: &Manager<SqliteStore, Registered>,
+async fn resolve_active_group_for_leave<M: SignalProtocol>(
+    manager: &M,
     identifier: &str,
     departed_groups: &DepartedGroups,
 ) -> Result<Option<([u8; 32], Group)>, String> {
@@ -2106,11 +2095,11 @@ async fn resolve_active_group_for_leave(
     resolve_active_group_in_store(manager, identifier).await
 }
 
-async fn resolve_active_group_in_store(
-    manager: &Manager<SqliteStore, Registered>,
+async fn resolve_active_group_in_store<M: SignalProtocol>(
+    manager: &M,
     identifier: &str,
 ) -> Result<Option<([u8; 32], Group)>, String> {
-    let local_aci = manager.registration_data().service_ids.aci();
+    let local_aci = manager.local_aci();
     let repo = StorageRepository::new(manager.store().clone());
     let groups = repo.groups().await.map_err(|error| error.to_string())?;
     Ok(groups.into_iter().find(|(key, group)| {
@@ -2860,5 +2849,81 @@ mod tests {
         cache.clear();
         assert_eq!(cache.get_group_revision(&key), None);
         assert_eq!(cache.get_contact_name(peer), None);
+    }
+
+    fn test_thread() -> Thread {
+        Thread::Contact(parse_recipient("00000000-0000-0000-0000-000000000042").unwrap())
+    }
+
+    #[test]
+    fn mark_sent_message_projected_retries_transient_failures_before_succeeding() {
+        use crate::store::traits::fake::{FakeStorageRepository, StorageErrorKind};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let repo = FakeStorageRepository::new();
+            let thread = test_thread();
+            repo.fail_next_projection_attempts(StorageErrorKind::Transient, 2);
+            let sent = SentMessage {
+                thread: thread.clone(),
+                timestamp: 42,
+            };
+
+            let result = mark_sent_message_projected(&repo, &sent).await;
+
+            assert!(result.is_ok());
+            assert!(repo.is_projected(&thread, 42));
+        });
+    }
+
+    #[test]
+    fn mark_sent_message_projected_retries_a_not_yet_visible_row() {
+        use crate::store::traits::fake::{FakeStorageRepository, StorageErrorKind};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let repo = FakeStorageRepository::new();
+            let thread = test_thread();
+            repo.fail_next_projection_attempts(StorageErrorKind::NotFound, 1);
+            let sent = SentMessage {
+                thread: thread.clone(),
+                timestamp: 7,
+            };
+
+            let result = mark_sent_message_projected(&repo, &sent).await;
+
+            assert!(result.is_ok());
+            assert!(repo.is_projected(&thread, 7));
+        });
+    }
+
+    #[test]
+    fn mark_sent_message_projected_gives_up_after_exhausting_its_retry_budget() {
+        use crate::store::traits::fake::{FakeStorageRepository, StorageErrorKind};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let repo = FakeStorageRepository::new();
+            let sent = SentMessage {
+                thread: test_thread(),
+                timestamp: 99,
+            };
+            // One more failure than MARK_SENT_PROJECTED_RETRY_DELAYS_MS has entries.
+            repo.fail_next_projection_attempts(StorageErrorKind::Transient, 4);
+
+            let result = mark_sent_message_projected(&repo, &sent).await;
+
+            assert!(result.is_err());
+            assert!(!repo.is_projected(&test_thread(), 99));
+        });
     }
 }

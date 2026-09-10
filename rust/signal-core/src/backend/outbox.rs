@@ -1,14 +1,14 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use presage::libsignal_service::content::{DataMessage, GroupContextV2};
 use presage::store::Thread;
-use presage::{Manager, manager::Registered};
-use presage_store_sqlite::{ClientOutboxKind, ClientOutboxMessage, SqliteStore};
+use presage_store_sqlite::{ClientOutboxKind, ClientOutboxMessage};
 
 use super::coordinator::{DepartedGroups, MessageTimestampAllocator, SentMessage, wall_clock_ms};
+use super::protocol::SignalProtocol;
 use crate::event::Event;
 use crate::event_queue::EventSink;
-use crate::store::StorageRepository;
 use crate::store::errors::sqlite_store_error_is_transient;
+use crate::store::traits::StorageOps;
 
 #[derive(Debug)]
 pub(crate) struct OutboxAttemptError {
@@ -54,8 +54,8 @@ pub(crate) fn outbox_message_is_attemptable(
     groups_authoritative || matches!(kind, ClientOutboxKind::Direct)
 }
 
-pub(crate) async fn attempt_outbox_message(
-    manager: &mut Manager<SqliteStore, Registered>,
+pub(crate) async fn attempt_outbox_message<M: SignalProtocol>(
+    manager: &mut M,
     message: &ClientOutboxMessage,
     departed_groups: &DepartedGroups,
 ) -> Result<SentMessage, OutboxAttemptError> {
@@ -67,17 +67,19 @@ pub(crate) async fn attempt_outbox_message(
                         "Recipient is not a canonical Signal service identifier",
                     )
                 })?;
-            Box::pin(manager.send_message(
-                recipient,
-                DataMessage {
-                    body: Some(message.body.clone()),
-                    timestamp: Some(message.timestamp),
-                    ..Default::default()
-                },
-                message.timestamp,
-            ))
-            .await
-            .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
+            manager
+                .send_message(
+                    recipient,
+                    DataMessage {
+                        body: Some(message.body.clone()),
+                        timestamp: Some(message.timestamp),
+                        ..Default::default()
+                    }
+                    .into(),
+                    message.timestamp,
+                )
+                .await
+                .map_err(OutboxAttemptError::retryable)?;
             Ok(SentMessage {
                 thread: Thread::Contact(recipient),
                 timestamp: message.timestamp,
@@ -96,22 +98,24 @@ pub(crate) async fn attempt_outbox_message(
                     "Signal group is unavailable or this account is no longer a member",
                 )
             })?;
-            Box::pin(manager.send_message_to_group(
-                &key,
-                DataMessage {
-                    body: Some(message.body.clone()),
-                    timestamp: Some(message.timestamp),
-                    group_v2: Some(GroupContextV2 {
-                        master_key: Some(key.to_vec()),
-                        revision: Some(group.revision),
+            manager
+                .send_message_to_group(
+                    &key,
+                    DataMessage {
+                        body: Some(message.body.clone()),
+                        timestamp: Some(message.timestamp),
+                        group_v2: Some(GroupContextV2 {
+                            master_key: Some(key.to_vec()),
+                            revision: Some(group.revision),
+                            ..Default::default()
+                        }),
                         ..Default::default()
-                    }),
-                    ..Default::default()
-                },
-                message.timestamp,
-            ))
-            .await
-            .map_err(|error| OutboxAttemptError::retryable(error.to_string()))?;
+                    }
+                    .into(),
+                    message.timestamp,
+                )
+                .await
+                .map_err(OutboxAttemptError::retryable)?;
             Ok(SentMessage {
                 thread: Thread::Group(key),
                 timestamp: message.timestamp,
@@ -121,11 +125,10 @@ pub(crate) async fn attempt_outbox_message(
 }
 
 pub(crate) async fn finish_outbox_attempt(
-    manager: &mut Manager<SqliteStore, Registered>,
+    repo: &impl StorageOps,
     message: &ClientOutboxMessage,
     result: &Result<SentMessage, OutboxAttemptError>,
 ) -> Result<(), String> {
-    let repo = StorageRepository::new(manager.store().clone());
     match result {
         Ok(_) => repo
             .complete_outbox_message(message.id)
@@ -152,13 +155,13 @@ pub(crate) async fn finish_outbox_attempt(
     }
 }
 
-pub(crate) async fn retry_outbox(
-    manager: &mut Manager<SqliteStore, Registered>,
+pub(crate) async fn retry_outbox<M: SignalProtocol>(
+    manager: &mut M,
+    repo: &impl StorageOps,
     sink: &EventSink,
     departed_groups: &DepartedGroups,
     groups_authoritative: bool,
 ) {
-    let repo = StorageRepository::new(manager.store().clone());
     let messages = match repo.due_outbox_messages(wall_clock_ms()).await {
         Ok(messages) => messages,
         Err(error) => {
@@ -179,9 +182,9 @@ pub(crate) async fn retry_outbox(
         }
         let result = attempt_outbox_message(manager, &message, departed_groups).await;
         if let Ok(sent) = &result {
-            super::coordinator::mark_sent_message_projected_or_report(manager, sent, sink).await;
+            super::coordinator::mark_sent_message_projected_or_report(repo, sent, sink).await;
         }
-        if let Err(error) = finish_outbox_attempt(manager, &message, &result).await {
+        if let Err(error) = finish_outbox_attempt(repo, &message, &result).await {
             sink.emit(Event::error(error, false));
         } else if let Err(error) = result {
             if !error.should_retry() {
@@ -204,17 +207,26 @@ pub(crate) async fn retry_outbox(
     }
 }
 
-pub(crate) async fn enqueue_and_send(
-    manager: &mut Manager<SqliteStore, Registered>,
-    kind: ClientOutboxKind,
-    recipient: String,
-    body: String,
+pub(crate) struct NewOutboxMessage {
+    pub(crate) kind: ClientOutboxKind,
+    pub(crate) recipient: String,
+    pub(crate) body: String,
+}
+
+pub(crate) async fn enqueue_and_send<M: SignalProtocol>(
+    manager: &mut M,
+    repo: &impl StorageOps,
+    request: NewOutboxMessage,
     departed_groups: &DepartedGroups,
     sink: &EventSink,
     timestamps: &MessageTimestampAllocator,
 ) -> Result<(), String> {
+    let NewOutboxMessage {
+        kind,
+        recipient,
+        body,
+    } = request;
     let timestamp = timestamps.next();
-    let repo = StorageRepository::new(manager.store().clone());
     let id = repo
         .enqueue_outbox_message(kind, &recipient, &body, timestamp)
         .await
@@ -229,9 +241,9 @@ pub(crate) async fn enqueue_and_send(
     };
     let result = attempt_outbox_message(manager, &message, departed_groups).await;
     if let Ok(sent) = &result {
-        super::coordinator::mark_sent_message_projected_or_report(manager, sent, sink).await;
+        super::coordinator::mark_sent_message_projected_or_report(repo, sent, sink).await;
     }
-    finish_outbox_attempt(manager, &message, &result).await?;
+    finish_outbox_attempt(repo, &message, &result).await?;
     result.map(|_| ()).map_err(|error| error.to_string())
 }
 

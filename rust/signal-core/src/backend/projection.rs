@@ -12,6 +12,7 @@ use super::coordinator::{
     DepartedGroups, MessageTimestampAllocator, delivery_receipt_failure_action, handle_content,
     projection_effect,
 };
+use super::protocol::SignalProtocol;
 use crate::acknowledgment::AcknowledgmentInbox;
 use crate::event::Event;
 use crate::event_queue::EventSink;
@@ -190,8 +191,8 @@ pub(crate) fn content_is_projectable(content: &ContentBody, groups_authoritative
     groups_authoritative || !content_has_group_context(content)
 }
 
-pub(crate) async fn project_content(
-    manager: &mut Manager<SqliteStore, Registered>,
+pub(crate) async fn project_content<M: SignalProtocol>(
+    manager: &mut M,
     content: Content,
     sink: &EventSink,
     projection: &mut MessageProjection,
@@ -520,23 +521,6 @@ pub(crate) async fn send_receipt_at_timestamp(
         },
         send_timestamp,
     ))
-    .await
-}
-
-pub(crate) async fn send_receipt(
-    manager: &mut Manager<SqliteStore, Registered>,
-    recipient: ServiceId,
-    message_timestamp: u64,
-    receipt_type: receipt_message::Type,
-    timestamps: &MessageTimestampAllocator,
-) -> Result<(), presage::Error<presage_store_sqlite::SqliteStoreError>> {
-    send_receipt_at_timestamp(
-        manager,
-        recipient,
-        message_timestamp,
-        receipt_type,
-        timestamps.next(),
-    )
     .await
 }
 
