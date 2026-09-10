@@ -10,11 +10,11 @@
 
 ## Phase 2: In-Memory Metadata Caching
 
-- [ ] Task: Introduce in-memory metadata caching for read paths
-  - [ ] Sub-task: Design thread-safe in-memory cache for group revision numbers and contact names
-  - [ ] Sub-task: Route group metadata queries through cache before touching `SqliteStore`
-  - [ ] Sub-task: Implement cache invalidation hooks on contact sync end and group revision changes
-  - [ ] Sub-task: Add unit tests verifying cache hit paths and invalidation consistency
+- [x] Task: Introduce in-memory metadata caching for read paths 35d4348
+  - [x] Sub-task: Design thread-safe in-memory cache for group revision numbers and contact names
+  - [x] Sub-task: Route group metadata queries through cache before touching `SqliteStore`
+  - [x] Sub-task: Implement cache invalidation hooks on contact sync end and group revision changes
+  - [x] Sub-task: Add unit tests verifying cache hit paths and invalidation consistency
 
 ## Phase 3: Storage Repository Abstraction
 
