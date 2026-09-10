@@ -25,6 +25,7 @@ sha2 = "0.11.0"
 tokio = { version = "1.48.0", features = ["rt", "sync", "time"] }
 tracing = { version = "0.1.44", default-features = false, features = ["max_level_warn"] }
 zeroize = "1.8.2"
+sqlx = { version = "0.9.0", default-features = false, features = ["sqlite"] }
 
 [patch.crates-io]
 curve25519-dalek = { git = "https://github.com/signalapp/curve25519-dalek", tag = "signal-curve25519-4.1.3" }

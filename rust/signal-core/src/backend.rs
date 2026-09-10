@@ -1002,6 +1002,38 @@ fn websocket_error_is_transient(error: &reqwest_websocket::Error) -> bool {
     }
 }
 
+fn sqlx_error_is_transient(db_error: &sqlx::Error) -> bool {
+    match db_error {
+        sqlx::Error::PoolTimedOut => true,
+        sqlx::Error::Database(err) => {
+            if let Some(code) = err.code() {
+                // Extended result codes in SQLite:
+                // Primary: 5 (SQLITE_BUSY), 6 (SQLITE_LOCKED)
+                // Extended: 261 (BUSY_RECOVERY), 517 (LOCKED_SHAREDCACHE),
+                //           773 (BUSY_SNAPSHOT), 1029 (LOCKED_VTAB), 1032 (BUSY_TIMEOUT)
+                if code == "5" || code == "6" || code.starts_with("5_") || code.starts_with("6_")
+                    || code == "261" || code == "517" || code == "773" || code == "1029" || code == "1032"
+                {
+                    return true;
+                }
+            }
+            let message = err.message();
+            message.contains("pool timed out")
+                || message.contains("timed out")
+                || message.contains("locked")
+                || message.contains("busy")
+        }
+        sqlx::Error::Io(_) => true,
+        _ => {
+            let message = db_error.to_string();
+            message.contains("pool timed out")
+                || message.contains("timed out")
+                || message.contains("locked")
+                || message.contains("busy")
+        }
+    }
+}
+
 fn signal_protocol_error_is_transient(error: &SignalProtocolError) -> bool {
     match error {
         SignalProtocolError::InvalidState(scope, message) => {
@@ -1009,7 +1041,10 @@ fn signal_protocol_error_is_transient(error: &SignalProtocolError) -> bool {
                 && (message.contains("pool timed out")
                     || message.contains("timed out")
                     || message.contains("locked")
-                    || message.contains("busy"))
+                    || message.contains("busy")
+                    || message.contains("code: 5")
+                    || message.contains("code: 6")
+                    || message.contains("code: 1032"))
         }
         _ => false,
     }
@@ -1018,11 +1053,7 @@ fn signal_protocol_error_is_transient(error: &SignalProtocolError) -> bool {
 fn sqlite_store_error_is_transient(error: &presage_store_sqlite::SqliteStoreError) -> bool {
     match error {
         presage_store_sqlite::SqliteStoreError::Db(db_error) => {
-            let message = db_error.to_string();
-            message.contains("pool timed out")
-                || message.contains("timed out")
-                || message.contains("locked")
-                || message.contains("busy")
+            sqlx_error_is_transient(db_error)
         }
         presage_store_sqlite::SqliteStoreError::Io(_) => true,
         presage_store_sqlite::SqliteStoreError::Protocol(error) => {
@@ -6193,6 +6224,15 @@ mod tests {
         assert_eq!(
             delivery_receipt_failure_action(&permanent_protocol),
             DeliveryReceiptFailureAction::Discard
+        );
+
+        let sqlx_pool_timeout = presage::Error::<presage_store_sqlite::SqliteStoreError>::Store(
+            presage_store_sqlite::SqliteStoreError::Db(sqlx::Error::PoolTimedOut),
+        );
+        assert!(receive_error_is_transient(&sqlx_pool_timeout));
+        assert_eq!(
+            delivery_receipt_failure_action(&sqlx_pool_timeout),
+            DeliveryReceiptFailureAction::Retry
         );
     }
 
