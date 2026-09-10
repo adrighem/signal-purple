@@ -14,5 +14,5 @@ This file tracks all major tracks for the project. Each track has its own detail
 
 ---
 
-## [ ] Track: Modular backend and FFI refactor
+## [x] Track: Modular backend and FFI refactor
 *Link: [./conductor/tracks/modular_backend_20260910/](./conductor/tracks/modular_backend_20260910/)*
