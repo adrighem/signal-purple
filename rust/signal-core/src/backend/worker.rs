@@ -21,12 +21,12 @@ use tokio::sync::{mpsc as tokio_mpsc, watch};
 use super::command::{Command, Config, StorePassphrase, WorkerContext};
 use super::coordinator::{
     ActiveReceiveTasks, AttachmentCompletion, AttachmentTaskControl, AttachmentTaskResult,
-    DepartedGroups, GROUP_SYNC_RETRY_SECS, MessageTimestampAllocator, MetadataCache,
-    OutgoingAttachment, RECEIVE_EVENT_QUEUE_CAPACITY, ReceiveStartError, RecoveryTransition,
-    SHUTDOWN_CLEANUP_TIMEOUT, SentMessage, SessionState, emit_account_identity,
+    CommandContext, DepartedGroups, GROUP_SYNC_RETRY_SECS, MessageTimestampAllocator,
+    MetadataCache, OutgoingAttachment, RECEIVE_EVENT_QUEUE_CAPACITY, ReceiveStartError,
+    RecoveryTransition, SHUTDOWN_CLEANUP_TIMEOUT, SentMessage, SessionState, emit_account_identity,
     emit_contact_snapshot, emit_group_snapshot, emit_identity_changes,
-    fetch_missing_avatars_after_queue_drain, handle_attachment_completion,
-    handle_command_interruptibly, load_unprojected_messages, qr_png, receive_error_is_transient,
+    fetch_missing_avatars_after_queue_drain, handle_attachment_completion, handle_command,
+    load_unprojected_messages, qr_png, receive_error_is_transient,
     request_contacts_after_queue_drain, spawn_group_sync, upload_and_send_attachment,
 };
 use super::media::AvatarCache;
@@ -280,6 +280,26 @@ struct ConnectionSession {
 }
 
 impl ConnectionSession {
+    async fn handle_command_interruptibly(&mut self, command: Command) -> bool {
+        let mut operation = Box::pin(handle_command(
+            CommandContext {
+                manager: &mut self.manager,
+                repo: &self.repo,
+                sink: &self.sink,
+                departed_groups: &self.departed_groups,
+                groups_authoritative: self.session.groups_authoritative(),
+                metadata_cache: &self.metadata_cache,
+                timestamps: &self.timestamps,
+            },
+            command,
+        ));
+
+        tokio::select! {
+            () = &mut operation => false,
+            _ = wait_for_shutdown(&mut self.shutdown) => true,
+        }
+    }
+
     async fn stop_and_drain(&mut self) {
         stop_attachments_and_drain_acknowledgments(
             &self.manager,
@@ -547,6 +567,7 @@ impl ConnectionSession {
             {
                 phase_or_stop!(project_content(
                     &mut self.manager,
+                    &self.repo,
                     content,
                     &self.sink,
                     &mut self.projection,
@@ -663,6 +684,7 @@ impl ConnectionSession {
                                 continue;
                             }
                             let mut attachment_manager = self.manager.clone();
+                            let attachment_repo = self.repo.clone();
                             let attachment_departed_groups = self.departed_groups.clone();
                             let attachment_metadata_cache = self.metadata_cache.clone();
                             let attachment_timestamps = self.timestamps.clone();
@@ -673,6 +695,7 @@ impl ConnectionSession {
                                     permit,
                                     upload_and_send_attachment(
                                         &mut attachment_manager,
+                                        &attachment_repo,
                                         OutgoingAttachment {
                                             recipient,
                                             filename,
@@ -698,16 +721,7 @@ impl ConnectionSession {
                             {
                                 self.departed_groups.begin_leave(group_key.clone());
                             }
-                            if handle_command_interruptibly(
-                                &mut self.manager,
-                                command,
-                                &mut self.shutdown,
-                                &self.sink,
-                                &self.departed_groups,
-                                groups_authoritative,
-                                &self.metadata_cache,
-                                &self.timestamps,
-                            ).await {
+                            if self.handle_command_interruptibly(command).await {
                                 self.stop_active_and_drain(receive_tasks).await;
                                 return ControlFlow::Break(Ok(()));
                             }

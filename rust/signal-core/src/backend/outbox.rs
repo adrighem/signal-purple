@@ -56,6 +56,7 @@ pub(crate) fn outbox_message_is_attemptable(
 
 pub(crate) async fn attempt_outbox_message<M: SignalProtocol>(
     manager: &mut M,
+    repo: &impl StorageOps,
     message: &ClientOutboxMessage,
     departed_groups: &DepartedGroups,
     metadata_cache: &super::coordinator::MetadataCache,
@@ -94,6 +95,7 @@ pub(crate) async fn attempt_outbox_message<M: SignalProtocol>(
             let _operation = departed_groups.lock_operation().await;
             let (key, group) = super::coordinator::resolve_active_group(
                 manager,
+                repo,
                 &message.recipient,
                 departed_groups,
                 metadata_cache,
@@ -189,7 +191,7 @@ pub(crate) async fn retry_outbox<M: SignalProtocol>(
             continue;
         }
         let result =
-            attempt_outbox_message(manager, &message, departed_groups, metadata_cache).await;
+            attempt_outbox_message(manager, repo, &message, departed_groups, metadata_cache).await;
         if let Ok(sent) = &result {
             super::coordinator::mark_sent_message_projected_or_report(repo, sent, sink).await;
         }
@@ -249,7 +251,8 @@ pub(crate) async fn enqueue_and_send<M: SignalProtocol>(
         timestamp,
         attempts: 0,
     };
-    let result = attempt_outbox_message(manager, &message, departed_groups, metadata_cache).await;
+    let result =
+        attempt_outbox_message(manager, repo, &message, departed_groups, metadata_cache).await;
     if let Ok(sent) = &result {
         super::coordinator::mark_sent_message_projected_or_report(repo, sent, sink).await;
     }

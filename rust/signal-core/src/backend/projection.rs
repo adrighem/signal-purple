@@ -18,6 +18,7 @@ use crate::event::Event;
 use crate::event_queue::EventSink;
 use crate::store::StorageRepository;
 use crate::store::errors::sqlite_store_error_is_transient;
+use crate::store::traits::StorageOps;
 
 pub(crate) const MAX_PENDING_MESSAGE_PROJECTIONS: usize = 64;
 pub(crate) const MAX_PENDING_DELIVERY_RECEIPTS: usize = 4096;
@@ -191,8 +192,10 @@ pub(crate) fn content_is_projectable(content: &ContentBody, groups_authoritative
     groups_authoritative || !content_has_group_context(content)
 }
 
-pub(crate) async fn project_content<M: SignalProtocol>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn project_content<M: SignalProtocol, S: StorageOps>(
     manager: &mut M,
+    repo: &S,
     content: Content,
     sink: &EventSink,
     projection: &mut MessageProjection,
@@ -209,6 +212,7 @@ pub(crate) async fn project_content<M: SignalProtocol>(
     let effect = projection_effect(
         handle_content(
             manager,
+            repo,
             content.clone(),
             delivery_id,
             sink,
@@ -226,7 +230,6 @@ pub(crate) async fn project_content<M: SignalProtocol>(
         projection.release(delivery_id);
         return;
     }
-    let repo = StorageRepository::new(manager.store().clone());
     match repo.mark_message_projected(&content).await {
         Ok(()) => {
             projection.complete(delivery_id);
