@@ -4,6 +4,14 @@ All notable changes are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for stable releases.
 
+## [1.6.0](https://github.com/adrighem/signal-purple/compare/v1.5.1...v1.6.0) (2026-09-11)
+
+* Stays connected across network drops: connection retries now continue automatically until the network returns, instead of giving up after 30 seconds ([8362151](https://github.com/adrighem/signal-purple/commit/8362151eeddebedc357f7fdd6f7d33c8c4ee71fa)).
+* Faster group messaging: sending messages to groups no longer scans the full database, speeding up dispatch ([cade295](https://github.com/adrighem/signal-purple/commit/cade2951daec139ead1a64f6ae1973510f556109), [33e19fc](https://github.com/adrighem/signal-purple/commit/33e19fc498f75569b0c412d0840d427abf04fd33)).
+* Lower memory usage for attachments: file and media uploads stream directly across the plugin boundary instead of buffering entire files in memory ([a93fa6e](https://github.com/adrighem/signal-purple/commit/a93fa6ee5b213278304f13d1e17c76713fb24ee3)).
+* Fewer database lockups and crashes: transient SQLite timeouts and busy states are now caught and retried cleanly in the background ([4490fc1](https://github.com/adrighem/signal-purple/commit/4490fc19a03717dab91b9cc899b936528ac54c39), [25f961a](https://github.com/adrighem/signal-purple/commit/25f961a5b45444fb7b7b44bbd35bbe39e2f70c1c), [259c3ea](https://github.com/adrighem/signal-purple/commit/259c3ea83cb090849f388c98fc300998f3b696a7)).
+* Faster chat operations: frequently accessed account and conversation metadata is kept in memory to minimize disk reads ([35d4348](https://github.com/adrighem/signal-purple/commit/35d4348fccc64dd7f88c702c59d1bf8fbb27889d)).
+
 ## [1.5.1](https://github.com/adrighem/signal-purple/compare/v1.5.0...v1.5.1) (2026-09-05)
 
 
