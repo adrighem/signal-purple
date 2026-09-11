@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use presage::libsignal_service::content::Content;
+use presage::libsignal_service::protocol::Aci;
+use presage::model::groups::Group;
 use presage::store::Thread;
 use presage_store_sqlite::{ClientOutboxKind, ClientOutboxMessage, SqliteStoreError};
 
@@ -10,14 +12,6 @@ use super::repository::StorageRepository;
 /// `backend/outbox.rs` and `backend/projection.rs` drive. Generic code depends on
 /// this trait instead of the concrete `StorageRepository` so it can be exercised
 /// in tests against an in-memory fake, without a real SQLite database.
-///
-/// `due_outbox_messages`/`complete_outbox_message`/`defer_outbox_message` and
-/// `mark_sent_message_projected` are already reached polymorphically (via
-/// `retry_outbox`/`enqueue_and_send`/`mark_sent_message_projected_or_report`).
-/// The remaining methods mirror ones still called directly on a concrete
-/// `StorageRepository` (e.g. from `handle_command`'s identity/outbox-cleanup
-/// arms, `load_unprojected_messages`, `project_content`) — kept here so those
-/// call sites can move to the trait incrementally without reshaping it again.
 #[allow(dead_code)]
 pub(crate) trait StorageOps {
     async fn due_outbox_messages(
@@ -59,6 +53,20 @@ pub(crate) trait StorageOps {
         thread: &Thread,
         timestamp: u64,
     ) -> Result<(), StorageError>;
+
+    async fn accept_identity_change(&self, recipient: &str) -> Result<bool, SqliteStoreError>;
+
+    async fn dismiss_identity_change(&self, recipient: &str) -> Result<(), SqliteStoreError>;
+
+    async fn groups(&self) -> Result<Vec<([u8; 32], Group)>, StorageError>;
+
+    async fn group(&self, key: [u8; 32]) -> Result<Option<Group>, SqliteStoreError>;
+
+    async fn active_group(
+        &self,
+        key: [u8; 32],
+        local_aci: &Aci,
+    ) -> Result<Option<Group>, StorageError>;
 }
 
 impl StorageOps for StorageRepository {
@@ -119,6 +127,30 @@ impl StorageOps for StorageRepository {
     ) -> Result<(), StorageError> {
         StorageRepository::mark_sent_message_projected(self, thread, timestamp).await
     }
+
+    async fn accept_identity_change(&self, recipient: &str) -> Result<bool, SqliteStoreError> {
+        StorageRepository::accept_identity_change(self, recipient).await
+    }
+
+    async fn dismiss_identity_change(&self, recipient: &str) -> Result<(), SqliteStoreError> {
+        StorageRepository::dismiss_identity_change(self, recipient).await
+    }
+
+    async fn groups(&self) -> Result<Vec<([u8; 32], Group)>, StorageError> {
+        StorageRepository::groups(self).await
+    }
+
+    async fn group(&self, key: [u8; 32]) -> Result<Option<Group>, SqliteStoreError> {
+        StorageRepository::group(self, key).await
+    }
+
+    async fn active_group(
+        &self,
+        key: [u8; 32],
+        local_aci: &Aci,
+    ) -> Result<Option<Group>, StorageError> {
+        StorageRepository::active_group(self, key, local_aci).await
+    }
 }
 
 #[cfg(test)]
@@ -127,7 +159,7 @@ impl StorageOps for StorageRepository {
     reason = "shared test fixture; not every method is exercised by every test"
 )]
 pub(crate) mod fake {
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     use super::*;
 
@@ -138,6 +170,7 @@ pub(crate) mod fake {
         due_at: std::collections::HashMap<i64, u64>,
         sent: std::collections::HashMap<(Thread, u64), Content>,
         projected: std::collections::HashSet<(Thread, u64)>,
+        groups: std::collections::HashMap<[u8; 32], Group>,
         /// When set, `mark_sent_message_projected` fails with this error the next
         /// `fail_projection_attempts` times before succeeding, to exercise retry.
         projection_failure: Option<(StorageErrorKind, u32)>,
@@ -149,14 +182,18 @@ pub(crate) mod fake {
         NotFound,
     }
 
-    #[derive(Default)]
+    #[derive(Clone, Default)]
     pub(crate) struct FakeStorageRepository {
-        state: Mutex<FakeState>,
+        state: Arc<Mutex<FakeState>>,
     }
 
     impl FakeStorageRepository {
         pub(crate) fn new() -> Self {
             Self::default()
+        }
+
+        pub(crate) fn add_group(&self, key: [u8; 32], group: Group) {
+            self.state.lock().unwrap().groups.insert(key, group);
         }
 
         pub(crate) fn stage_sent_message(&self, thread: Thread, timestamp: u64, content: Content) {
@@ -315,6 +352,73 @@ pub(crate) mod fake {
                 .projected
                 .insert((thread.clone(), timestamp));
             Ok(())
+        }
+
+        async fn accept_identity_change(&self, _recipient: &str) -> Result<bool, SqliteStoreError> {
+            Ok(true)
+        }
+
+        async fn dismiss_identity_change(&self, _recipient: &str) -> Result<(), SqliteStoreError> {
+            Ok(())
+        }
+
+        async fn groups(&self) -> Result<Vec<([u8; 32], Group)>, StorageError> {
+            let state = self.state.lock().unwrap();
+            Ok(state
+                .groups
+                .iter()
+                .map(|(k, g)| (*k, clone_group(g)))
+                .collect())
+        }
+
+        async fn group(&self, key: [u8; 32]) -> Result<Option<Group>, SqliteStoreError> {
+            let state = self.state.lock().unwrap();
+            Ok(state.groups.get(&key).map(clone_group))
+        }
+
+        async fn active_group(
+            &self,
+            key: [u8; 32],
+            local_aci: &Aci,
+        ) -> Result<Option<Group>, StorageError> {
+            let state = self.state.lock().unwrap();
+            Ok(state
+                .groups
+                .get(&key)
+                .filter(|group| group.members.iter().any(|member| member.aci == *local_aci))
+                .map(clone_group))
+        }
+    }
+
+    fn clone_group(group: &Group) -> Group {
+        Group {
+            title: group.title.clone(),
+            avatar: group.avatar.clone(),
+            disappearing_messages_timer: group.disappearing_messages_timer.clone(),
+            access_control: group.access_control.clone(),
+            revision: group.revision,
+            members: group.members.clone(),
+            pending_members: group
+                .pending_members
+                .iter()
+                .map(|pm| presage::model::groups::PendingMember {
+                    uuid: pm.uuid,
+                    service_id_type: match pm.service_id_type {
+                        presage::model::ServiceIdType::AccountIdentity => {
+                            presage::model::ServiceIdType::AccountIdentity
+                        }
+                        presage::model::ServiceIdType::PhoneNumberIdentity => {
+                            presage::model::ServiceIdType::PhoneNumberIdentity
+                        }
+                    },
+                    role: pm.role,
+                    added_by_aci: pm.added_by_aci,
+                    timestamp: pm.timestamp,
+                })
+                .collect(),
+            requesting_members: group.requesting_members.clone(),
+            invite_link_password: group.invite_link_password.clone(),
+            description: group.description.clone(),
         }
     }
 }

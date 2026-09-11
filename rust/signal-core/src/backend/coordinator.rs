@@ -879,34 +879,14 @@ pub(crate) struct AttachmentCompletion {
     pub(crate) permit: AttachmentPermit,
 }
 
-// A thin shutdown-race wrapper around `handle_command`: one parameter per
-// piece of session context `handle_command` itself needs, not worth bundling
-// into a context struct for a single forwarding call.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn handle_command_interruptibly(
-    manager: &mut Manager<SqliteStore, Registered>,
-    command: Command,
-    shutdown: &mut watch::Receiver<bool>,
-    sink: &EventSink,
-    departed_groups: &DepartedGroups,
-    groups_authoritative: bool,
-    metadata_cache: &MetadataCache,
-    timestamps: &MessageTimestampAllocator,
-) -> bool {
-    let mut operation = Box::pin(handle_command(
-        manager,
-        command,
-        sink,
-        departed_groups,
-        groups_authoritative,
-        metadata_cache,
-        timestamps,
-    ));
-
-    tokio::select! {
-        () = &mut operation => false,
-        _ = wait_for_shutdown(shutdown) => true,
-    }
+pub(crate) struct CommandContext<'a, M, S = StorageRepository> {
+    pub(crate) manager: &'a mut M,
+    pub(crate) repo: &'a S,
+    pub(crate) sink: &'a EventSink,
+    pub(crate) departed_groups: &'a DepartedGroups,
+    pub(crate) groups_authoritative: bool,
+    pub(crate) metadata_cache: &'a MetadataCache,
+    pub(crate) timestamps: &'a MessageTimestampAllocator,
 }
 
 pub(crate) async fn emit_contact_snapshot(
@@ -1208,6 +1188,7 @@ pub(crate) struct OutgoingAttachment {
 
 pub(crate) async fn upload_and_send_attachment<M: SignalProtocol>(
     manager: &mut M,
+    repo: &impl StorageOps,
     attachment: OutgoingAttachment,
     departed_groups: &DepartedGroups,
     metadata_cache: &MetadataCache,
@@ -1231,7 +1212,7 @@ pub(crate) async fn upload_and_send_attachment<M: SignalProtocol>(
     }
     let group_target = if group {
         Some(
-            resolve_active_group(manager, &recipient, departed_groups, metadata_cache)
+            resolve_active_group(manager, repo, &recipient, departed_groups, metadata_cache)
                 .await?
                 .ok_or_else(|| {
                     "Signal group is unavailable or this account is no longer a member".to_owned()
@@ -1261,7 +1242,7 @@ pub(crate) async fn upload_and_send_attachment<M: SignalProtocol>(
     match group_target {
         Some((key, _)) => {
             let _operation = departed_groups.lock_operation().await;
-            let group = active_group_by_key(manager, key, departed_groups)
+            let group = active_group_by_key(manager, repo, key, departed_groups)
                 .await?
                 .ok_or_else(|| {
                     "Signal group became unavailable before the attachment could be sent".to_owned()
@@ -1337,16 +1318,19 @@ pub(crate) async fn load_unprojected_messages(
     replay.replace(messages, groups_authoritative);
 }
 
-async fn handle_command<M: SignalProtocol>(
-    manager: &mut M,
+pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
+    ctx: CommandContext<'_, M, S>,
     command: Command,
-    sink: &EventSink,
-    departed_groups: &DepartedGroups,
-    groups_authoritative: bool,
-    metadata_cache: &MetadataCache,
-    timestamps: &MessageTimestampAllocator,
 ) {
-    let repo = StorageRepository::new(manager.store().clone());
+    let CommandContext {
+        manager,
+        repo,
+        sink,
+        departed_groups,
+        groups_authoritative,
+        metadata_cache,
+        timestamps,
+    } = ctx;
     match command {
         Command::AcceptIdentity {
             request_id,
@@ -1367,7 +1351,7 @@ async fn handle_command<M: SignalProtocol>(
                 });
                 retry_outbox(
                     manager,
-                    &repo,
+                    repo,
                     sink,
                     departed_groups,
                     metadata_cache,
@@ -1387,26 +1371,29 @@ async fn handle_command<M: SignalProtocol>(
         Command::DismissIdentity {
             request_id,
             recipient,
-        } => {
-            if let Err(error) = repo.dismiss_identity_change(&recipient).await {
-                sink.emit(Event::request_error(
+        } => match repo.dismiss_identity_change(&recipient).await {
+            Ok(()) => {
+                sink.emit(Event {
+                    kind: EVENT_IDENTITY_CHANGE,
                     request_id,
-                    format!("Could not dismiss the Signal identity notice: {error}"),
-                ));
+                    peer_id: Some(recipient),
+                    ..Event::default()
+                });
             }
-        }
+            Err(error) => sink.emit(Event::request_error(
+                request_id,
+                format!("Could not dismiss the Signal identity notice: {error}"),
+            )),
+        },
         Command::ResetSession {
             request_id,
             recipient,
         } => {
-            let Some(service_id) = parse_recipient(&recipient) else {
-                sink.emit(Event::request_error(
-                    request_id,
-                    "The recipient identifier could not be parsed as a Signal service ID",
-                ));
-                return;
+            let result = match parse_recipient(&recipient) {
+                Some(recipient) => manager.clear_sessions(&recipient).await,
+                None => Err("Recipient is not a canonical Signal service identifier".into()),
             };
-            match manager.clear_sessions(&service_id).await {
+            match result {
                 Ok(()) => {
                     sink.emit(Event {
                         kind: EVENT_SESSION_RESET,
@@ -1465,6 +1452,7 @@ async fn handle_command<M: SignalProtocol>(
             let group_operation = departed_groups.lock_operation().await;
             let resolved = resolve_active_group_for_leave(
                 manager,
+                repo,
                 &group_key,
                 departed_groups,
                 metadata_cache,
@@ -1510,7 +1498,7 @@ async fn handle_command<M: SignalProtocol>(
                     }
                     retry_outbox(
                         manager,
-                        &repo,
+                        repo,
                         sink,
                         departed_groups,
                         metadata_cache,
@@ -1540,7 +1528,7 @@ async fn handle_command<M: SignalProtocol>(
             let result = if parse_recipient(&recipient).is_some() {
                 enqueue_and_send(
                     manager,
-                    &repo,
+                    repo,
                     NewOutboxMessage {
                         kind: ClientOutboxKind::Direct,
                         recipient,
@@ -1570,13 +1558,19 @@ async fn handle_command<M: SignalProtocol>(
                         .into(),
                 )
             } else {
-                match resolve_active_group(manager, &group_key, departed_groups, metadata_cache)
-                    .await
+                match resolve_active_group(
+                    manager,
+                    repo,
+                    &group_key,
+                    departed_groups,
+                    metadata_cache,
+                )
+                .await
                 {
                     Ok(Some(_)) => {
                         enqueue_and_send(
                             manager,
-                            &repo,
+                            repo,
                             NewOutboxMessage {
                                 kind: ClientOutboxKind::Group,
                                 recipient: group_key,
@@ -1638,8 +1632,10 @@ async fn handle_command<M: SignalProtocol>(
     }
 }
 
-pub(crate) async fn handle_content<M: SignalProtocol>(
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn handle_content<M: SignalProtocol, S: StorageOps>(
     manager: &mut M,
+    repo: &S,
     content: Content,
     delivery_id: u64,
     sink: &EventSink,
@@ -1663,7 +1659,8 @@ pub(crate) async fn handle_content<M: SignalProtocol>(
             } else {
                 DataMessageProjection::incoming(message, &route.peer, timestamp, delivery_id)
             };
-            let disposition = emit_data_message(manager, projection, sink, departed_groups).await;
+            let disposition =
+                emit_data_message(manager, repo, projection, sink, departed_groups).await;
             if content.metadata.needs_receipt
                 && delivery_receipts.enqueue(content.metadata.sender, timestamp, timestamps.next())
             {
@@ -1687,7 +1684,7 @@ pub(crate) async fn handle_content<M: SignalProtocol>(
             } else {
                 DataMessageProjection::incoming(message, &route.peer, timestamp, delivery_id)
             };
-            return emit_data_message(manager, projection, sink, departed_groups).await;
+            return emit_data_message(manager, repo, projection, sink, departed_groups).await;
         }
         ContentBody::SynchronizeMessage(SyncMessage {
             sent: Some(sent), ..
@@ -1698,6 +1695,7 @@ pub(crate) async fn handle_content<M: SignalProtocol>(
                     .map_or_else(|| sender.clone(), |id| id.service_id_string());
                 return emit_data_message(
                     manager,
+                    repo,
                     DataMessageProjection::outgoing(message, &peer, timestamp, delivery_id),
                     sink,
                     departed_groups,
@@ -1713,6 +1711,7 @@ pub(crate) async fn handle_content<M: SignalProtocol>(
                     .map_or_else(|| sender.clone(), |id| id.service_id_string());
                 return emit_data_message(
                     manager,
+                    repo,
                     DataMessageProjection::outgoing(message, &peer, timestamp, delivery_id),
                     sink,
                     departed_groups,
@@ -1845,8 +1844,9 @@ fn projected_data_message_text<'a>(
     (!text.is_empty()).then_some(text)
 }
 
-async fn emit_data_message<M: SignalProtocol>(
+async fn emit_data_message<M: SignalProtocol, S: StorageOps>(
     manager: &M,
+    repo: &S,
     projection: DataMessageProjection<'_>,
     sink: &EventSink,
     departed_groups: &DepartedGroups,
@@ -1879,7 +1879,7 @@ async fn emit_data_message<M: SignalProtocol>(
         GroupMessageTarget::Malformed => unreachable!(),
     };
     let group_title = if let Some(group_key) = group_key {
-        match group_for_projection(manager, group_key, departed_groups).await {
+        match group_for_projection(manager, repo, group_key, departed_groups).await {
             Ok(ProjectionGroup::Active(group)) => Some(group.title),
             Ok(ProjectionGroup::Complete) => return ProjectionDisposition::Complete,
             Ok(ProjectionGroup::Retry) => return ProjectionDisposition::Retry,
@@ -2065,8 +2065,9 @@ fn group_contains_local_aci(group: &Group, local_aci: &Aci) -> bool {
     contains_local_aci(group.members.iter().map(|member| &member.aci), local_aci)
 }
 
-async fn group_for_projection<M: SignalProtocol>(
+async fn group_for_projection<M: SignalProtocol, S: StorageOps>(
     manager: &M,
+    repo: &S,
     key: [u8; 32],
     departed_groups: &DepartedGroups,
 ) -> Result<ProjectionGroup, String> {
@@ -2081,7 +2082,6 @@ async fn group_for_projection<M: SignalProtocol>(
         });
     }
 
-    let repo = StorageRepository::new(manager.store().clone());
     let group = repo
         .group(key)
         .await
@@ -2106,8 +2106,9 @@ async fn group_for_projection<M: SignalProtocol>(
     )
 }
 
-async fn active_group_by_key<M: SignalProtocol>(
+async fn active_group_by_key<M: SignalProtocol, S: StorageOps>(
     manager: &M,
+    repo: &S,
     key: [u8; 32],
     departed_groups: &DepartedGroups,
 ) -> Result<Option<Group>, String> {
@@ -2115,14 +2116,14 @@ async fn active_group_by_key<M: SignalProtocol>(
         return Ok(None);
     }
     let local_aci = manager.local_aci();
-    let repo = StorageRepository::new(manager.store().clone());
     repo.active_group(key, &local_aci)
         .await
         .map_err(|error| error.to_string())
 }
 
-pub(crate) async fn resolve_active_group<M: SignalProtocol>(
+pub(crate) async fn resolve_active_group<M: SignalProtocol, S: StorageOps>(
     manager: &M,
+    repo: &S,
     identifier: &str,
     departed_groups: &DepartedGroups,
     metadata_cache: &MetadataCache,
@@ -2130,11 +2131,12 @@ pub(crate) async fn resolve_active_group<M: SignalProtocol>(
     if departed_groups.contains(identifier) {
         return Ok(None);
     }
-    resolve_active_group_in_store(manager, identifier, metadata_cache).await
+    resolve_active_group_in_store(manager, repo, identifier, metadata_cache).await
 }
 
-async fn resolve_active_group_for_leave<M: SignalProtocol>(
+async fn resolve_active_group_for_leave<M: SignalProtocol, S: StorageOps>(
     manager: &M,
+    repo: &S,
     identifier: &str,
     departed_groups: &DepartedGroups,
     metadata_cache: &MetadataCache,
@@ -2142,20 +2144,20 @@ async fn resolve_active_group_for_leave<M: SignalProtocol>(
     if departed_groups.is_departed(identifier) {
         return Ok(None);
     }
-    resolve_active_group_in_store(manager, identifier, metadata_cache).await
+    resolve_active_group_in_store(manager, repo, identifier, metadata_cache).await
 }
 
 /// Resolves a group by its hashed identifier. Checks `metadata_cache`'s
 /// identifier index first (an O(1) lookup plus one single-group store read)
 /// before falling back to a full scan of every group, which would otherwise
 /// run on every group send, leave, and outbox retry attempt.
-async fn resolve_active_group_in_store<M: SignalProtocol>(
+async fn resolve_active_group_in_store<M: SignalProtocol, S: StorageOps>(
     manager: &M,
+    repo: &S,
     identifier: &str,
     metadata_cache: &MetadataCache,
 ) -> Result<Option<([u8; 32], Group)>, String> {
     let local_aci = manager.local_aci();
-    let repo = StorageRepository::new(manager.store().clone());
     if let Some(key) = metadata_cache.group_key_for_identifier(identifier) {
         let indexed = repo
             .active_group(key, &local_aci)
