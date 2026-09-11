@@ -107,3 +107,89 @@ signal_read_bounded_file(const char *path, gsize maximum_bytes, GError **error)
 
     return g_byte_array_free_to_bytes(g_steal_pointer(&contents));
 }
+
+gboolean
+signal_inspect_attachment_file(const char *path, gsize maximum_bytes,
+                               gsize *out_size, char **out_mime_type,
+                               GError **error)
+{
+    guint8 header[512];
+    struct stat metadata;
+    int descriptor;
+    g_autofree char *content_type = NULL;
+    g_autofree char *basename = NULL;
+    ssize_t bytes_read = 0;
+    gboolean uncertain = FALSE;
+
+    g_return_val_if_fail(error == NULL || *error == NULL, FALSE);
+    if (path == NULL || path[0] == '\0' || maximum_bytes == 0 ||
+        maximum_bytes > G_MAXUINT) {
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_ARGUMENT,
+                            "Attachment file parameters are invalid");
+        return FALSE;
+    }
+
+    descriptor = g_open(path, O_RDONLY | O_CLOEXEC | O_NONBLOCK, 0);
+    if (descriptor < 0) {
+        int open_error = errno;
+
+        signal_set_file_error(error, open_error, "open");
+        return FALSE;
+    }
+
+    if (fstat(descriptor, &metadata) != 0) {
+        int stat_error = errno;
+
+        signal_close_ignoring_error(descriptor);
+        signal_set_file_error(error, stat_error, "inspect");
+        return FALSE;
+    }
+    if (!S_ISREG(metadata.st_mode)) {
+        signal_close_ignoring_error(descriptor);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_NOT_REGULAR_FILE,
+                            "Attachment path is not a regular file");
+        return FALSE;
+    }
+    if (metadata.st_size <= 0) {
+        signal_close_ignoring_error(descriptor);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA,
+                            "Attachment file is empty");
+        return FALSE;
+    }
+    if ((guint64)metadata.st_size > (guint64)maximum_bytes) {
+        signal_close_ignoring_error(descriptor);
+        g_set_error_literal(error, G_IO_ERROR, G_IO_ERROR_MESSAGE_TOO_LARGE,
+                            "Attachment file exceeds the size limit");
+        return FALSE;
+    }
+
+    while (TRUE) {
+        bytes_read = read(descriptor, header, sizeof(header));
+        if (bytes_read < 0 && errno == EINTR)
+            continue;
+        break;
+    }
+    signal_close_ignoring_error(descriptor);
+
+    if (out_size != NULL)
+        *out_size = (gsize)metadata.st_size;
+
+    if (out_mime_type != NULL) {
+        char *mime_type = NULL;
+
+        basename = g_path_get_basename(path);
+        if (bytes_read > 0) {
+            content_type = g_content_type_guess(basename, header,
+                                                (gsize)bytes_read, &uncertain);
+        } else {
+            content_type = g_content_type_guess(basename, NULL, 0, &uncertain);
+        }
+        if (content_type != NULL)
+            mime_type = g_content_type_get_mime_type(content_type);
+        if (mime_type == NULL)
+            mime_type = g_strdup("application/octet-stream");
+        *out_mime_type = mime_type;
+    }
+
+    return TRUE;
+}

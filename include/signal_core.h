@@ -209,6 +209,13 @@ SignalStatus signal_core_send_attachment(SignalCore *core,
                                          const uint8_t *data,
                                          size_t data_len);
 
+SignalStatus signal_core_send_file_attachment(SignalCore *core,
+                                              uint64_t request_id,
+                                              const char *recipient,
+                                              const char *filename,
+                                              const char *content_type,
+                                              const char *file_path);
+
 SignalStatus signal_core_send_group_attachment(SignalCore *core,
                                                uint64_t request_id,
                                                const char *group_key,
@@ -216,6 +223,13 @@ SignalStatus signal_core_send_group_attachment(SignalCore *core,
                                                const char *content_type,
                                                const uint8_t *data,
                                                size_t data_len);
+
+SignalStatus signal_core_send_group_file_attachment(SignalCore *core,
+                                                    uint64_t request_id,
+                                                    const char *group_key,
+                                                    const char *filename,
+                                                    const char *content_type,
+                                                    const char *file_path);
 
 SignalStatus signal_core_cancel_attachment(SignalCore *core,
                                            uint64_t request_id);

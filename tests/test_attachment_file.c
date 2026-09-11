@@ -156,6 +156,54 @@ test_reports_missing_files(void)
     g_assert_error(error, G_IO_ERROR, G_IO_ERROR_NOT_FOUND);
 }
 
+static void
+test_inspect_attachment_file_success(void)
+{
+    const guint8 expected[] = "%PDF-1.4\n%sample pdf content\n";
+    g_autofree char *path = test_path("sample.pdf");
+    g_autoptr(GError) error = NULL;
+    g_autofree char *mime_type = NULL;
+    gsize size = 0;
+    gboolean ok;
+
+    g_assert_true(g_file_set_contents(path, (const char *)expected,
+                                      (gssize)sizeof(expected), &error));
+    g_assert_no_error(error);
+
+    ok = signal_inspect_attachment_file(path, sizeof(expected), &size,
+                                        &mime_type, &error);
+    g_assert_true(ok);
+    g_assert_no_error(error);
+    g_assert_cmpuint(size, ==, sizeof(expected));
+    g_assert_nonnull(mime_type);
+    g_assert_cmpstr(mime_type, ==, "application/pdf");
+    g_assert_cmpint(g_remove(path), ==, 0);
+}
+
+static void
+test_inspect_attachment_file_rejects_empty_and_oversized(void)
+{
+    g_autofree char *empty_path = test_path("empty.txt");
+    g_autofree char *oversized_path = test_path("oversized.txt");
+    g_autoptr(GError) error = NULL;
+    gsize size = 0;
+
+    g_assert_true(g_file_set_contents(empty_path, "", 0, &error));
+    g_assert_no_error(error);
+    g_assert_false(signal_inspect_attachment_file(empty_path, 100, &size,
+                                                  NULL, &error));
+    g_assert_error(error, G_IO_ERROR, G_IO_ERROR_INVALID_DATA);
+    g_clear_error(&error);
+    g_assert_cmpint(g_remove(empty_path), ==, 0);
+
+    g_assert_true(g_file_set_contents(oversized_path, "1234567890", 10, &error));
+    g_assert_no_error(error);
+    g_assert_false(signal_inspect_attachment_file(oversized_path, 5, &size,
+                                                  NULL, &error));
+    g_assert_error(error, G_IO_ERROR, G_IO_ERROR_MESSAGE_TOO_LARGE);
+    g_assert_cmpint(g_remove(oversized_path), ==, 0);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -180,6 +228,10 @@ main(int argc, char **argv)
                     test_rejects_non_regular_files_without_blocking);
     g_test_add_func("/signal/attachment-file/missing",
                     test_reports_missing_files);
+    g_test_add_func("/signal/attachment-file/inspect/success",
+                    test_inspect_attachment_file_success);
+    g_test_add_func("/signal/attachment-file/inspect/limits",
+                    test_inspect_attachment_file_rejects_empty_and_oversized);
     result = g_test_run();
 
     g_assert_cmpint(g_rmdir(test_directory), ==, 0);

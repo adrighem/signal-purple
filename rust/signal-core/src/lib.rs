@@ -7,5 +7,6 @@ mod backend;
 mod event;
 mod event_queue;
 mod ffi;
+pub(crate) mod store;
 
 pub use ffi::*;
