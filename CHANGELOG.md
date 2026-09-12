@@ -4,6 +4,14 @@ All notable changes are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for stable releases.
 
+## [1.6.1](https://github.com/adrighem/signal-purple/compare/v1.6.0...v1.6.1) (2026-09-12)
+
+
+### Bug Fixes
+
+* **group:** resolve reconnect race condition and soften group sync ([d0ff3a8](https://github.com/adrighem/signal-purple/commit/d0ff3a881c10bcecd7b152fa9c7521e6b37c1ce0))
+* **group:** resolve reconnect race condition and soften group sync ([892c2bc](https://github.com/adrighem/signal-purple/commit/892c2bcfdd51288c0f0a982f20145b66089a0749))
+
 ## [1.6.0](https://github.com/adrighem/signal-purple/compare/v1.5.1...v1.6.0) (2026-09-11)
 
 * Stays connected across network drops: connection retries now continue automatically until the network returns, instead of giving up after 30 seconds ([8362151](https://github.com/adrighem/signal-purple/commit/8362151eeddebedc357f7fdd6f7d33c8c4ee71fa)).
