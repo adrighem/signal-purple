@@ -1037,7 +1037,7 @@ signal_refresh_group_members(SignalConnection *connection,
 }
 
 static void
-signal_end_group_sync(SignalConnection *connection)
+signal_end_group_sync(SignalConnection *connection, const SignalEvent *event)
 {
     PurpleAccount *account;
     PurpleBlistNode *node;
@@ -1050,72 +1050,106 @@ signal_end_group_sync(SignalConnection *connection)
     g_autoptr(GPtrArray) stale_groups =
         g_ptr_array_new_with_free_func(g_free);
     g_autoptr(GPtrArray) pending_joins = NULL;
+    gboolean authoritative = (event != NULL && event->value != 0);
 
     if (!connection->group_sync.active)
         return;
 
-    g_hash_table_iter_init(&active_iter, connection->active_group_keys);
-    while (g_hash_table_iter_next(&active_iter, &active_group_key, NULL)) {
-        if (signal_contact_sync_should_remove(&connection->group_sync,
-                                              active_group_key))
-            g_ptr_array_add(stale_groups, g_strdup(active_group_key));
-    }
-    for (guint index = 0; index < stale_groups->len; index++)
-        signal_deactivate_group(connection,
-                                g_ptr_array_index(stale_groups, index), FALSE);
-
-    g_hash_table_remove_all(connection->active_group_keys);
-    g_hash_table_iter_init(&seen_iter, connection->group_sync.seen);
-    while (g_hash_table_iter_next(&seen_iter, &seen_group_key, NULL))
-        g_hash_table_add(connection->active_group_keys,
-                         g_strdup(seen_group_key));
-
-    account = purple_connection_get_account(connection->gc);
-    node = purple_blist_get_root();
-    while (node != NULL) {
-        PurpleBlistNode *next = purple_blist_node_next(node, FALSE);
-
-        if (PURPLE_BLIST_NODE_IS_CHAT(node)) {
-            PurpleChat *chat = PURPLE_CHAT(node);
-            GHashTable *components = purple_chat_get_components(chat);
-            const char *group_key = g_hash_table_lookup(
-                components, SIGNAL_GROUP_COMPONENT_KEY);
-
-            if (group_key == NULL)
-                group_key = g_hash_table_lookup(
-                    components, SIGNAL_LEGACY_GROUP_COMPONENT_KEY);
-
-            if (purple_chat_get_account(chat) == account &&
-                purple_blist_node_get_bool(node, SIGNAL_SYNCED_GROUP_KEY) &&
-                signal_contact_sync_should_remove(&connection->group_sync,
-                                                  group_key)) {
-                gboolean was_legacy = signal_blist_sync_is_legacy_chat_group(
-                    purple_chat_get_group(chat));
-
-                purple_blist_remove_chat(chat);
-                if (was_legacy)
-                    signal_blist_sync_remove_empty_legacy_chat_group();
-                connection->group_sync_removed++;
-            }
+    if (authoritative) {
+        if (connection->group_sync_fallback_timer_id != 0) {
+            purple_timeout_remove(connection->group_sync_fallback_timer_id);
+            connection->group_sync_fallback_timer_id = 0;
         }
-        node = next;
-    }
 
-    signal_contact_sync_end(&connection->group_sync);
-    g_hash_table_iter_init(&member_iter, connection->group_members_by_key);
-    while (g_hash_table_iter_next(&member_iter, &member_group_key, NULL))
-        signal_refresh_group_members(connection, member_group_key);
-    connection->group_snapshot_complete = TRUE;
-    pending_joins = signal_group_sync_take_active_joins(
-        connection->pending_group_joins, connection->active_group_keys);
-    for (guint index = 0; index < pending_joins->len; index++)
-        signal_open_group(connection, g_ptr_array_index(pending_joins, index),
-                          NULL);
-    purple_debug_info(
-        "signal-purple",
-        "Applied group snapshot: %u groups, %u created, %u removed\n",
-        connection->group_sync_groups, connection->group_sync_created,
-        connection->group_sync_removed);
+        g_hash_table_iter_init(&active_iter, connection->active_group_keys);
+        while (g_hash_table_iter_next(&active_iter, &active_group_key, NULL)) {
+            if (signal_contact_sync_should_remove(&connection->group_sync,
+                                                  active_group_key))
+                g_ptr_array_add(stale_groups, g_strdup(active_group_key));
+        }
+        for (guint index = 0; index < stale_groups->len; index++)
+            signal_deactivate_group(connection,
+                                    g_ptr_array_index(stale_groups, index),
+                                    FALSE);
+
+        g_hash_table_remove_all(connection->active_group_keys);
+        g_hash_table_iter_init(&seen_iter, connection->group_sync.seen);
+        while (g_hash_table_iter_next(&seen_iter, &seen_group_key, NULL))
+            g_hash_table_add(connection->active_group_keys,
+                             g_strdup(seen_group_key));
+
+        account = purple_connection_get_account(connection->gc);
+        node = purple_blist_get_root();
+        while (node != NULL) {
+            PurpleBlistNode *next = purple_blist_node_next(node, FALSE);
+
+            if (PURPLE_BLIST_NODE_IS_CHAT(node)) {
+                PurpleChat *chat = PURPLE_CHAT(node);
+                GHashTable *components = purple_chat_get_components(chat);
+                const char *group_key = g_hash_table_lookup(
+                    components, SIGNAL_GROUP_COMPONENT_KEY);
+
+                if (group_key == NULL)
+                    group_key = g_hash_table_lookup(
+                        components, SIGNAL_LEGACY_GROUP_COMPONENT_KEY);
+
+                if (purple_chat_get_account(chat) == account &&
+                    purple_blist_node_get_bool(node, SIGNAL_SYNCED_GROUP_KEY) &&
+                    signal_contact_sync_should_remove(&connection->group_sync,
+                                                      group_key)) {
+                    gboolean was_legacy = signal_blist_sync_is_legacy_chat_group(
+                        purple_chat_get_group(chat));
+
+                    purple_blist_remove_chat(chat);
+                    if (was_legacy)
+                        signal_blist_sync_remove_empty_legacy_chat_group();
+                    connection->group_sync_removed++;
+                }
+            }
+            node = next;
+        }
+
+        signal_contact_sync_end(&connection->group_sync);
+        g_hash_table_iter_init(&member_iter, connection->group_members_by_key);
+        while (g_hash_table_iter_next(&member_iter, &member_group_key, NULL))
+            signal_refresh_group_members(connection, member_group_key);
+        connection->group_snapshot_complete = TRUE;
+        pending_joins = signal_group_sync_take_active_joins(
+            connection->pending_group_joins, connection->active_group_keys,
+            TRUE);
+        for (guint index = 0; index < pending_joins->len; index++)
+            signal_open_group(connection, g_ptr_array_index(pending_joins, index),
+                              NULL);
+        purple_debug_info(
+            "signal-purple",
+            "Applied group snapshot: %u groups, %u created, %u removed\n",
+            connection->group_sync_groups, connection->group_sync_created,
+            connection->group_sync_removed);
+    } else {
+        /* Preliminary / cached snapshot from local storage: populate active keys
+         * so restored chat tabs can be used immediately, but do not mark snapshot
+         * complete or prune buddy list chats until network sync finishes. */
+        g_hash_table_iter_init(&seen_iter, connection->group_sync.seen);
+        while (g_hash_table_iter_next(&seen_iter, &seen_group_key, NULL))
+            g_hash_table_add(connection->active_group_keys,
+                             g_strdup(seen_group_key));
+
+        signal_contact_sync_end(&connection->group_sync);
+        g_hash_table_iter_init(&member_iter, connection->group_members_by_key);
+        while (g_hash_table_iter_next(&member_iter, &member_group_key, NULL))
+            signal_refresh_group_members(connection, member_group_key);
+
+        pending_joins = signal_group_sync_take_active_joins(
+            connection->pending_group_joins, connection->active_group_keys,
+            FALSE);
+        for (guint index = 0; index < pending_joins->len; index++)
+            signal_open_group(connection, g_ptr_array_index(pending_joins, index),
+                              NULL);
+        purple_debug_info(
+            "signal-purple",
+            "Applied preliminary group snapshot: %u groups cached\n",
+            connection->group_sync_groups);
+    }
 }
 
 static PurpleConversation *
@@ -1140,6 +1174,27 @@ signal_open_group(SignalConnection *connection, const char *group_key,
         conversation, signal_group_display_title(connection, group_key));
     signal_refresh_group_members(connection, group_key);
     return conversation;
+}
+
+static gboolean
+signal_group_sync_timeout(gpointer data)
+{
+    SignalConnection *connection = data;
+
+    connection->group_sync_fallback_timer_id = 0;
+    if (!connection->group_snapshot_complete) {
+        GHashTableIter iter;
+        gpointer group_key;
+
+        purple_debug_info("signal-purple",
+                          "Authoritative group sync timed out; finalizing pending joins\n");
+        connection->group_snapshot_complete = TRUE;
+        g_hash_table_iter_init(&iter, connection->pending_group_joins);
+        while (g_hash_table_iter_next(&iter, &group_key, NULL))
+            signal_open_group(connection, group_key, NULL);
+        g_hash_table_remove_all(connection->pending_group_joins);
+    }
+    return G_SOURCE_REMOVE;
 }
 
 static gboolean
@@ -1394,10 +1449,19 @@ signal_dispatch_event(SignalConnection *connection, const SignalEvent *event,
         purple_connection_update_progress(connection->gc,
                                           "Signal messages synchronized", 2, 3);
         purple_connection_set_state(connection->gc, PURPLE_CONNECTED);
+        if (!connection->group_snapshot_complete &&
+            connection->group_sync_fallback_timer_id == 0) {
+            connection->group_sync_fallback_timer_id = purple_timeout_add_seconds(
+                15, G_SOURCE_FUNC(signal_group_sync_timeout), connection);
+        }
         signal_flush_pending_reads(connection);
         break;
     case SIGNAL_EVENT_RECOVERING:
         connection->group_snapshot_complete = FALSE;
+        if (connection->group_sync_fallback_timer_id != 0) {
+            purple_timeout_remove(connection->group_sync_fallback_timer_id);
+            connection->group_sync_fallback_timer_id = 0;
+        }
         purple_debug_info("signal-purple",
                           "Signal connection interrupted; recovering automatically\n");
         break;
@@ -1423,7 +1487,7 @@ signal_dispatch_event(SignalConnection *connection, const SignalEvent *event,
         signal_add_group_member(connection, event);
         break;
     case SIGNAL_EVENT_GROUP_SYNC_END:
-        signal_end_group_sync(connection);
+        signal_end_group_sync(connection, event);
         break;
     case SIGNAL_EVENT_MESSAGE:
         projection_accepted = signal_deliver_direct(connection, event);
@@ -1655,6 +1719,10 @@ signal_connection_free(SignalConnection *connection)
     if (connection->pending_read_retry_id != 0) {
         purple_timeout_remove(connection->pending_read_retry_id);
         connection->pending_read_retry_id = 0;
+    }
+    if (connection->group_sync_fallback_timer_id != 0) {
+        purple_timeout_remove(connection->group_sync_fallback_timer_id);
+        connection->group_sync_fallback_timer_id = 0;
     }
     if (connection->core != NULL)
         signal_core_free(connection->core);
@@ -2240,6 +2308,10 @@ signal_join_chat(PurpleConnection *gc, GHashTable *components)
                                         SIGNAL_LEGACY_GROUP_COMPONENT_KEY);
     if (group_key == NULL || group_key[0] == '\0')
         return;
+    if (signal_group_is_active(connection, group_key)) {
+        signal_open_group(connection, group_key, NULL);
+        return;
+    }
     if (signal_group_sync_defer_join(connection->pending_group_joins,
                                      connection->group_snapshot_complete,
                                      group_key)) {
@@ -2247,10 +2319,10 @@ signal_join_chat(PurpleConnection *gc, GHashTable *components)
                           "Deferred Signal group join until synchronization completes\n");
         return;
     }
-    if (!signal_group_can_send(connection, group_key)) {
+    if (g_hash_table_contains(connection->pending_group_leaves, group_key)) {
         purple_notify_error(connection, "Signal group unavailable",
-                            "This Signal group is inactive or being left",
-                            "Wait for a pending leave or reconnect after confirming membership on another Signal device.");
+                            "This Signal group is being left",
+                            "Wait for a pending leave to complete.");
         return;
     }
     signal_open_group(connection, group_key, NULL);
@@ -2279,8 +2351,18 @@ signal_chat_send(PurpleConnection *gc, int id, const char *message,
 
     group_key = g_hash_table_lookup(connection->group_keys_by_id,
                                     GINT_TO_POINTER(id));
-    if (!signal_group_can_send(connection, group_key))
+    if (!signal_group_can_send(connection, group_key)) {
+        account = purple_connection_get_account(gc);
+        conversation =
+            signal_group_sync_lookup_conversation(account, group_key);
+        if (conversation != NULL) {
+            purple_conversation_write(
+                conversation, "",
+                "This Signal group is currently unavailable or inactive.",
+                PURPLE_MESSAGE_ERROR | PURPLE_MESSAGE_NO_LOG, time(NULL));
+        }
         return -ENOENT;
+    }
     account = purple_connection_get_account(gc);
     conversation =
         signal_group_sync_lookup_conversation(account, group_key);

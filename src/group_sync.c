@@ -184,7 +184,8 @@ signal_group_sync_defer_join(GHashTable *pending,
 }
 
 GPtrArray *
-signal_group_sync_take_active_joins(GHashTable *pending, GHashTable *active)
+signal_group_sync_take_active_joins(GHashTable *pending, GHashTable *active,
+                                    gboolean clear_unmatched)
 {
     GHashTableIter iter;
     gpointer group_id;
@@ -196,9 +197,13 @@ signal_group_sync_take_active_joins(GHashTable *pending, GHashTable *active)
     joins = g_ptr_array_new_with_free_func(g_free);
     g_hash_table_iter_init(&iter, pending);
     while (g_hash_table_iter_next(&iter, &group_id, NULL)) {
-        if (g_hash_table_contains(active, group_id))
+        if (g_hash_table_contains(active, group_id)) {
             g_ptr_array_add(joins, g_strdup(group_id));
+            if (!clear_unmatched)
+                g_hash_table_iter_remove(&iter);
+        }
     }
-    g_hash_table_remove_all(pending);
+    if (clear_unmatched)
+        g_hash_table_remove_all(pending);
     return joins;
 }
