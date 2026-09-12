@@ -6,11 +6,8 @@ All notable changes are documented here. The project follows
 
 ## [1.6.1](https://github.com/adrighem/signal-purple/compare/v1.6.0...v1.6.1) (2026-09-12)
 
-
-### Bug Fixes
-
-* **group:** resolve reconnect race condition and soften group sync ([d0ff3a8](https://github.com/adrighem/signal-purple/commit/d0ff3a881c10bcecd7b152fa9c7521e6b37c1ce0))
-* **group:** resolve reconnect race condition and soften group sync ([892c2bc](https://github.com/adrighem/signal-purple/commit/892c2bcfdd51288c0f0a982f20145b66089a0749))
+* Seamless group reconnects on startup: open group chat tabs rejoin cleanly without false "group unavailable" or "inactive" error popups ([892c2bc](https://github.com/adrighem/signal-purple/commit/892c2bcfdd51288c0f0a982f20145b66089a0749), [d0ff3a8](https://github.com/adrighem/signal-purple/commit/d0ff3a881c10bcecd7b152fa9c7521e6b37c1ce0)).
+* Non-disruptive group sync: local cached groups load immediately upon connection, and send errors on inactive groups appear inline in the chat window instead of interrupting with modal dialogs ([892c2bc](https://github.com/adrighem/signal-purple/commit/892c2bcfdd51288c0f0a982f20145b66089a0749)).
 
 ## [1.6.0](https://github.com/adrighem/signal-purple/compare/v1.5.1...v1.6.0) (2026-09-11)
 
