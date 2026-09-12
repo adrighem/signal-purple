@@ -4,6 +4,94 @@ All notable changes are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for stable releases.
 
+## [1.7.0](https://github.com/adrighem/signal-purple/compare/v1.6.1...v1.7.0) (2026-09-12)
+
+
+### Features
+
+* add bounded attachment transfers ([9f68633](https://github.com/adrighem/signal-purple/commit/9f68633a6f4d577e65c4bd34e88e7a38a08d5cec))
+* add read-only avatar support for contacts and groups ([#79](https://github.com/adrighem/signal-purple/issues/79)) ([dc87efa](https://github.com/adrighem/signal-purple/commit/dc87efab4ab77f294161be8efcd30e791482552d))
+* add reset Signal session action for buddy context menu ([#77](https://github.com/adrighem/signal-purple/issues/77)) ([908eb82](https://github.com/adrighem/signal-purple/commit/908eb828b27009b980ad76018d1a6f10d8e4678b))
+* add Ubuntu release packages ([#52](https://github.com/adrighem/signal-purple/issues/52)) ([7d3b9f7](https://github.com/adrighem/signal-purple/commit/7d3b9f716008ffd64216041f1af159490cd03753))
+* complete basic Signal group support ([06fe4d2](https://github.com/adrighem/signal-purple/commit/06fe4d2f684416ce8094a3eb1f1e782893da1ccb))
+* handle Signal identity replacements ([a57f0fe](https://github.com/adrighem/signal-purple/commit/a57f0fec53664f0db09b21002caf28688a29cdee))
+* **media:** extend incoming media support ([#70](https://github.com/adrighem/signal-purple/issues/70)) ([4634066](https://github.com/adrighem/signal-purple/commit/4634066acb8d1ce04167aa77b334db3daa2f8ad6))
+* **media:** render Signal GIF videos inline ([0db5162](https://github.com/adrighem/signal-purple/commit/0db51620d45f63bc6593699c81b8e32a3d913cfa))
+* **purple:** honor standard conversation logging ([c596247](https://github.com/adrighem/signal-purple/commit/c5962472ee9f94508c859e043af7e87c6ce0de53))
+* **release:** integrate Nix flake and Fedora RPM package generation ([75e1234](https://github.com/adrighem/signal-purple/commit/75e1234d70acd85660b8a029f0e18f7997df4146))
+* **release:** integrate Nix flake and Fedora RPM package generation ([38eef86](https://github.com/adrighem/signal-purple/commit/38eef86d55fe487c5bfc1e6dce7222a71029c503))
+* replay messages until Purple acknowledges them ([1c252e6](https://github.com/adrighem/signal-purple/commit/1c252e64632d2550fec6e60df1b7129171f9d457))
+* retry sends from an encrypted outbox ([adc0661](https://github.com/adrighem/signal-purple/commit/adc06610beab8f698485cc2227b4a876e4b4ad3d))
+* send read receipts when conversations are focused ([7b42ba2](https://github.com/adrighem/signal-purple/commit/7b42ba2f8c0ef6286f64f0b43e299d52f9ea4d62))
+* **storage:** introduce in-memory metadata caching for read paths ([35d4348](https://github.com/adrighem/signal-purple/commit/35d4348fccc64dd7f88c702c59d1bf8fbb27889d))
+* synchronize Signal contacts with Purple ([7fb1269](https://github.com/adrighem/signal-purple/commit/7fb1269eefe0ca2f940e2f6ec9aaf2c58903b8da))
+* synchronize Signal groups with Purple ([7a1a752](https://github.com/adrighem/signal-purple/commit/7a1a752491914e758993c5462ae121edcfbfcff6))
+
+
+### Bug Fixes
+
+* accept Ubuntu ddeb debug packages ([#57](https://github.com/adrighem/signal-purple/issues/57)) ([3e05e6b](https://github.com/adrighem/signal-purple/commit/3e05e6b083475af96c323354f99d15c12d7297ea)), closes [#52](https://github.com/adrighem/signal-purple/issues/52)
+* adopt legacy Signal contacts ([6e81640](https://github.com/adrighem/signal-purple/commit/6e81640b11d52235af1e7a88395706442e6282b6))
+* avoid logging Signal identifiers ([ee9f8f6](https://github.com/adrighem/signal-purple/commit/ee9f8f66ff57252dcf3cca4b326914d6f31f7493))
+* **backend:** remaining correctness nits from the architectural review ([33e19fc](https://github.com/adrighem/signal-purple/commit/33e19fc498f75569b0c412d0840d427abf04fd33))
+* **backend:** retry reconnection indefinitely instead of giving up after ~31s ([8362151](https://github.com/adrighem/signal-purple/commit/8362151eeddebedc357f7fdd6f7d33c8c4ee71fa))
+* bound outgoing attachment admission ([a0825d4](https://github.com/adrighem/signal-purple/commit/a0825d419f5bd006009789c6757248efdcdba226))
+* box large backend futures and optimize dependency builds ([e45a2e8](https://github.com/adrighem/signal-purple/commit/e45a2e899eae79e409f1a9405b9d6b106ae5b0c8)), closes [#83](https://github.com/adrighem/signal-purple/issues/83)
+* **build:** prevent plugin symbol interposition ([4bc1e4a](https://github.com/adrighem/signal-purple/commit/4bc1e4a3cb066e4f53d8c13b0e18e65dbc9e9217))
+* **core:** bound backend shutdown phases ([ce0de33](https://github.com/adrighem/signal-purple/commit/ce0de3343e2792a4132158b8e341bed4394bd29d))
+* **core:** bound downloads and preserve contact names ([d398240](https://github.com/adrighem/signal-purple/commit/d39824089ee4d06dae8cb58471aef101b3e0444a))
+* **core:** make control paths reliable ([374a92a](https://github.com/adrighem/signal-purple/commit/374a92a8bc099a0bd9d6b91569fc759ef374ab57))
+* **core:** minimize passphrase lifetime ([a9760d1](https://github.com/adrighem/signal-purple/commit/a9760d12868d46723595779679c5d03adc23562b))
+* **core:** serialize message timestamp allocation ([2dbae8c](https://github.com/adrighem/signal-purple/commit/2dbae8c851c2213466b159a273953063aed51fa9))
+* **core:** serialize SQLite store access ([6834a5c](https://github.com/adrighem/signal-purple/commit/6834a5c536e293d969ea7968d7c1f52c3d82251b))
+* decouple connection readiness from remote group sync for fast startup ([8814158](https://github.com/adrighem/signal-purple/commit/8814158071b0465cf38f430deeddc99d9e4eee0f))
+* decouple connection readiness from remote group sync for fast startup ([4d0f057](https://github.com/adrighem/signal-purple/commit/4d0f0578113db9e5cbc26c3f6583868b9ce4e0f9))
+* echo outgoing group messages ([23bae50](https://github.com/adrighem/signal-purple/commit/23bae50d48f5004f2fecaa6bb3c7a7519da36193))
+* echo outgoing group messages ([1b05316](https://github.com/adrighem/signal-purple/commit/1b0531614c546ce137e5adb6008b75cc5ff9f204))
+* **group:** resolve reconnect race condition and soften group sync ([d0ff3a8](https://github.com/adrighem/signal-purple/commit/d0ff3a881c10bcecd7b152fa9c7521e6b37c1ce0))
+* **group:** resolve reconnect race condition and soften group sync ([892c2bc](https://github.com/adrighem/signal-purple/commit/892c2bcfdd51288c0f0a982f20145b66089a0749))
+* harden event queue draining, ephemeral errors, and avatar scaling ([567dc22](https://github.com/adrighem/signal-purple/commit/567dc22969b62f818baf892036860b4cc7379e8e))
+* harden event queue draining, ephemeral errors, and avatar scaling ([5e2390d](https://github.com/adrighem/signal-purple/commit/5e2390d9d0494185e0353f9a40c4a34d4b177d9b))
+* harden final teardown boundaries ([45171d0](https://github.com/adrighem/signal-purple/commit/45171d04a3d0c285784f928661cc9c03d6719fa0))
+* harden the stable release contract ([#60](https://github.com/adrighem/signal-purple/issues/60)) ([3e136f8](https://github.com/adrighem/signal-purple/commit/3e136f863317970342b4d79bdec2a58618bd5e0f))
+* keep receipt tasks with projection state ([6d3119a](https://github.com/adrighem/signal-purple/commit/6d3119a48d1fbfbbac3a3e89da52e497f480507e))
+* make release RPM reproducible ([#53](https://github.com/adrighem/signal-purple/issues/53)) ([79cc00e](https://github.com/adrighem/signal-purple/commit/79cc00e014878cf7686dff0ef8057689c4bbbce1))
+* **media:** present bounded GIFs inline ([5d390fe](https://github.com/adrighem/signal-purple/commit/5d390fec1ab7655cf5d9d14777afa32cf7837e13))
+* normalize the release SBOM root identity ([1298f42](https://github.com/adrighem/signal-purple/commit/1298f42e6ffb4c4e631beb5089b6a20b5dc09597))
+* **packaging:** restore release-please version marker in Cargo.lock ([e9f2e4a](https://github.com/adrighem/signal-purple/commit/e9f2e4ae1adbea430a397dafd907465172d28b0c))
+* **plugin:** harden outgoing attachment lifecycle ([ccb548f](https://github.com/adrighem/signal-purple/commit/ccb548fc204c68d6a1022efe1c6146c92751507d))
+* preserve group routing across reconnects ([822414a](https://github.com/adrighem/signal-purple/commit/822414aa8a3b91ad0d07cc336e318d6f7e8b3a20))
+* preserve release version marker ([afee503](https://github.com/adrighem/signal-purple/commit/afee503b3b06c0494bbc941e0cfab38b7ad6c6ce)), closes [#21](https://github.com/adrighem/signal-purple/issues/21)
+* preserve release version marker ([2c3aaef](https://github.com/adrighem/signal-purple/commit/2c3aaefff3156db3fb2d49a6d29a7920222847bd)), closes [#20](https://github.com/adrighem/signal-purple/issues/20)
+* preserve release version marker ([d5dc805](https://github.com/adrighem/signal-purple/commit/d5dc80503c7f9aa4397e0e7085806dfafe2797c3)), closes [#18](https://github.com/adrighem/signal-purple/issues/18)
+* **projection:** retain rejected events for replay ([2de2563](https://github.com/adrighem/signal-purple/commit/2de2563f85e655cabb53181d150c9f258a8d0781))
+* recover Signal connections after network loss ([3a213d5](https://github.com/adrighem/signal-purple/commit/3a213d5d3397edded47790e78b26d9c38a9b08d5))
+* recover Signal connections after network loss ([77100c9](https://github.com/adrighem/signal-purple/commit/77100c9bcc6a5e627d4ba1607185d911a6d7be9f))
+* render group images inline ([c0c9d91](https://github.com/adrighem/signal-purple/commit/c0c9d91bcc5c96978d59e863f1f5c51a44df9a10))
+* render incoming text as chat messages ([79e554c](https://github.com/adrighem/signal-purple/commit/79e554c8249cffac56e7c0dbd51aa03569a8b8d9))
+* resolve draft releases during artifact upload ([34e9b67](https://github.com/adrighem/signal-purple/commit/34e9b672442982f8e393756f33e73cb595031646))
+* resolve the local group participant alias ([486ed2a](https://github.com/adrighem/signal-purple/commit/486ed2a36d6fd13b4c6f70431d05fa2f09a0dc1e))
+* restore release-please version marker in Cargo.lock ([4d6f3da](https://github.com/adrighem/signal-purple/commit/4d6f3daf2a96bc6a42be071758b4f4ab20fe1785))
+* retry and defer transient sqlite store and protocol pool timeout errors ([25f961a](https://github.com/adrighem/signal-purple/commit/25f961a5b45444fb7b7b44bbd35bbe39e2f70c1c))
+* retry and defer transient sqlite store and protocol pool timeout errors ([259c3ea](https://github.com/adrighem/signal-purple/commit/259c3ea83cb090849f388c98fc300998f3b696a7))
+* retry receipts after websocket recovery ([fdf0ae4](https://github.com/adrighem/signal-purple/commit/fdf0ae422e084e3ba30018a5d6c66b08bb1b5d62))
+* retry receipts after websocket recovery ([74e34dd](https://github.com/adrighem/signal-purple/commit/74e34dd2d94ae4b600ced71f4836d7797e76929f))
+* **storage:** classify transient sqlite store errors using structured codes ([4490fc1](https://github.com/adrighem/signal-purple/commit/4490fc19a03717dab91b9cc899b936528ac54c39))
+* support annotated source archive tags ([8c0ebe3](https://github.com/adrighem/signal-purple/commit/8c0ebe32de1f1aa55d489e2dadc24bf21fdce14c)), closes [#5](https://github.com/adrighem/signal-purple/issues/5)
+* **sync:** defer contact request until queue drain ([abf0b06](https://github.com/adrighem/signal-purple/commit/abf0b06dcb215f0f0b0131ef1cb267b26f1d0761))
+* **sync:** keep receive stream independently polled ([f7b2d1e](https://github.com/adrighem/signal-purple/commit/f7b2d1e21d1bdcb82d4fc134952141e05012b29e))
+
+
+### Performance Improvements
+
+* **attachment:** stream outgoing attachments across FFI boundary ([a93fa6e](https://github.com/adrighem/signal-purple/commit/a93fa6ee5b213278304f13d1e17c76713fb24ee3))
+* **backend:** index groups by identifier instead of scanning on every send ([cade295](https://github.com/adrighem/signal-purple/commit/cade2951daec139ead1a64f6ae1973510f556109))
+
+
+### Reverts
+
+* restore main after misdirected hardening push ([1bd2c90](https://github.com/adrighem/signal-purple/commit/1bd2c907943a97a55b53a4c9ec1e9eb7dd67ff33)), closes [#5](https://github.com/adrighem/signal-purple/issues/5)
+
 ## [1.6.1](https://github.com/adrighem/signal-purple/compare/v1.6.0...v1.6.1) (2026-09-12)
 
 * Reliable group reconnects: restored group chats rejoin cleanly on startup without false error popups ([892c2bc](https://github.com/adrighem/signal-purple/commit/892c2bcfdd51288c0f0a982f20145b66089a0749)).
