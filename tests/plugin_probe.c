@@ -140,7 +140,7 @@ dispatch_group_snapshot(SignalHandleEventFunc handle_event,
             .chat_id = "stable-conversation-legacy",
             .title = "Remote legacy title",
         },
-        { .kind = SIGNAL_EVENT_GROUP_SYNC_END },
+        { .kind = SIGNAL_EVENT_GROUP_SYNC_END, .value = 1 },
     };
 
     for (guint index = 0; index < G_N_ELEMENTS(events); index++) {
@@ -1061,6 +1061,45 @@ test_group_conversation_identity(PurplePlugin *plugin,
 }
 
 static void
+test_group_sync_take_active_joins(void)
+{
+    GHashTable *pending = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                                g_free, NULL);
+    GHashTable *active = g_hash_table_new_full(g_str_hash, g_str_equal,
+                                               g_free, NULL);
+    GPtrArray *joins;
+
+    g_hash_table_add(pending, g_strdup("group-1"));
+    g_hash_table_add(pending, g_strdup("group-2"));
+    g_hash_table_add(pending, g_strdup("group-3"));
+
+    g_hash_table_add(active, g_strdup("group-1"));
+    g_hash_table_add(active, g_strdup("group-2"));
+
+    /* Preliminary snapshot mode (clear_unmatched == FALSE):
+     * Takes matched joins, removes them from pending, leaves unmatched in pending */
+    joins = signal_group_sync_take_active_joins(pending, active, FALSE);
+    g_assert_nonnull(joins);
+    g_assert_cmpuint(joins->len, ==, 2);
+    g_assert_cmpuint(g_hash_table_size(pending), ==, 1);
+    g_assert_true(g_hash_table_contains(pending, "group-3"));
+    g_ptr_array_unref(joins);
+
+    /* Authoritative snapshot mode (clear_unmatched == TRUE):
+     * Takes matched joins and clears all remaining unmatched entries from pending */
+    g_hash_table_add(pending, g_strdup("group-1"));
+    g_hash_table_add(pending, g_strdup("group-4"));
+    joins = signal_group_sync_take_active_joins(pending, active, TRUE);
+    g_assert_nonnull(joins);
+    g_assert_cmpuint(joins->len, ==, 1);
+    g_assert_cmpuint(g_hash_table_size(pending), ==, 0);
+    g_ptr_array_unref(joins);
+
+    g_hash_table_unref(pending);
+    g_hash_table_unref(active);
+}
+
+static void
 test_remove_managed_group_chats(PurpleAccount *account, PurpleGroup *group)
 {
     PurpleChat *unmanaged = add_group_chat(account, group,
@@ -1434,10 +1473,13 @@ test_pending_read_receipt_admission(PurplePlugin *plugin,
     message.timestamp_ms = 104;
     g_assert_true(dispatch_event.function(connection, &message, &accepted));
     retry_source = connection->pending_read_retry_id;
+    guint fallback_source = connection->group_sync_fallback_timer_id;
     g_assert_cmpuint(retry_source, !=, 0);
+    g_assert_cmpuint(fallback_source, !=, 0);
     connection->core = NULL;
     protocol->close(&gc);
     g_assert_null(g_main_context_find_source_by_id(NULL, retry_source));
+    g_assert_null(g_main_context_find_source_by_id(NULL, fallback_source));
 
     purple_conversation_set_ui_ops(conversation, NULL);
     purple_conversation_destroy(conversation);
@@ -2145,6 +2187,7 @@ main(int argc, char **argv)
     purple_blist_add_group(sync_group, NULL);
     test_group_title_tracking(sync_account, sync_group);
     test_remove_managed_group_chats(sync_account, sync_group);
+    test_group_sync_take_active_joins();
     test_group_conversation_identity(plugin, protocol, sync_account,
                                      sync_group);
     add_group_chat(sync_account, sync_group, "stable-id", TRUE);

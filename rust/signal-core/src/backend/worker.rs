@@ -502,6 +502,7 @@ impl ConnectionSession {
             &self.departed_groups,
             &self.avatar_cache,
             &self.metadata_cache,
+            false,
         )) {
             self.sink.emit(Event::transient_error(error));
         }
@@ -614,6 +615,7 @@ impl ConnectionSession {
                                     &self.departed_groups,
                                     &self.avatar_cache,
                                     &self.metadata_cache,
+                                    true,
                                 )) {
                                     Ok(()) => self.session.mark_groups_authoritative(),
                                     Err(error) => {

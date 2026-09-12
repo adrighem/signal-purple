@@ -26,6 +26,7 @@ gboolean signal_group_sync_defer_join(GHashTable *pending,
                                       gboolean snapshot_complete,
                                       const char *group_id);
 GPtrArray *signal_group_sync_take_active_joins(GHashTable *pending,
-                                               GHashTable *active);
+                                               GHashTable *active,
+                                               gboolean clear_unmatched);
 
 #endif

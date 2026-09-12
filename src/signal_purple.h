@@ -69,6 +69,7 @@ struct _SignalConnection {
     guint group_sync_removed;
     guint64 next_request_id;
     guint pending_read_retry_id;
+    guint group_sync_fallback_timer_id;
     gboolean group_snapshot_complete;
     gboolean pending_read_limit_warned;
     gboolean closing;

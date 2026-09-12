@@ -1024,6 +1024,7 @@ pub(crate) async fn emit_group_snapshot(
     departed_groups: &DepartedGroups,
     avatar_cache: &AvatarCache,
     metadata_cache: &MetadataCache,
+    authoritative: bool,
 ) -> Result<(), String> {
     let repo = StorageRepository::new(manager.store().clone());
     let groups = repo.groups().await.map_err(|error| error.to_string())?;
@@ -1088,6 +1089,7 @@ pub(crate) async fn emit_group_snapshot(
     }
     sink.emit(Event {
         kind: EVENT_GROUP_SYNC_END,
+        value: i32::from(authoritative),
         ..Event::default()
     });
     Ok(())
@@ -1104,7 +1106,15 @@ async fn synchronize_and_emit_group_snapshot(
         .synchronize_storage_groups()
         .await
         .map_err(|error| format!("Could not synchronize Signal groups: {error}"))?;
-    emit_group_snapshot(manager, sink, departed_groups, avatar_cache, metadata_cache).await
+    emit_group_snapshot(
+        manager,
+        sink,
+        departed_groups,
+        avatar_cache,
+        metadata_cache,
+        true,
+    )
+    .await
 }
 
 pub(crate) async fn emit_identity_changes(
