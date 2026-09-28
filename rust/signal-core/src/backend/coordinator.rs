@@ -19,7 +19,7 @@ use presage::libsignal_service::zkgroup::profiles::ProfileKey;
 use presage::model::groups::Group;
 use presage::proto::{
     AttachmentPointer, EditMessage, ReceiptMessage, SyncMessage, TypingMessage, receipt_message,
-    typing_message,
+    sync_message::Content as SyncContent, typing_message,
 };
 use presage::store::Thread;
 use presage::{Manager, manager::Registered};
@@ -1697,7 +1697,8 @@ pub(crate) async fn handle_content<M: SignalProtocol, S: StorageOps>(
             return emit_data_message(manager, repo, projection, sink, departed_groups).await;
         }
         ContentBody::SynchronizeMessage(SyncMessage {
-            sent: Some(sent), ..
+            content: Some(SyncContent::Sent(sent)),
+            ..
         }) => {
             if let Some(message) = sent.message.as_ref() {
                 let peer = sent
@@ -2198,11 +2199,12 @@ fn content_timestamp(content: &Content) -> u64 {
             ..
         }) => *timestamp,
         ContentBody::SynchronizeMessage(SyncMessage {
-            sent: Some(sent), ..
+            content: Some(SyncContent::Sent(sent)),
+            ..
         }) => sent
             .timestamp
-            .unwrap_or_else(|| content.metadata.timestamp.timestamp_millis() as u64),
-        _ => content.metadata.timestamp.timestamp_millis() as u64,
+            .unwrap_or_else(|| content.metadata.client_timestamp.timestamp_millis() as u64),
+        _ => content.metadata.client_timestamp.timestamp_millis() as u64,
     }
 }
 
