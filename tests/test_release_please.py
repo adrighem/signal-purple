@@ -558,39 +558,39 @@ def validate_presage_revision() -> None:
         manifest["dependencies"]["presage"],
         manifest["dependencies"]["presage-store-sqlite"],
     ]
-    revisions = {dependency.get("rev") for dependency in presage_dependencies}
+    branches = {dependency.get("branch") for dependency in presage_dependencies}
     repositories = {dependency.get("git") for dependency in presage_dependencies}
-    if len(revisions) != 1 or None in revisions:
-        fail("Presage dependencies must use one exact Git revision")
+    if branches != {"main"}:
+        fail("Presage dependencies must track the fork's main branch")
+    if any(dependency.get("rev") is not None for dependency in presage_dependencies):
+        fail("Presage dependencies must not pin an exact Git revision")
     if repositories != {"https://github.com/adrighem/presage.git"}:
         fail("Presage dependencies must use the documented public fork")
-    revision = revisions.pop()
-    if re.fullmatch(r"[0-9a-f]{40}", revision) is None:
-        fail("Presage dependencies must use a full 40-character Git revision")
 
     lock = tomllib.loads((PROJECT_ROOT / LOCK_PATH).read_text(encoding="utf-8"))
-    expected_source = (
-        "git+https://github.com/adrighem/presage.git"
-        f"?rev={revision}#{revision}"
-    )
+    expected_prefix = "git+https://github.com/adrighem/presage.git?branch=main#"
+    resolved_shas = set()
     for package_name in ("presage", "presage-store-sqlite"):
         packages = [
             package
             for package in lock["package"]
             if package.get("name") == package_name
         ]
-        if len(packages) != 1 or packages[0].get("source") != expected_source:
-            fail(f"Cargo.lock does not pin {package_name} to {revision}")
+        source = packages[0].get("source") if len(packages) == 1 else None
+        if source is None or not source.startswith(expected_prefix):
+            fail(f"Cargo.lock does not track {package_name} on the fork's main branch")
+        resolved_shas.add(source[len(expected_prefix) :])
+    if len(resolved_shas) != 1 or not re.fullmatch(
+        r"[0-9a-f]{40}", next(iter(resolved_shas))
+    ):
+        fail("Cargo.lock must resolve presage and presage-store-sqlite to one commit")
 
     policy_text = (PROJECT_ROOT / DEPENDENCY_POLICY).read_text(encoding="utf-8")
-    policy_revision = re.search(
-        r"The Presage dependency.*?revision `([0-9a-f]{40})`", policy_text, re.DOTALL
-    )
-    if policy_revision is None or policy_revision.group(1) != revision:
-        fail("dependency policy Presage revision does not match Cargo.toml")
+    if "adrighem/presage" not in policy_text or "`main`" not in policy_text:
+        fail("dependency policy must document the Presage fork's main branch")
     licenses_text = (PROJECT_ROOT / THIRD_PARTY_LICENSES).read_text(encoding="utf-8")
-    if f"| `{revision}` (fork base:" not in licenses_text:
-        fail("third-party license Presage revision does not match Cargo.toml")
+    if "adrighem/presage" not in licenses_text or "branch `main`" not in licenses_text:
+        fail("third-party license Presage entry does not document the main branch")
 
 
 def validate_nix_version_source() -> None:

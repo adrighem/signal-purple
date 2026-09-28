@@ -1,13 +1,15 @@
 # Third-party licenses
 
 The original Purple adapter is GPL-3.0-or-later. The Rust backend links the
-following AGPL-3.0-only projects at exact pinned revisions:
+following AGPL-3.0-only projects, either at exact pinned revisions or, for
+Presage and libsignal-service-rs, tracked via the `main` branch of the
+documented public fork:
 
 | Dependency | Revision | License |
 | --- | --- | --- |
-| [Presage fork](https://github.com/adrighem/presage) | `82c215e5fe00049ed527c7c6d93928c7c506ee79` (fork base: upstream `63482efd0cbdc0780baf0650517c7d55f1cac05d`) | AGPL-3.0-only |
-| [libsignal-service-rs fork](https://github.com/adrighem/libsignal-service-rs) | `c41a2d0332634dd3cbc830d0d4a77bdc0e9d2cae` (parent: upstream `fd481655d481388ebfe3a1fdb85a668b4876d592`) | AGPL-3.0-only |
-| [Signal libsignal](https://github.com/signalapp/libsignal) | tag `v0.94.4`, commit `46d867c986f66201e34e7ae20ce423eec742bf3f` | AGPL-3.0-only |
+| [Presage fork](https://github.com/adrighem/presage) | branch `main` | AGPL-3.0-only |
+| [libsignal-service-rs fork](https://github.com/adrighem/libsignal-service-rs) | branch `main` | AGPL-3.0-only |
+| [Signal libsignal](https://github.com/signalapp/libsignal) | tag `v0.99.0`, commit `439f035d9cfd7efe5435cbea0294591c9ed17232` | AGPL-3.0-only |
 | Signal curve25519-dalek fork | tag `signal-curve25519-4.1.3` | BSD-3-Clause |
 | Whisperfish rusqlite fork | `2a42b3354c9194700d08aa070f70a131a470e7dc` | MIT |
 
