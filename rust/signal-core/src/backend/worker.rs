@@ -634,6 +634,12 @@ impl ConnectionSession {
                                 &self.metadata_cache,
                             ));
                         }
+                        Some(Received::DecryptionError(sender)) => {
+                            self.sink.emit(Event::transient_error(format!(
+                                "Could not decrypt a message from {}; a session reset with that contact may fix this",
+                                sender.service_id_string()
+                            )));
+                        }
                         Some(Received::Content(content)) => {
                             self.session.note_group_content(content_has_group_context(&content.body));
                             if session_ready {

@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use presage::libsignal_service::content::{Content, ContentBody, EditMessage, SyncMessage};
 use presage::libsignal_service::protocol::ServiceId;
-use presage::proto::{ReceiptMessage, receipt_message};
+use presage::proto::{ReceiptMessage, receipt_message, sync_message::Content as SyncContent};
 use presage::{Manager, manager::Registered};
 use presage_store_sqlite::SqliteStore;
 
@@ -68,7 +68,7 @@ pub(crate) fn projection_identity(content: &Content) -> ProjectionIdentity {
     ProjectionIdentity {
         sender: content.metadata.sender.service_id_string(),
         destination: content.metadata.destination.service_id_string(),
-        timestamp_ms: content.metadata.timestamp.timestamp_millis(),
+        timestamp_ms: content.metadata.client_timestamp.timestamp_millis(),
     }
 }
 
@@ -174,7 +174,8 @@ pub(crate) fn content_has_group_context(content: &ContentBody) -> bool {
             ..
         }) => message.group_v2.is_some(),
         ContentBody::SynchronizeMessage(SyncMessage {
-            sent: Some(sent), ..
+            content: Some(SyncContent::Sent(sent)),
+            ..
         }) => sent
             .message
             .as_ref()
@@ -548,7 +549,8 @@ mod tests {
                 sender,
                 destination,
                 sender_device: 1u32.try_into().unwrap(),
-                timestamp,
+                pni_verified: None,
+                client_timestamp: timestamp,
                 server_timestamp: timestamp,
                 needs_receipt: false,
                 unidentified_sender: false,
@@ -572,7 +574,7 @@ mod tests {
     }
 
     fn content_timestamp(content: &Content) -> u64 {
-        content.metadata.timestamp.timestamp_millis() as u64
+        content.metadata.client_timestamp.timestamp_millis() as u64
     }
 
     #[test]
