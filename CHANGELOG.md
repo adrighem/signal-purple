@@ -4,6 +4,14 @@ All notable changes are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for stable releases.
 
+## [1.6.2](https://github.com/adrighem/signal-purple/compare/v1.6.1...v1.6.2) (2026-10-06)
+
+
+### Bug Fixes
+
+* improve robustness in backend lifecycle, FFI errors, and media lookup ([4bb5ac0](https://github.com/adrighem/signal-purple/commit/4bb5ac0f0c1f85fe42f9cde7d5efd06144f75508))
+* improve robustness in backend lifecycle, FFI errors, and media lookup ([1cbcf1a](https://github.com/adrighem/signal-purple/commit/1cbcf1a7084a481402b836eeded1bde264f69349))
+
 ## [1.6.1](https://github.com/adrighem/signal-purple/compare/v1.6.0...v1.6.1) (2026-09-12)
 
 * Reliable group reconnects: restored group chats rejoin cleanly on startup without false error popups ([892c2bc](https://github.com/adrighem/signal-purple/commit/892c2bcfdd51288c0f0a982f20145b66089a0749)).
