@@ -68,8 +68,19 @@ signal_store_path(PurpleAccount *account, GError **error)
     g_return_val_if_fail(account != NULL, NULL);
 
     configured = purple_account_get_string(account, SIGNAL_STORE_PATH_KEY, "");
-    if (configured != NULL && configured[0] != '\0')
-        return g_canonicalize_filename(configured, NULL);
+    char *path;
+
+    if (configured != NULL && configured[0] != '\0') {
+        path = g_canonicalize_filename(configured, NULL);
+        if (path != NULL && strlen(path) > SIGNAL_CORE_MAX_STORE_PATH_BYTES) {
+            g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_NAMETOOLONG,
+                        "Configured Signal store path exceeds %u bytes",
+                        SIGNAL_CORE_MAX_STORE_PATH_BYTES);
+            g_free(path);
+            return NULL;
+        }
+        return path;
+    }
 
     store_id = signal_store_id(account);
     account_hash = g_compute_checksum_for_string(G_CHECKSUM_SHA256, store_id, -1);
@@ -89,8 +100,16 @@ signal_store_path(PurpleAccount *account, GError **error)
         return NULL;
     }
 
-    return g_strdup_printf("%s%c%s.db3", directory, G_DIR_SEPARATOR,
+    path = g_strdup_printf("%s%c%s.db3", directory, G_DIR_SEPARATOR,
                            account_hash);
+    if (path != NULL && strlen(path) > SIGNAL_CORE_MAX_STORE_PATH_BYTES) {
+        g_set_error(error, G_FILE_ERROR, G_FILE_ERROR_NAMETOOLONG,
+                    "Generated Signal store path exceeds %u bytes",
+                    SIGNAL_CORE_MAX_STORE_PATH_BYTES);
+        g_free(path);
+        return NULL;
+    }
+    return path;
 }
 
 static char *

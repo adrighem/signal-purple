@@ -1603,17 +1603,18 @@ signal_poll_backend(gint fd, GIOCondition condition, gpointer data)
         int result = signal_core_poll_event(connection->core, &event);
         gboolean accepted;
         gboolean keep;
+        PurpleConnection *gc = connection->gc;
 
         if (result < 0) {
             purple_connection_error_reason(
-                connection->gc, PURPLE_CONNECTION_ERROR_NETWORK_ERROR,
+                gc, PURPLE_CONNECTION_ERROR_NETWORK_ERROR,
                 "Signal backend event channel disconnected unexpectedly");
             return G_SOURCE_REMOVE;
         }
         if (result == 0) {
             if (notifier_failed) {
                 purple_connection_error_reason(
-                    connection->gc, PURPLE_CONNECTION_ERROR_NETWORK_ERROR,
+                    gc, PURPLE_CONNECTION_ERROR_NETWORK_ERROR,
                     "Signal backend event notifier disconnected unexpectedly");
                 return G_SOURCE_REMOVE;
             }
@@ -1625,13 +1626,18 @@ signal_poll_backend(gint fd, GIOCondition condition, gpointer data)
             if (event != NULL)
                 signal_event_free(event);
             purple_connection_error_reason(
-                connection->gc, PURPLE_CONNECTION_ERROR_OTHER_ERROR,
+                gc, PURPLE_CONNECTION_ERROR_OTHER_ERROR,
                 "Signal backend returned an incompatible event");
             return G_SOURCE_REMOVE;
         }
 
         keep = signal_dispatch_event(connection, event, &accepted);
-        if (keep && accepted && event->request_id != 0 &&
+        if (!keep) {
+            signal_event_free(event);
+            return G_SOURCE_REMOVE;
+        }
+
+        if (accepted && event->request_id != 0 &&
             (event->kind == SIGNAL_EVENT_MESSAGE ||
              event->kind == SIGNAL_EVENT_GROUP_MESSAGE ||
              event->kind == SIGNAL_EVENT_ATTACHMENT)) {
@@ -1645,8 +1651,6 @@ signal_poll_backend(gint fd, GIOCondition condition, gpointer data)
                     event->request_id, status);
         }
         signal_event_free(event);
-        if (!keep)
-            return G_SOURCE_REMOVE;
     }
 
     return G_SOURCE_CONTINUE;
@@ -1724,8 +1728,10 @@ signal_connection_free(SignalConnection *connection)
         purple_timeout_remove(connection->group_sync_fallback_timer_id);
         connection->group_sync_fallback_timer_id = 0;
     }
-    if (connection->core != NULL)
+    if (connection->core != NULL) {
+        signal_core_shutdown(connection->core);
         signal_core_free(connection->core);
+    }
 
     g_clear_pointer(&connection->link_qr, g_bytes_unref);
     g_hash_table_unref(connection->group_ids_by_key);
@@ -2163,6 +2169,8 @@ signal_send_im(PurpleConnection *gc, const char *who, const char *message,
     (void)flags;
     if (connection == NULL || connection->closing)
         return -ENOTCONN;
+    if (who == NULL || who[0] == '\0' || strlen(who) > SIGNAL_CORE_MAX_RECIPIENT_BYTES)
+        return -EINVAL;
 
     plain = signal_plaintext_from_markup(message);
     if (plain == NULL)
