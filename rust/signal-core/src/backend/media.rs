@@ -443,62 +443,88 @@ pub fn signal_gif_transcode_stderr() -> std::process::Stdio {
     std::process::Stdio::null()
 }
 
+fn resolve_binary(name: &str, default_path: &str) -> Option<PathBuf> {
+    if let Some(path_var) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path_var) {
+            let candidate = dir.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    let default_p = Path::new(default_path);
+    if default_p.is_file() {
+        return Some(default_p.to_path_buf());
+    }
+    None
+}
+
 pub fn transcode_signal_gif_video_blocking(input: Vec<u8>) -> Option<Vec<u8>> {
     let _permit = SIGNAL_GIF_TRANSCODE_LOCK.try_lock().ok()?;
-    if !Path::new(SIGNAL_GIF_FFMPEG).is_file() || !Path::new(SIGNAL_GIF_PRLIMIT).is_file() {
-        return None;
-    }
+    let ffmpeg_path = resolve_binary("ffmpeg", SIGNAL_GIF_FFMPEG)?;
+    let prlimit_path = resolve_binary("prlimit", SIGNAL_GIF_PRLIMIT);
 
-    // Fixed Debian paths and arguments avoid shell or inherited PATH handling.
-    // prlimit execs FFmpeg in the same child, so kill and wait cover both.
-    let mut child = std::process::Command::new(SIGNAL_GIF_PRLIMIT)
-        .args([
+    let ffmpeg_args = [
+        "-nostdin",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-max_alloc",
+        "134217728",
+        "-threads",
+        "1",
+        "-filter_threads",
+        "1",
+        "-filter_complex_threads",
+        "1",
+        "-protocol_whitelist",
+        "pipe",
+        "-probesize",
+        "8388608",
+        "-analyzeduration",
+        "5000000",
+        "-i",
+        "pipe:0",
+        "-map",
+        "0:v:0",
+        "-map_metadata",
+        "-1",
+        "-map_chapters",
+        "-1",
+        "-an",
+        "-sn",
+        "-dn",
+        "-vf",
+        "scale=w='min(480,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease:flags=lanczos",
+        "-fpsmax",
+        "15",
+        "-threads",
+        "1",
+        "-loop",
+        "0",
+        "-f",
+        "gif",
+        "pipe:1",
+    ];
+
+    let mut command = if let Some(ref prlimit) = prlimit_path {
+        let mut cmd = std::process::Command::new(prlimit);
+        cmd.args([
             SIGNAL_GIF_ADDRESS_SPACE_LIMIT,
             "--cpu=10:12",
             "--nofile=64:64",
             "--",
-            SIGNAL_GIF_FFMPEG,
-            "-nostdin",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-max_alloc",
-            "134217728",
-            "-threads",
-            "1",
-            "-filter_threads",
-            "1",
-            "-filter_complex_threads",
-            "1",
-            "-protocol_whitelist",
-            "pipe",
-            "-probesize",
-            "8388608",
-            "-analyzeduration",
-            "5000000",
-            "-i",
-            "pipe:0",
-            "-map",
-            "0:v:0",
-            "-map_metadata",
-            "-1",
-            "-map_chapters",
-            "-1",
-            "-an",
-            "-sn",
-            "-dn",
-            "-vf",
-            "scale=w='min(480,iw)':h='min(480,ih)':force_original_aspect_ratio=decrease:flags=lanczos",
-            "-fpsmax",
-            "15",
-            "-threads",
-            "1",
-            "-loop",
-            "0",
-            "-f",
-            "gif",
-            "pipe:1",
-        ])
+            ffmpeg_path.to_str()?,
+        ]);
+        cmd.args(ffmpeg_args);
+        cmd
+    } else {
+        let mut cmd = std::process::Command::new(ffmpeg_path);
+        cmd.args(ffmpeg_args);
+        cmd
+    };
+
+    let mut child = command
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(signal_gif_transcode_stderr())
