@@ -602,6 +602,7 @@ impl ConnectionSession {
                     && self.replay.can_accept_live_message() => {
                     match received {
                         Some(Received::QueueEmpty) => {
+                            self.session.reset_recovery_backoff();
                             if let Some(start) = contact_sync_start.take() {
                                 let _ = start.send(());
                             }

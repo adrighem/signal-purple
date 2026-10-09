@@ -120,14 +120,18 @@ impl AvatarCache {
             }
         }
 
-        // 3. Downscale or Fallback
+        // 3. Downscale or Discard
         let downscaled = match downscale_avatar(&raw_data) {
             Ok(processed) => processed,
             Err(err) => {
-                tracing::warn!("Avatar downscale skipped: {err}; using raw payload");
-                raw_data
+                tracing::warn!("Avatar downscale failed: {err}; discarding payload");
+                Vec::new()
             }
         };
+
+        if downscaled.is_empty() {
+            return (Vec::new(), String::new());
+        }
 
         let checksum = hex::encode(Sha256::digest(&downscaled));
 
@@ -751,6 +755,13 @@ mod tests {
             );
             return;
         }
+        let probe = std::process::Command::new(SIGNAL_GIF_FFMPEG)
+            .arg("-version")
+            .output();
+        if !probe.map(|output| output.status.success()).unwrap_or(false) {
+            eprintln!("installed FFmpeg binary broken or missing dynamic symbols; skipping test");
+            return;
+        }
         let source = std::process::Command::new(SIGNAL_GIF_FFMPEG)
             .args([
                 "-nostdin",
@@ -912,8 +923,8 @@ mod tests {
     fn handles_corrupt_avatar_gracefully() {
         let cache = AvatarCache::new(None);
         let corrupt_data = b"definitely not an image".to_vec();
-        let (processed, checksum) = cache.prepare_avatar(corrupt_data.clone());
-        assert_eq!(processed, corrupt_data);
-        assert_eq!(checksum, hex::encode(Sha256::digest(&corrupt_data)));
+        let (processed, checksum) = cache.prepare_avatar(corrupt_data);
+        assert!(processed.is_empty());
+        assert!(checksum.is_empty());
     }
 }

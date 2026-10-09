@@ -1,5 +1,6 @@
 pub mod command;
 pub mod coordinator;
+pub mod group_state;
 pub mod media;
 pub mod outbox;
 pub mod projection;
