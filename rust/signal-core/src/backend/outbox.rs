@@ -31,6 +31,26 @@ impl OutboxAttemptError {
         }
     }
 
+    pub(crate) fn classify(message: impl Into<String>) -> Self {
+        let msg = message.into();
+        let lower = msg.to_ascii_lowercase();
+        let fatal = lower.contains("401")
+            || lower.contains("403")
+            || lower.contains("404")
+            || lower.contains("unregistered")
+            || lower.contains("not registered")
+            || lower.contains("untrusted identity")
+            || lower.contains("untrustedidentity")
+            || lower.contains("authorization failed")
+            || lower.contains("forbidden")
+            || lower.contains("not found");
+        if fatal {
+            Self::permanent(msg)
+        } else {
+            Self::retryable(msg)
+        }
+    }
+
     pub(crate) fn should_retry(&self) -> bool {
         self.retryable
     }
@@ -41,6 +61,8 @@ impl std::fmt::Display for OutboxAttemptError {
         formatter.write_str(&self.message)
     }
 }
+
+pub(crate) const MAX_OUTBOX_ATTEMPTS: u32 = 5;
 
 pub(crate) fn retry_delay_ms(attempts: u32) -> u64 {
     let exponent = attempts.min(9);
@@ -81,7 +103,7 @@ pub(crate) async fn attempt_outbox_message<M: SignalProtocol>(
                     message.timestamp,
                 )
                 .await
-                .map_err(OutboxAttemptError::retryable)?;
+                .map_err(OutboxAttemptError::classify)?;
             Ok(SentMessage {
                 thread: Thread::Contact(recipient),
                 timestamp: message.timestamp,
@@ -101,7 +123,7 @@ pub(crate) async fn attempt_outbox_message<M: SignalProtocol>(
                 metadata_cache,
             )
             .await
-            .map_err(OutboxAttemptError::retryable)?
+            .map_err(OutboxAttemptError::classify)?
             .ok_or_else(|| {
                 OutboxAttemptError::permanent(
                     "Signal group is unavailable or this account is no longer a member",
@@ -124,7 +146,7 @@ pub(crate) async fn attempt_outbox_message<M: SignalProtocol>(
                     message.timestamp,
                 )
                 .await
-                .map_err(OutboxAttemptError::retryable)?;
+                .map_err(OutboxAttemptError::classify)?;
             Ok(SentMessage {
                 thread: Thread::Group(key),
                 timestamp: message.timestamp,
@@ -145,12 +167,16 @@ pub(crate) async fn finish_outbox_attempt(
             .map_err(|error| {
                 format!("Message sent but its outbox entry could not be cleared: {error}")
             }),
-        Err(error) if !error.should_retry() => repo
-            .complete_outbox_message(message.id)
-            .await
-            .map_err(|store_error| {
-                format!("Could not discard a terminal outbox entry: {store_error}")
-            }),
+        Err(error)
+            if !error.should_retry()
+                || message.attempts.saturating_add(1) >= MAX_OUTBOX_ATTEMPTS =>
+        {
+            repo.complete_outbox_message(message.id)
+                .await
+                .map_err(|store_error| {
+                    format!("Could not discard a terminal outbox entry: {store_error}")
+                })
+        }
         Err(_) => {
             let attempts = message.attempts.saturating_add(1);
             repo.defer_outbox_message(
@@ -198,18 +224,18 @@ pub(crate) async fn retry_outbox<M: SignalProtocol>(
         if let Err(error) = finish_outbox_attempt(repo, &message, &result).await {
             sink.emit(Event::error(error, false));
         } else if let Err(error) = result {
-            if !error.should_retry() {
+            let next_attempts = message.attempts.saturating_add(1);
+            if !error.should_retry() || next_attempts >= MAX_OUTBOX_ATTEMPTS {
                 sink.emit(Event::error(
                     format!(
                         "Discarded a queued Signal message that can no longer be sent: {error}"
                     ),
                     false,
                 ));
-            } else if matches!(message.attempts.saturating_add(1), 4 | 8) {
+            } else if next_attempts == 4 {
                 sink.emit(Event::error(
                     format!(
-                        "A Signal message is still queued after {} attempts: {error}",
-                        message.attempts.saturating_add(1)
+                        "A Signal message is still queued after {next_attempts} attempts: {error}"
                     ),
                     false,
                 ));
@@ -295,5 +321,33 @@ mod tests {
         assert_eq!(retry_delay_ms(1), 10_000);
         assert_eq!(retry_delay_ms(4), 80_000);
         assert_eq!(retry_delay_ms(32), 2_560_000);
+    }
+
+    #[test]
+    fn classifies_fatal_and_transient_errors() {
+        let fatal_cases = [
+            "HTTP 401 Unauthorized",
+            "HTTP 403 Forbidden",
+            "HTTP 404 Not Found",
+            "Recipient unregistered",
+            "Target is not registered",
+            "Untrusted identity key encountered",
+            "Authorization failed for request",
+        ];
+        for err in fatal_cases {
+            let classified = OutboxAttemptError::classify(err);
+            assert!(!classified.should_retry(), "expected fatal for: {err}");
+        }
+
+        let transient_cases = [
+            "Connection reset by peer",
+            "Timed out waiting for socket",
+            "Rate limit exceeded: 429 Too Many Requests",
+            "Internal server error 500",
+        ];
+        for err in transient_cases {
+            let classified = OutboxAttemptError::classify(err);
+            assert!(classified.should_retry(), "expected retryable for: {err}");
+        }
     }
 }

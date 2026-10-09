@@ -4,7 +4,7 @@ export DH_VERBOSE = 1
 export DEB_BUILD_MAINT_OPTIONS = hardening=+all reproducible=+fixfilepath
 export CARGO_HOME = $(CURDIR)/debian/cargo-home
 export CARGO_NET_OFFLINE = true
-export RUSTFLAGS = --remap-path-prefix=$(CURDIR)=/usr/src/signal-purple \
+export RUSTFLAGS += --remap-path-prefix=$(CURDIR)=/usr/src/signal-purple \
 	-C link-arg=-Wl,-z,relro -C link-arg=-Wl,-z,now
 
 %:

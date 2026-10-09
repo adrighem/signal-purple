@@ -1,2 +1,4 @@
 * text=auto eol=lf
 *.png binary
+/conductor export-ignore
+/.github export-ignore

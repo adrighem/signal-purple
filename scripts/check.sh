@@ -7,7 +7,14 @@ manifest="$repository/rust/signal-core/Cargo.toml"
 build_directory=${SIGNAL_PURPLE_BUILD_DIR:-"$repository/build"}
 build_jobs=${SIGNAL_PURPLE_BUILD_JOBS:-2}
 install_prefix=${SIGNAL_PURPLE_INSTALL_PREFIX:-/usr}
-c_formatter=${SIGNAL_PURPLE_CLANG_FORMAT:-clang-format-19}
+c_formatter=${SIGNAL_PURPLE_CLANG_FORMAT:-}
+if [ -z "$c_formatter" ]; then
+    if command -v clang-format-19 >/dev/null 2>&1; then
+        c_formatter=clang-format-19
+    else
+        c_formatter=clang-format
+    fi
+fi
 c_format_style='{BasedOnStyle: LLVM, IndentWidth: 4,'
 c_format_style="$c_format_style ContinuationIndentWidth: 4, ColumnLimit: 0,"
 c_format_style="$c_format_style BreakBeforeBraces: Custom,"
@@ -35,9 +42,14 @@ check_c_formatter()
     case "$c_formatter_version" in
         *"clang-format version 19."*) ;;
         *)
-            printf 'expected clang-format 19: %s\n' \
-                "$c_formatter_version" >&2
-            exit 1
+            if [ "${SIGNAL_PURPLE_ALLOW_ANY_CLANG_FORMAT:-0}" = "1" ]; then
+                printf 'warning: using non-19 clang-format (%s) because SIGNAL_PURPLE_ALLOW_ANY_CLANG_FORMAT=1\n' \
+                    "$c_formatter_version" >&2
+            else
+                printf 'expected clang-format 19: %s (set SIGNAL_PURPLE_ALLOW_ANY_CLANG_FORMAT=1 to bypass)\n' \
+                    "$c_formatter_version" >&2
+                exit 1
+            fi
             ;;
     esac
 }

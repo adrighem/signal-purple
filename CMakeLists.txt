@@ -47,7 +47,7 @@ string(FIND "${SIGNAL_CORE_LOCK}"
 if(SIGNAL_CORE_LOCK_VERSION_POSITION EQUAL -1)
     message(FATAL_ERROR "Cargo lock and product versions do not match")
 endif()
-set(SIGNAL_CARGO_TARGET_DIR "${CMAKE_CURRENT_SOURCE_DIR}/rust/signal-core/target"
+set(SIGNAL_CARGO_TARGET_DIR "${CMAKE_CURRENT_BINARY_DIR}/cargo-target"
     CACHE PATH "Cargo target directory for the Signal backend")
 if(CMAKE_BUILD_TYPE STREQUAL "Debug")
     set(SIGNAL_CARGO_PROFILE "debug")
@@ -103,6 +103,7 @@ add_library(signal-purple MODULE
     src/blist_sync.c
     src/contact_sync.c
     src/connection.c
+    src/connection_transfers.c
     src/group_sync.c
     src/inline_image.c
     src/plugin.c
@@ -169,6 +170,17 @@ if(BUILD_TESTING)
     target_link_libraries(test-util PRIVATE
         PkgConfig::PURPLE PkgConfig::GLIB PkgConfig::LIBSECRET signal-core)
     add_test(NAME util COMMAND test-util)
+
+    add_executable(test-fake-core
+        tests/test_fake_core.c
+        tests/fake_signal_core.c)
+    target_compile_features(test-fake-core PRIVATE c_std_11)
+    target_compile_options(test-fake-core PRIVATE
+        -Wall -Wextra -Wpedantic -Wconversion -Wformat=2 -Wshadow)
+    target_include_directories(test-fake-core PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_link_libraries(test-fake-core PRIVATE PkgConfig::GLIB)
+    add_test(NAME fake-core COMMAND test-fake-core)
 
     add_executable(test-contact-sync
         tests/test_contact_sync.c

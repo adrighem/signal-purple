@@ -18,8 +18,8 @@ use presage::libsignal_service::sender::{AttachmentSpec, MessageSenderError};
 use presage::libsignal_service::zkgroup::profiles::ProfileKey;
 use presage::model::groups::Group;
 use presage::proto::{
-    AttachmentPointer, EditMessage, ReceiptMessage, SyncMessage, TypingMessage, receipt_message,
-    sync_message::Content as SyncContent, typing_message,
+    AttachmentPointer, BodyRange, EditMessage, ReceiptMessage, SyncMessage, TypingMessage,
+    body_range, receipt_message, sync_message::Content as SyncContent, typing_message,
 };
 use presage::store::Thread;
 use presage::{Manager, manager::Registered};
@@ -28,7 +28,7 @@ use presage_store_sqlite::SqliteStore;
 use qrcode::QrCode;
 use qrcode::types::Color;
 use sha2::{Digest, Sha256};
-use tokio::sync::{Mutex as AsyncMutex, mpsc as tokio_mpsc, watch};
+use tokio::sync::{mpsc as tokio_mpsc, watch};
 
 use super::command::Command;
 use super::media::{
@@ -57,10 +57,12 @@ use crate::store::errors::{
 use crate::store::traits::StorageOps;
 
 pub(crate) const GROUP_SYNC_RETRY_SECS: u64 = 30;
-pub(crate) const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [0, 1, 2, 4, 8, 16];
+pub(crate) const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [1, 2, 4, 8, 16, 32];
 pub(crate) const RECEIVE_EVENT_QUEUE_CAPACITY: usize = 16;
 pub(crate) const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
 pub(crate) const SNAPSHOT_YIELD_INTERVAL: usize = 64;
+/// Maximum supported download size for a single attachment (50 MiB).
+pub(crate) const MAX_ATTACHMENT_SIZE_BYTES: usize = 50 * 1024 * 1024;
 /// Signal caps a single message at 32 attachments; anything beyond that in a
 /// decoded message is malformed or hostile, not just unusually large, so the
 /// rest are left undownloaded rather than serially downloading an unbounded
@@ -287,97 +289,9 @@ fn group_message_peer(outgoing: bool, peer: &str, local_aci: Aci) -> String {
     }
 }
 
-#[derive(Clone, Default)]
-pub(crate) struct DepartedGroups {
-    state: Arc<Mutex<GroupLeaveState>>,
-    operation: Arc<AsyncMutex<()>>,
-}
-
-#[derive(Default)]
-struct GroupLeaveState {
-    leaving: HashSet<String>,
-    departed: HashSet<String>,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GroupDepartureState {
-    Active,
-    Leaving,
-    Departed,
-}
-
-fn departure_projection_disposition(state: GroupDepartureState) -> Option<ProjectionDisposition> {
-    match state {
-        GroupDepartureState::Active => None,
-        GroupDepartureState::Leaving => Some(ProjectionDisposition::Retry),
-        GroupDepartureState::Departed => Some(ProjectionDisposition::Complete),
-    }
-}
-
-impl DepartedGroups {
-    fn departure_state(&self, identifier: &str) -> GroupDepartureState {
-        let state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        if state.departed.contains(identifier) {
-            GroupDepartureState::Departed
-        } else if state.leaving.contains(identifier) {
-            GroupDepartureState::Leaving
-        } else {
-            GroupDepartureState::Active
-        }
-    }
-
-    pub(crate) fn contains(&self, identifier: &str) -> bool {
-        self.departure_state(identifier) != GroupDepartureState::Active
-    }
-
-    fn is_departed(&self, identifier: &str) -> bool {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .departed
-            .contains(identifier)
-    }
-
-    pub(crate) fn begin_leave(&self, identifier: String) {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .leaving
-            .insert(identifier);
-    }
-
-    fn cancel_leave(&self, identifier: &str) {
-        self.state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .leaving
-            .remove(identifier);
-    }
-
-    fn mark_departed(&self, identifier: String) {
-        let mut state = self
-            .state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.leaving.remove(&identifier);
-        state.departed.insert(identifier);
-    }
-
-    pub(crate) async fn lock_operation(&self) -> tokio::sync::MutexGuard<'_, ()> {
-        self.operation.lock().await
-    }
-}
-
-enum GroupLeaveCompletion {
-    Accepted {
-        peer_notification_sent: bool,
-        local_group_removed: bool,
-    },
-    Failed(String),
-}
+pub(crate) use super::group_state::{
+    DepartedGroups, GroupLeaveCompletion, departure_projection_disposition,
+};
 
 fn group_leave_completion_events(
     departed_groups: &DepartedGroups,
@@ -467,6 +381,9 @@ impl SessionState {
     pub(crate) fn mark_ready(&mut self) {
         debug_assert!(!self.is_ready());
         self.phase = SessionPhase::Ready;
+    }
+
+    pub(crate) fn reset_recovery_backoff(&mut self) {
         self.recovery_backoff.reset();
     }
 
@@ -1788,36 +1705,97 @@ impl<'a> DataMessageProjection<'a> {
     }
 }
 
+fn format_body_with_mentions(body: &str, body_ranges: &[BodyRange]) -> String {
+    let mut mentions = Vec::new();
+    for range in body_ranges {
+        if let Some(body_range::AssociatedValue::MentionAci(aci)) = &range.associated_value {
+            mentions.push(aci.as_str());
+        }
+    }
+    if mentions.is_empty() || !body.contains('\u{FFFC}') {
+        return body.to_owned();
+    }
+    let mut result = String::with_capacity(body.len() + 32);
+    let mut mention_idx = 0;
+    for ch in body.chars() {
+        if ch == '\u{FFFC}' {
+            if let Some(aci) = mentions.get(mention_idx) {
+                result.push('@');
+                result.push_str(aci);
+                mention_idx += 1;
+            } else {
+                result.push('@');
+            }
+        } else {
+            result.push(ch);
+        }
+    }
+    result
+}
+
 fn data_message_text(message: &DataMessage) -> String {
+    if message.delete.is_some() {
+        return "[Message deleted by sender]".to_owned();
+    }
+    if message.is_view_once.unwrap_or(false) {
+        if let Some(body) = message.body.as_deref().filter(|body| !body.is_empty()) {
+            return format!("[View-once media: open on primary phone] {body}");
+        }
+        return "[View-once media: open on primary phone]".to_owned();
+    }
     if let Some(reaction) = &message.reaction
         && let Some(emoji) = &reaction.emoji
     {
         return format!("Reacted with {emoji}");
     }
-    if let Some(body) = message.body.as_deref().filter(|body| !body.is_empty()) {
-        return body.to_owned();
-    }
-    message
-        .preview
-        .iter()
-        .find_map(|preview| {
-            preview
-                .url
-                .as_deref()
-                .filter(|text| !text.is_empty())
-                .or_else(|| preview.title.as_deref().filter(|text| !text.is_empty()))
-                .or_else(|| {
+    let mut formatted_body = message
+        .body
+        .as_deref()
+        .filter(|body| !body.is_empty())
+        .map(|body| format_body_with_mentions(body, &message.body_ranges))
+        .or_else(|| {
+            message
+                .preview
+                .iter()
+                .find_map(|preview| {
                     preview
-                        .description
+                        .url
                         .as_deref()
                         .filter(|text| !text.is_empty())
+                        .or_else(|| preview.title.as_deref().filter(|text| !text.is_empty()))
+                        .or_else(|| {
+                            preview
+                                .description
+                                .as_deref()
+                                .filter(|text| !text.is_empty())
+                        })
                 })
+                .map(ToOwned::to_owned)
         })
-        .unwrap_or_default()
-        .to_owned()
+        .unwrap_or_default();
+
+    if let Some(quote) = &message.quote
+        && let Some(quote_text) = quote.text.as_deref().filter(|text| !text.is_empty())
+    {
+        let quoted = quote_text
+            .lines()
+            .map(|line| format!("> {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        if formatted_body.is_empty() {
+            formatted_body = quoted;
+        } else {
+            formatted_body = format!("{quoted}\n\n{formatted_body}");
+        }
+    }
+
+    formatted_body
 }
 
 fn regular_message_attachments(message: &DataMessage) -> &[AttachmentPointer] {
+    if message.is_view_once.unwrap_or(false) {
+        return &[];
+    }
     &message.attachments
 }
 
@@ -1919,11 +1897,23 @@ async fn emit_data_message<M: SignalProtocol, S: StorageOps>(
             .enumerate()
             .take(MAX_ATTACHMENT_DOWNLOADS_PER_MESSAGE)
         {
+            if attachment.size.unwrap_or(0) as usize > MAX_ATTACHMENT_SIZE_BYTES {
+                sink.emit(Event::error(
+                    "Could not download a Signal attachment: attachment exceeds 50 MiB limit",
+                    false,
+                ));
+                continue;
+            }
             let download_pointer = attachment_pointer_without_sender_size_hint(attachment);
             match manager.get_attachment(&download_pointer).await {
                 Ok(mut data) => {
                     truncate_attachment_to_sender_size(attachment, &mut data);
-                    if data.is_empty() {
+                    if data.len() > MAX_ATTACHMENT_SIZE_BYTES {
+                        sink.emit(Event::error(
+                            "Could not download a Signal attachment: attachment exceeds 50 MiB limit",
+                            false,
+                        ));
+                    } else if data.is_empty() {
                         sink.emit(Event::error(
                             "Could not download a Signal attachment: decrypted attachment was empty",
                             false,
@@ -2254,6 +2244,7 @@ pub(crate) fn qr_png(value: &[u8]) -> Result<Vec<u8>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::group_state::GroupDepartureState;
 
     #[test]
     fn message_timestamps_advance_when_wall_clock_stalls() {
@@ -2627,8 +2618,8 @@ mod tests {
         assert_eq!(backoff.next_delay(), Duration::from_secs(longest));
 
         backoff.reset();
-        assert_eq!(backoff.next_delay(), Duration::ZERO);
         assert_eq!(backoff.next_delay(), Duration::from_secs(1));
+        assert_eq!(backoff.next_delay(), Duration::from_secs(2));
     }
 
     #[test]
@@ -2665,14 +2656,14 @@ mod tests {
         assert!(!session.is_ready());
         assert!(!session.groups_authoritative());
         assert_eq!(session.last_recovery_error(), Some("stream ended"));
-        assert_eq!(session.next_recovery_delay(), Duration::ZERO);
+        assert_eq!(session.next_recovery_delay(), Duration::from_secs(1));
 
         assert_eq!(
             session.enter_recovery("still unavailable".to_owned()),
             RecoveryTransition::Continued
         );
         assert_eq!(session.last_recovery_error(), Some("still unavailable"));
-        assert_eq!(session.next_recovery_delay(), Duration::from_secs(1));
+        assert_eq!(session.next_recovery_delay(), Duration::from_secs(2));
 
         session.mark_groups_authoritative();
         session.mark_ready();
@@ -2681,7 +2672,10 @@ mod tests {
             session.enter_recovery("stream ended again".to_owned()),
             RecoveryTransition::Entered
         );
-        assert_eq!(session.next_recovery_delay(), Duration::ZERO);
+        assert_eq!(session.next_recovery_delay(), Duration::from_secs(4));
+
+        session.reset_recovery_backoff();
+        assert_eq!(session.next_recovery_delay(), Duration::from_secs(1));
     }
 
     #[test]
@@ -3007,5 +3001,69 @@ mod tests {
             assert!(result.is_err());
             assert!(!repo.is_projected(&test_thread(), 99));
         });
+    }
+
+    #[test]
+    fn data_message_text_formats_deleted_message() {
+        let message = DataMessage {
+            body: Some("original text".into()),
+            delete: Some(presage::proto::data_message::Delete {
+                target_sent_timestamp: Some(12345),
+            }),
+            ..Default::default()
+        };
+        assert_eq!(data_message_text(&message), "[Message deleted by sender]");
+    }
+
+    #[test]
+    fn data_message_text_and_attachments_guard_view_once() {
+        let attachment = AttachmentPointer {
+            client_uuid: Some(vec![1, 2, 3]),
+            content_type: Some("image/jpeg".into()),
+            ..Default::default()
+        };
+        let message = DataMessage {
+            body: None,
+            attachments: vec![attachment.clone()],
+            is_view_once: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            data_message_text(&message),
+            "[View-once media: open on primary phone]"
+        );
+        assert!(regular_message_attachments(&message).is_empty());
+
+        let message_with_text = DataMessage {
+            body: Some("look once".into()),
+            attachments: vec![attachment],
+            is_view_once: Some(true),
+            ..Default::default()
+        };
+        assert_eq!(
+            data_message_text(&message_with_text),
+            "[View-once media: open on primary phone] look once"
+        );
+    }
+
+    #[test]
+    fn data_message_text_formats_quote_and_mentions() {
+        let message = DataMessage {
+            body: Some("Hello \u{FFFC}!".into()),
+            body_ranges: vec![BodyRange {
+                start: Some(6),
+                length: Some(1),
+                associated_value: Some(body_range::AssociatedValue::MentionAci("alice".into())),
+            }],
+            quote: Some(presage::proto::data_message::Quote {
+                text: Some("Previous question?".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        assert_eq!(
+            data_message_text(&message),
+            "> Previous question?\n\nHello @alice!"
+        );
     }
 }
