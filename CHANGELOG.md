@@ -4,6 +4,14 @@ All notable changes are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for stable releases.
 
+## [1.7.0](https://github.com/adrighem/signal-purple/compare/v1.6.2...v1.7.0) (2026-10-09)
+
+
+### Features
+
+* improve protocol robustness, message rendering, and modular architecture ([9686aaf](https://github.com/adrighem/signal-purple/commit/9686aaf8e9c3675dc737f98f11db9e024ce7f33d))
+* improve protocol robustness, message rendering, and modular architecture ([1e83b13](https://github.com/adrighem/signal-purple/commit/1e83b1356b4c795ed05703f86bc494649a4d4b5b))
+
 ## [1.6.2](https://github.com/adrighem/signal-purple/compare/v1.6.1...v1.6.2) (2026-10-06)
 
 
