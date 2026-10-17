@@ -111,7 +111,7 @@ def validate_release_workflows() -> None:
         [
             "id: app-token",
             "actions/create-github-app-token@"
-            "bcd2ba49218906704ab6c1aa796996da409d3eb1",
+            "64ab729a6294000f5aa4a4bc0b73d1f32bc45510",
             "client-id: ${{ vars.RELEASE_PLEASE_APP_CLIENT_ID }}",
             "private-key: ${{ secrets.RELEASE_PLEASE_APP_PRIVATE_KEY }}",
             "permission-contents: write",
