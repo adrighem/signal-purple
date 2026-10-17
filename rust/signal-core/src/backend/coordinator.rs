@@ -35,7 +35,7 @@ use super::media::{
     AvatarCache, DownloadedAttachment, MAX_SIGNAL_GIF_TRANSCODES_PER_MESSAGE,
     attachment_display_name, should_inline_image, transcode_signal_gif_video,
 };
-use super::outbox::{NewOutboxMessage, enqueue_and_send, retry_outbox};
+use super::outbox::{NewOutboxMessage, OutboxAttemptError, enqueue_and_send, retry_outbox};
 use super::projection::*;
 use super::protocol::SignalProtocol;
 use super::shutdown::{run_after_start_signal, wait_for_shutdown};
@@ -746,6 +746,7 @@ pub(crate) async fn handle_attachment_completion(
         let repo = StorageRepository::new(manager.store().clone());
         mark_sent_message_projected_or_report(&repo, &sent, sink).await;
     }
+    emit_identity_changes(manager, sink).await;
 }
 
 pub(crate) fn finish_attachment_completion(
@@ -898,9 +899,10 @@ pub(crate) async fn emit_contact_snapshot(
             });
         }
         Err(error) if error.is_transient() => {
-            sink.emit(Event::transient_error(format!(
-                "Could not read synchronized Signal contacts: {error}"
-            )));
+            tracing::warn!(
+                %error,
+                "Transient store contention reading synchronized Signal contacts; deferring"
+            );
         }
         Err(error) => {
             sink.emit(Event::error(
@@ -1468,10 +1470,16 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
                 )
                 .await
             } else {
-                Err("Recipient is not a canonical Signal service identifier".into())
+                Err(OutboxAttemptError::permanent(
+                    "Recipient is not a canonical Signal service identifier",
+                ))
             };
             if let Err(error) = result {
-                sink.emit(Event::transient_request_error(request_id, error));
+                if error.should_retry() {
+                    sink.emit(Event::transient_request_error(request_id, error.message));
+                } else {
+                    sink.emit(Event::request_error(request_id, error.message));
+                }
             }
         }
         Command::SendGroupMessage {
@@ -1480,10 +1488,9 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
             message,
         } => {
             let result = if !groups_authoritative {
-                Err(
-                    "Signal groups are temporarily unavailable until authoritative synchronization succeeds"
-                        .into(),
-                )
+                Err(OutboxAttemptError::retryable(
+                    "Signal groups are temporarily unavailable until authoritative synchronization succeeds",
+                ))
             } else {
                 match resolve_active_group(
                     manager,
@@ -1500,7 +1507,7 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
                             repo,
                             NewOutboxMessage {
                                 kind: ClientOutboxKind::Group,
-                                recipient: group_key,
+                                recipient: group_key.clone(),
                                 body: message,
                             },
                             departed_groups,
@@ -1510,14 +1517,22 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
                         )
                         .await
                     }
-                    Ok(None) => Err(
-                        "Signal group is unavailable or this account is no longer a member".into(),
-                    ),
-                    Err(error) => Err(error),
+                    Ok(None) => Err(OutboxAttemptError::permanent(
+                        "Signal group is unavailable or this account is no longer a member",
+                    )),
+                    Err(error) => Err(OutboxAttemptError::classify(error)),
                 }
             };
             if let Err(error) = result {
-                sink.emit(Event::transient_request_error(request_id, error));
+                if error.should_retry() {
+                    sink.emit(Event::transient_request_error(request_id, error.message));
+                } else {
+                    sink.emit(Event::group_request_error(
+                        request_id,
+                        group_key,
+                        error.message,
+                    ));
+                }
             }
         }
         Command::SetTyping {

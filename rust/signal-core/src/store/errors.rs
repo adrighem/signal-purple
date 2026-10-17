@@ -44,14 +44,18 @@ fn sqlx_error_is_transient(db_error: &sqlx::Error) -> bool {
 pub(crate) fn signal_protocol_error_is_transient(error: &SignalProtocolError) -> bool {
     match error {
         SignalProtocolError::InvalidState(scope, message) => {
-            (*scope == "sqlite" || *scope == "presage sqlite store error")
-                && (message.contains("pool timed out")
-                    || message.contains("timed out")
-                    || message.contains("locked")
-                    || message.contains("busy")
-                    || message.contains("code: 5")
-                    || message.contains("code: 6")
-                    || message.contains("code: 1032"))
+            let scope_lower = scope.to_ascii_lowercase();
+            let message_lower = message.to_ascii_lowercase();
+            (scope_lower == "sqlite"
+                || scope_lower == "presage sqlite store error"
+                || scope_lower.contains("sqlite"))
+                && (message_lower.contains("pool timed out")
+                    || message_lower.contains("timed out")
+                    || message_lower.contains("locked")
+                    || message_lower.contains("busy")
+                    || message_lower.contains("code: 5")
+                    || message_lower.contains("code: 6")
+                    || message_lower.contains("code: 1032"))
         }
         _ => false,
     }
@@ -128,5 +132,22 @@ mod tests {
 
         let not_found = StorageError::NotFound("row not visible yet");
         assert!(not_found.is_transient());
+    }
+
+    #[test]
+    fn classifies_signal_protocol_pool_timeouts_as_transient() {
+        let pool_timeout = SignalProtocolError::InvalidState(
+            "sqlite",
+            "pool timed out while waiting for an open connection".into(),
+        );
+        let presage_pool_timeout = SignalProtocolError::InvalidState(
+            "presage sqlite store error",
+            "Pool timed out while waiting for an open connection".into(),
+        );
+        let permanent = SignalProtocolError::InvalidProtobufEncoding;
+
+        assert!(signal_protocol_error_is_transient(&pool_timeout));
+        assert!(signal_protocol_error_is_transient(&presage_pool_timeout));
+        assert!(!signal_protocol_error_is_transient(&permanent));
     }
 }

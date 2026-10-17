@@ -12,8 +12,8 @@ use crate::store::traits::StorageOps;
 
 #[derive(Debug)]
 pub(crate) struct OutboxAttemptError {
-    message: String,
-    retryable: bool,
+    pub(crate) message: String,
+    pub(crate) retryable: bool,
 }
 
 impl OutboxAttemptError {
@@ -258,7 +258,7 @@ pub(crate) async fn enqueue_and_send<M: SignalProtocol>(
     metadata_cache: &super::coordinator::MetadataCache,
     sink: &EventSink,
     timestamps: &MessageTimestampAllocator,
-) -> Result<(), String> {
+) -> Result<(), OutboxAttemptError> {
     let NewOutboxMessage {
         kind,
         recipient,
@@ -268,7 +268,11 @@ pub(crate) async fn enqueue_and_send<M: SignalProtocol>(
     let id = repo
         .enqueue_outbox_message(kind, &recipient, &body, timestamp)
         .await
-        .map_err(|error| format!("Could not save the message in the encrypted outbox: {error}"))?;
+        .map_err(|error| {
+            OutboxAttemptError::classify(format!(
+                "Could not save the message in the encrypted outbox: {error}"
+            ))
+        })?;
     let message = ClientOutboxMessage {
         id,
         kind,
@@ -282,8 +286,11 @@ pub(crate) async fn enqueue_and_send<M: SignalProtocol>(
     if let Ok(sent) = &result {
         super::coordinator::mark_sent_message_projected_or_report(repo, sent, sink).await;
     }
-    finish_outbox_attempt(repo, &message, &result).await?;
-    result.map(|_| ()).map_err(|error| error.to_string())
+    let finish_result = finish_outbox_attempt(repo, &message, &result).await;
+    match result {
+        Ok(_) => finish_result.map_err(OutboxAttemptError::classify),
+        Err(error) => Err(error),
+    }
 }
 
 #[cfg(test)]
@@ -332,6 +339,7 @@ mod tests {
             "Recipient unregistered",
             "Target is not registered",
             "Untrusted identity key encountered",
+            "Untrusted identity key with <ACI:3d40c509-c7fa-4ea8-a7e3-87736e21ba42>",
             "Authorization failed for request",
         ];
         for err in fatal_cases {
@@ -344,6 +352,8 @@ mod tests {
             "Timed out waiting for socket",
             "Rate limit exceeded: 429 Too Many Requests",
             "Internal server error 500",
+            "service error: Protocol error: invalid state for call to sqlite to succeed: pool timed out while waiting for an open connection",
+            "service error: Protocol error: invalid state for call to presage sqlite store error to succeed: pool timed out while waiting for an open connection",
         ];
         for err in transient_cases {
             let classified = OutboxAttemptError::classify(err);
