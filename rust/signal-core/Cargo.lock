@@ -1720,7 +1720,7 @@ dependencies = [
  "rand 0.9.5",
  "rand_core 0.9.5",
  "serde",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "signal-crypto",
  "static_assertions",
  "subtle",
@@ -1739,7 +1739,7 @@ dependencies = [
  "libsignal-debug",
  "log",
  "rand 0.9.5",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "subtle",
  "thiserror 2.0.21",
  "uuid",
@@ -1785,7 +1785,7 @@ dependencies = [
  "rand 0.9.5",
  "rayon",
  "serde",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "signal-crypto",
  "spqr",
  "subtle",
@@ -1825,7 +1825,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "signal-crypto",
  "thiserror 2.0.21",
  "tokio",
@@ -2219,7 +2219,7 @@ source = "git+https://github.com/signalapp/libsignal?tag=v0.99.0#439f035d9cfd7ef
 dependencies = [
  "curve25519-dalek",
  "hmac",
- "sha2 0.11.0",
+ "sha2 0.11.1",
 ]
 
 [[package]]
@@ -2293,7 +2293,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -2968,9 +2968,9 @@ dependencies = [
 
 [[package]]
 name = "sha2"
-version = "0.11.0"
+version = "0.11.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+checksum = "47d7069beb7d6ac7b9acd1039986e73443f24234f41074da099d6f994ac9ad19"
 dependencies = [
  "cfg-if",
  "cpufeatures 0.3.1",
@@ -2991,7 +2991,7 @@ checksum = "f8fadd59c855ef2080decdef8ff161eb6661b86933c9d82e5ba29dc602a55aba"
 
 [[package]]
 name = "signal-core"
-version = "1.7.0" # x-release-please-version
+version = "1.7.0"
 dependencies = [
  "futures",
  "hex",
@@ -3001,7 +3001,7 @@ dependencies = [
  "presage-store-sqlite",
  "qrcode",
  "reqwest-websocket",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "sqlx",
  "tokio",
  "tracing",
@@ -3028,7 +3028,7 @@ dependencies = [
  "rand_chacha",
  "rand_core 0.9.5",
  "sha1 0.11.0",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "subtle",
  "thiserror 2.0.21",
  "zeroize",
@@ -3114,7 +3114,7 @@ dependencies = [
  "prost-build",
  "rand 0.9.5",
  "rand_core 0.9.5",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "sorted-vec",
  "thiserror 2.0.21",
 ]
@@ -3226,7 +3226,7 @@ dependencies = [
  "percent-encoding",
  "serde",
  "sha1 0.11.0",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "sqlx-core",
  "thiserror 2.0.21",
  "tracing",
@@ -3259,7 +3259,7 @@ dependencies = [
  "rand 0.10.3",
  "serde",
  "serde_json",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "smallvec",
  "sqlx-core",
  "stringprep",
@@ -3754,7 +3754,7 @@ dependencies = [
  "prost",
  "prost-build",
  "rand 0.9.5",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "signal-crypto",
  "subtle",
  "thiserror 2.0.21",
@@ -4257,7 +4257,7 @@ dependencies = [
  "poksho",
  "rayon",
  "serde",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "subtle",
  "thiserror 2.0.21",
 ]
@@ -4284,7 +4284,7 @@ dependencies = [
  "rand 0.9.5",
  "rayon",
  "serde",
- "sha2 0.11.0",
+ "sha2 0.11.1",
  "static_assertions",
  "subtle",
  "thiserror 2.0.21",
