@@ -9,8 +9,7 @@ All notable changes are documented here. The project follows
 
 ### Bug Fixes
 
-* **backend:** resolve sqlite pool contention and handle untrusted identity errors ([5dff723](https://github.com/adrighem/signal-purple/commit/5dff723d23ba6d1ae4e2f35645d5ddb1467f5be8))
-* **backend:** resolve sqlite pool contention and handle untrusted identity errors ([12414bb](https://github.com/adrighem/signal-purple/commit/12414bb1af0b6ced413cfabc47a98cbaa5b9a36e))
+* **backend:** resolve sqlite pool contention and handle untrusted identity errors ([#108](https://github.com/adrighem/signal-purple/pull/108), [12414bb](https://github.com/adrighem/signal-purple/commit/12414bb1af0b6ced413cfabc47a98cbaa5b9a36e))
 
 ## [1.7.0](https://github.com/adrighem/signal-purple/compare/v1.6.2...v1.7.0) (2026-10-09)
 
