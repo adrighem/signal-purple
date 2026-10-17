@@ -521,6 +521,7 @@ impl ConnectionSession {
             &self.metadata_cache,
             self.session.groups_authoritative(),
         ));
+        phase_or_stop!(emit_identity_changes(&self.manager, &self.sink));
         self.session.mark_ready();
         self.projection.delivery_receipts.activate_retries();
         self.ready.store(true, Ordering::Release);
@@ -608,6 +609,17 @@ impl ConnectionSession {
                             }
                             if let Some(start) = avatar_fetch_start.take() {
                                 let _ = start.send(());
+                            }
+                            if receive_tasks.group_sync.is_none() && !groups_authoritative {
+                                receive_tasks.group_sync = Some(spawn_group_sync(
+                                    self.manager.clone(),
+                                    self.sink.clone(),
+                                    self.departed_groups.clone(),
+                                    self.avatar_cache.clone(),
+                                    self.metadata_cache.clone(),
+                                    self.shutdown.clone(),
+                                    group_sync_tx.clone(),
+                                ));
                             }
                             if groups_dirty {
                                 match phase_or_stop!(emit_group_snapshot(
@@ -789,6 +801,7 @@ impl ConnectionSession {
                         &self.metadata_cache,
                         groups_authoritative,
                     ));
+                    phase_or_stop!(emit_identity_changes(&self.manager, &self.sink));
                 }
                 _ = self.acknowledgment_retry_tick.tick() => {
                     self.acknowledgments.activate_retries();
@@ -810,6 +823,7 @@ impl ConnectionSession {
                                 &self.metadata_cache,
                                 true,
                             ));
+                            phase_or_stop!(emit_identity_changes(&self.manager, &self.sink));
                         }
                         Err(error) => {
                             self.session.mark_groups_pending();
@@ -900,20 +914,11 @@ impl ConnectionSession {
                 self.metadata_cache.clone(),
             ));
             let (group_sync_tx, mut group_sync_rx) = tokio_mpsc::channel(1);
-            let group_sync = spawn_group_sync(
-                self.manager.clone(),
-                self.sink.clone(),
-                self.departed_groups.clone(),
-                self.avatar_cache.clone(),
-                self.metadata_cache.clone(),
-                self.shutdown.clone(),
-                group_sync_tx.clone(),
-            );
             let mut receive_tasks = ActiveReceiveTasks {
                 receive: receive_task,
                 contact_sync,
                 avatar_fetch,
-                group_sync: Some(group_sync),
+                group_sync: None,
             };
 
             if let ControlFlow::Break(result) = self.run_startup_phases().await {
