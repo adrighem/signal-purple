@@ -4,6 +4,13 @@ All notable changes are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for stable releases.
 
+## [1.7.1](https://github.com/adrighem/signal-purple/compare/v1.7.0...v1.7.1) (2026-10-17)
+
+
+### Bug Fixes
+
+* **backend:** resolve sqlite pool contention and handle untrusted identity errors ([#108](https://github.com/adrighem/signal-purple/pull/108), [12414bb](https://github.com/adrighem/signal-purple/commit/12414bb1af0b6ced413cfabc47a98cbaa5b9a36e))
+
 ## [1.7.0](https://github.com/adrighem/signal-purple/compare/v1.6.2...v1.7.0) (2026-10-09)
 
 
