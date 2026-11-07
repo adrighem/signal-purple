@@ -37,6 +37,7 @@ This README distinguishes production-service evidence from automated tests:
 | Outgoing link previews | **Test-covered.** Off by default. Link detection, the five-second fallback, and per-conversation ordering have automated coverage; previews shown by official clients still need live validation. |
 | Typing and receipts | **Test-covered.** Direct typing and outgoing delivery/focus-gated read receipts are implemented. Receipt updates received from other clients are not shown in Purple 2. |
 | Attachments | **Implemented.** Size limits, ABI handling, transfer presentation, and direct/group inline-image routing have focused tests. End-to-end transfers and inline media still need live checks. |
+| Incoming link previews | **Implemented.** Direct and group title, description, link, and inline image projection have focused Rust and C tests; live checks are pending. |
 | Delivery recovery | **Test-covered.** The encrypted text outbox and unacknowledged-message replay are implemented; controlled offline, crash, and network-loss checks remain. |
 | Identity replacement | **Test-covered.** Verified-contact sends block until the user accepts a changed identity after out-of-band verification. |
 | Persisted identifiers | **Test-covered.** Plugin ID `prpl-adrighem-signal`, account keys `store-id`/`store-path`/`device-name`/`generate-link-previews`, and managed buddy/group keys are locked by literal regression tests. |
@@ -342,6 +343,10 @@ converted through bounded, process-isolated FFmpeg pipes and presented as GIFs
 when the optional `ffmpeg` and `prlimit` helpers are installed. Ordinary video
 and any failed, unavailable, oversized, or invalid conversion retains the
 original MP4 transfer prompt because Purple 2 has no native inline-video API.
+Incoming direct and group link previews show the first preview's title,
+description, and any link missing from the message body, with the same
+inline-image checks for its image; a rejected preview image is skipped without
+a transfer prompt.
 Unnamed common media receives a usable type-specific filename. Empty or failed
 incoming downloads are rejected visibly. Incoming transfer size follows
 Signal's network policy without a lower plugin per-file or per-message cap.

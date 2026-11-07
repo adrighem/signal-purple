@@ -18,7 +18,7 @@ use presage::libsignal_service::sender::{AttachmentSpec, MessageSenderError};
 use presage::libsignal_service::zkgroup::profiles::ProfileKey;
 use presage::model::groups::Group;
 use presage::proto::{
-    AttachmentPointer, BodyRange, EditMessage, ReceiptMessage, SyncMessage, TypingMessage,
+    AttachmentPointer, BodyRange, EditMessage, Preview, ReceiptMessage, SyncMessage, TypingMessage,
     body_range, receipt_message, sync_message::Content as SyncContent, typing_message,
 };
 use presage::store::Thread;
@@ -32,8 +32,9 @@ use tokio::sync::{mpsc as tokio_mpsc, watch};
 
 use super::command::Command;
 use super::media::{
-    AvatarCache, DownloadedAttachment, MAX_SIGNAL_GIF_TRANSCODES_PER_MESSAGE,
-    attachment_display_name, should_inline_image, transcode_signal_gif_video,
+    AvatarCache, DownloadedAttachment, MAX_INLINE_MEDIA_BYTES,
+    MAX_SIGNAL_GIF_TRANSCODES_PER_MESSAGE, attachment_display_name, should_inline_image,
+    transcode_signal_gif_video,
 };
 use super::outbox::{NewOutboxMessage, OutboxAttemptError, enqueue_and_send, retry_outbox};
 use super::projection::*;
@@ -46,8 +47,8 @@ use crate::event::{
     EVENT_ACCOUNT, EVENT_ATTACHMENT, EVENT_ATTACHMENT_SENT, EVENT_AVATAR, EVENT_CONTACT,
     EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_GROUP, EVENT_GROUP_LEFT,
     EVENT_GROUP_MEMBER, EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN, EVENT_GROUP_SYNC_END,
-    EVENT_IDENTITY_ACCEPTED, EVENT_IDENTITY_CHANGE, EVENT_MESSAGE, EVENT_RECEIPT,
-    EVENT_SESSION_RESET, EVENT_TYPING, Event, FLAG_OUTGOING,
+    EVENT_IDENTITY_ACCEPTED, EVENT_IDENTITY_CHANGE, EVENT_LINK_PREVIEW, EVENT_MESSAGE,
+    EVENT_RECEIPT, EVENT_SESSION_RESET, EVENT_TYPING, Event, FLAG_INLINE_ONLY, FLAG_OUTGOING,
 };
 use crate::event_queue::EventSink;
 use crate::store::StorageRepository;
@@ -68,6 +69,11 @@ pub(crate) const MAX_ATTACHMENT_SIZE_BYTES: usize = 50 * 1024 * 1024;
 /// rest are left undownloaded rather than serially downloading an unbounded
 /// attacker-controlled count.
 pub(crate) const MAX_ATTACHMENT_DOWNLOADS_PER_MESSAGE: usize = 32;
+/// Display caps for sender-controlled link preview text, in characters. An
+/// over-long URL is dropped rather than truncated into a different link.
+const MAX_PREVIEW_TITLE_CHARS: usize = 200;
+const MAX_PREVIEW_DESCRIPTION_CHARS: usize = 500;
+const MAX_PREVIEW_URL_CHARS: usize = 2048;
 
 #[derive(Clone, Default)]
 pub(crate) struct MessageTimestampAllocator {
@@ -1772,25 +1778,6 @@ fn data_message_text(message: &DataMessage) -> String {
         .as_deref()
         .filter(|body| !body.is_empty())
         .map(|body| format_body_with_mentions(body, &message.body_ranges))
-        .or_else(|| {
-            message
-                .preview
-                .iter()
-                .find_map(|preview| {
-                    preview
-                        .url
-                        .as_deref()
-                        .filter(|text| !text.is_empty())
-                        .or_else(|| preview.title.as_deref().filter(|text| !text.is_empty()))
-                        .or_else(|| {
-                            preview
-                                .description
-                                .as_deref()
-                                .filter(|text| !text.is_empty())
-                        })
-                })
-                .map(ToOwned::to_owned)
-        })
         .unwrap_or_default();
 
     if let Some(quote) = &message.quote
@@ -1809,6 +1796,103 @@ fn data_message_text(message: &DataMessage) -> String {
     }
 
     formatted_body
+}
+
+/// Plain preview fields for one `EVENT_LINK_PREVIEW`. Purple escapes both
+/// before display, so neither is markup.
+#[derive(Debug, PartialEq)]
+struct LinkPreviewText {
+    title: Option<String>,
+    text: Option<String>,
+}
+
+fn preview_char(ch: char) -> Option<char> {
+    match ch {
+        '\n' | '\t' => Some(' '),
+        // Bidirectional controls can make attacker text mimic other text.
+        '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => None,
+        _ if ch.is_control() => None,
+        _ => Some(ch),
+    }
+}
+
+fn preview_display_text(value: Option<&str>, max_chars: usize) -> Option<String> {
+    // One extra character reveals truncation without scanning the whole value.
+    let mut chars: Vec<char> = value?
+        .chars()
+        .filter_map(preview_char)
+        .take(max_chars + 1)
+        .collect();
+    let truncated = chars.len() > max_chars;
+    chars.truncate(max_chars);
+    let mut cleaned = chars.into_iter().collect::<String>().trim().to_owned();
+    if cleaned.is_empty() {
+        return None;
+    }
+    if truncated {
+        cleaned.push('…');
+    }
+    Some(cleaned)
+}
+
+fn preview_url(value: Option<&str>) -> Option<String> {
+    let url = value?.trim();
+    let displayable = !url.is_empty()
+        && url.chars().count() <= MAX_PREVIEW_URL_CHARS
+        && url.chars().all(|ch| preview_char(ch) == Some(ch));
+    displayable.then(|| url.to_owned())
+}
+
+/// Only the first preview is shown, and only for ordinary message content.
+fn link_preview(message: &DataMessage) -> Option<&Preview> {
+    if message.delete.is_some() || message.is_view_once.unwrap_or(false) {
+        return None;
+    }
+    message
+        .reaction
+        .is_none()
+        .then(|| message.preview.first())?
+}
+
+fn link_preview_text(message: &DataMessage) -> Option<LinkPreviewText> {
+    let preview = link_preview(message)?;
+    let title = preview_display_text(preview.title.as_deref(), MAX_PREVIEW_TITLE_CHARS);
+    let description = preview_display_text(
+        preview.description.as_deref(),
+        MAX_PREVIEW_DESCRIPTION_CHARS,
+    );
+    let body = message.body.as_deref().unwrap_or_default();
+    let url = preview_url(preview.url.as_deref()).filter(|url| !body.contains(url.as_str()));
+    let text = [description, url]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let text = (!text.is_empty()).then_some(text);
+    (title.is_some() || text.is_some()).then_some(LinkPreviewText { title, text })
+}
+
+/// Downloads the preview image for the inline-image path. Any miss is silent:
+/// the preview text is still shown and the image never becomes a file prompt.
+async fn download_preview_image<M: SignalProtocol>(
+    manager: &M,
+    preview: &Preview,
+) -> Option<DownloadedAttachment> {
+    let image = preview.image.as_ref()?;
+    if image.size.unwrap_or(0) as usize > MAX_INLINE_MEDIA_BYTES {
+        return None;
+    }
+    let download_pointer = attachment_pointer_without_sender_size_hint(image);
+    let mut data = match manager.get_attachment(&download_pointer).await {
+        Ok(data) => data,
+        Err(error) => {
+            tracing::debug!(%error, "Skipping Signal link preview image download");
+            return None;
+        }
+    };
+    truncate_attachment_to_sender_size(image, &mut data);
+    should_inline_image(false, image.content_type.as_deref(), Some(&data))
+        .then(|| DownloadedAttachment::new(0, image, data))
 }
 
 fn regular_message_attachments(message: &DataMessage) -> &[AttachmentPointer] {
@@ -1877,7 +1961,8 @@ async fn emit_data_message<M: SignalProtocol, S: StorageOps>(
 
     let text = data_message_text(message);
     let attachments = regular_message_attachments(message);
-    if text.is_empty() && attachments.is_empty() {
+    let preview_text = link_preview_text(message);
+    if text.is_empty() && attachments.is_empty() && preview_text.is_none() {
         return ProjectionDisposition::Complete;
     }
 
@@ -1953,6 +2038,11 @@ async fn emit_data_message<M: SignalProtocol, S: StorageOps>(
         }
     }
 
+    let preview_image = match (outgoing, preview_text.is_some(), link_preview(message)) {
+        (false, true, Some(preview)) => download_preview_image(manager, preview).await,
+        _ => None,
+    };
+
     let mut signal_gif_transcodes = 0usize;
     for attachment in &mut downloaded {
         if signal_gif_transcodes >= MAX_SIGNAL_GIF_TRANSCODES_PER_MESSAGE {
@@ -1991,54 +2081,67 @@ async fn emit_data_message<M: SignalProtocol, S: StorageOps>(
             }),
     );
 
-    let message_delivery_id = if downloaded.is_empty() {
-        delivery_id
-    } else {
-        0
+    let chat_id = group_key.map(|key| group_identifier(&key));
+    let event_peer = match group_key {
+        Some(_) => group_message_peer(outgoing, peer, manager.local_aci()),
+        None => peer.to_owned(),
     };
-
-    if let (Some(group_key), Some(text)) = (group_key, text.as_ref()) {
-        let group_peer = group_message_peer(outgoing, peer, manager.local_aci());
-        sink.emit(Event {
-            kind: EVENT_GROUP_MESSAGE,
-            request_id: message_delivery_id,
-            flags,
-            peer_id: Some(group_peer),
-            chat_id: Some(group_identifier(&group_key)),
-            title: group_title,
-            text: Some(text.clone()),
-            timestamp_ms: timestamp,
-            ..Event::default()
+    let mut events = Vec::new();
+    if let Some(text) = text {
+        events.push(match chat_id.clone() {
+            Some(chat_id) => Event {
+                kind: EVENT_GROUP_MESSAGE,
+                flags,
+                peer_id: Some(event_peer.clone()),
+                chat_id: Some(chat_id),
+                title: group_title,
+                text: Some(text),
+                timestamp_ms: timestamp,
+                ..Event::default()
+            },
+            None => Event {
+                kind: EVENT_MESSAGE,
+                flags,
+                peer_id: Some(event_peer.clone()),
+                text: Some(text),
+                timestamp_ms: timestamp,
+                ..Event::default()
+            },
         });
-    } else if let Some(text) = text {
-        sink.emit(Event {
-            kind: EVENT_MESSAGE,
-            request_id: message_delivery_id,
+    }
+    if let Some(LinkPreviewText { title, text }) = preview_text {
+        events.push(Event {
+            kind: EVENT_LINK_PREVIEW,
             flags,
-            peer_id: Some(peer.to_owned()),
-            text: Some(text),
+            peer_id: Some(event_peer),
+            chat_id: chat_id.clone(),
+            title,
+            text,
             timestamp_ms: timestamp,
             ..Event::default()
         });
     }
-
-    let attachment_count = downloaded.len();
-    for (index, attachment) in downloaded.into_iter().enumerate() {
-        sink.emit(Event {
+    let preview_image = preview_image.map(|image| (image, FLAG_INLINE_ONLY));
+    let attachments = downloaded.into_iter().map(|image| (image, 0));
+    for (attachment, flags) in preview_image.into_iter().chain(attachments) {
+        events.push(Event {
             kind: EVENT_ATTACHMENT,
-            request_id: if index + 1 == attachment_count {
-                delivery_id
-            } else {
-                0
-            },
+            flags,
             peer_id: Some(peer.to_owned()),
-            chat_id: group_key.map(|key| group_identifier(&key)),
+            chat_id: chat_id.clone(),
             title: Some(attachment.filename),
             text: attachment.content_type,
             data: attachment.data,
             timestamp_ms: timestamp,
             ..Event::default()
         });
+    }
+    // Only the final event of one Signal message may trigger the read receipt.
+    if let Some(last) = events.last_mut() {
+        last.request_id = delivery_id;
+    }
+    for event in events {
+        sink.emit(event);
     }
     ProjectionDisposition::AwaitingAck
 }
@@ -2858,9 +2961,13 @@ mod tests {
         };
 
         assert!(regular_message_attachments(&message).is_empty());
+        assert_eq!(data_message_text(&message), "");
         assert_eq!(
-            data_message_text(&message),
-            "https://example.invalid/article"
+            link_preview_text(&message),
+            Some(LinkPreviewText {
+                title: None,
+                text: Some("https://example.invalid/article".into()),
+            })
         );
 
         let message = DataMessage {
@@ -3084,5 +3191,391 @@ mod tests {
             data_message_text(&message),
             "> Previous question?\n\nHello @alice!"
         );
+    }
+
+    fn preview(title: &str, description: &str, url: &str) -> Preview {
+        Preview {
+            title: (!title.is_empty()).then(|| title.to_owned()),
+            description: (!description.is_empty()).then(|| description.to_owned()),
+            url: (!url.is_empty()).then(|| url.to_owned()),
+            ..Preview::default()
+        }
+    }
+
+    fn preview_message(body: &str, preview: Preview) -> DataMessage {
+        DataMessage {
+            body: (!body.is_empty()).then(|| body.to_owned()),
+            preview: vec![preview],
+            ..DataMessage::default()
+        }
+    }
+
+    #[test]
+    fn link_preview_text_shows_title_description_and_new_url() {
+        let message = preview_message(
+            "look at this",
+            preview("Title", "About it", "https://example.invalid/a"),
+        );
+
+        assert_eq!(
+            link_preview_text(&message),
+            Some(LinkPreviewText {
+                title: Some("Title".into()),
+                text: Some("About it\nhttps://example.invalid/a".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn link_preview_text_omits_a_url_the_body_already_contains() {
+        let message = preview_message(
+            "see https://example.invalid/a now",
+            preview("Title", "About it", "https://example.invalid/a"),
+        );
+        assert_eq!(
+            link_preview_text(&message),
+            Some(LinkPreviewText {
+                title: Some("Title".into()),
+                text: Some("About it".into()),
+            })
+        );
+
+        let url_only = preview_message(
+            "https://example.invalid/a",
+            preview("", "", "https://example.invalid/a"),
+        );
+        assert_eq!(link_preview_text(&url_only), None);
+    }
+
+    #[test]
+    fn link_preview_text_replaces_the_empty_body_fallback() {
+        let url_only = preview_message("", preview("", "", "https://example.invalid/a"));
+        assert_eq!(data_message_text(&url_only), "");
+        assert_eq!(
+            link_preview_text(&url_only).and_then(|text| text.text),
+            Some("https://example.invalid/a".into())
+        );
+
+        let title_only = preview_message("", preview("Only title", "", ""));
+        assert_eq!(
+            link_preview_text(&title_only),
+            Some(LinkPreviewText {
+                title: Some("Only title".into()),
+                text: None,
+            })
+        );
+        assert_eq!(link_preview_text(&DataMessage::default()), None);
+    }
+
+    #[test]
+    fn link_preview_text_leaves_escaping_to_the_purple_adapter() {
+        let message = preview_message(
+            "",
+            preview(
+                "<b>Click</b> & win",
+                "<script>x</script>",
+                "https://a.invalid/?a=1&b=2",
+            ),
+        );
+        let text = link_preview_text(&message).unwrap();
+
+        assert_eq!(text.title.as_deref(), Some("<b>Click</b> & win"));
+        assert_eq!(
+            text.text.as_deref(),
+            Some("<script>x</script>\nhttps://a.invalid/?a=1&b=2")
+        );
+    }
+
+    #[test]
+    fn link_preview_text_caps_length_on_character_boundaries() {
+        let title = "\u{e9}".repeat(MAX_PREVIEW_TITLE_CHARS + 50);
+        let description = "\u{1f600}".repeat(MAX_PREVIEW_DESCRIPTION_CHARS + 50);
+        let exact = "x".repeat(MAX_PREVIEW_TITLE_CHARS);
+        let long_url = format!("https://a.invalid/{}", "p".repeat(MAX_PREVIEW_URL_CHARS));
+
+        let text = link_preview_text(&preview_message(
+            "",
+            preview(&title, &description, &long_url),
+        ))
+        .unwrap();
+        assert_eq!(
+            text.title,
+            Some(format!(
+                "{}\u{2026}",
+                "\u{e9}".repeat(MAX_PREVIEW_TITLE_CHARS)
+            ))
+        );
+        assert_eq!(
+            text.text,
+            Some(format!(
+                "{}\u{2026}",
+                "\u{1f600}".repeat(MAX_PREVIEW_DESCRIPTION_CHARS)
+            ))
+        );
+
+        let text = link_preview_text(&preview_message("", preview(&exact, "", ""))).unwrap();
+        assert_eq!(text.title, Some(exact));
+    }
+
+    #[test]
+    fn link_preview_text_strips_controls_and_flattens_lines() {
+        let message = preview_message(
+            "",
+            preview(
+                "  Line\none\u{202e}\u{0}\t two  ",
+                "a\r\nb\u{7}",
+                "https://a.invalid/\nx",
+            ),
+        );
+
+        assert_eq!(
+            link_preview_text(&message),
+            Some(LinkPreviewText {
+                title: Some("Line one  two".into()),
+                text: Some("a b".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn link_preview_text_uses_only_the_first_preview_and_ordinary_content() {
+        let mut message = preview_message("", preview("First", "", ""));
+        message.preview.push(preview("Second", "", ""));
+        assert_eq!(
+            link_preview_text(&message).and_then(|text| text.title),
+            Some("First".into())
+        );
+
+        let mut deleted = message.clone();
+        deleted.delete = Some(Default::default());
+        let mut view_once = message.clone();
+        view_once.is_view_once = Some(true);
+        let mut reaction = message;
+        reaction.reaction = Some(Default::default());
+        for message in [deleted, view_once, reaction] {
+            assert_eq!(link_preview_text(&message), None);
+        }
+    }
+
+    const TEST_PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake body";
+    const TEST_SENDER: &str = "aci:22222222-2222-4222-8222-222222222222";
+
+    fn image_preview(title: &str) -> Preview {
+        Preview {
+            image: Some(AttachmentPointer {
+                file_name: Some("card.png".into()),
+                content_type: Some("image/png".into()),
+                ..AttachmentPointer::default()
+            }),
+            ..preview(title, "", "https://example.invalid/a")
+        }
+    }
+
+    fn fake_protocol(
+        result: Option<Result<Vec<u8>, String>>,
+    ) -> crate::backend::protocol::fake::FakeSignalProtocol {
+        crate::backend::protocol::fake::FakeSignalProtocol {
+            attachment_result: result,
+            ..Default::default()
+        }
+    }
+
+    fn project_message(
+        message: &DataMessage,
+        outgoing: bool,
+        protocol: &crate::backend::protocol::fake::FakeSignalProtocol,
+        repo: &crate::store::traits::fake::FakeStorageRepository,
+    ) -> (ProjectionDisposition, Vec<Event>) {
+        let (sink, queue) = crate::event_queue::event_queue(16).unwrap();
+        let projection = if outgoing {
+            DataMessageProjection::outgoing(message, TEST_SENDER, 1_000, 7)
+        } else {
+            DataMessageProjection::incoming(message, TEST_SENDER, 1_000, 7)
+        };
+        let disposition = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(emit_data_message(
+                protocol,
+                repo,
+                projection,
+                &sink,
+                &DepartedGroups::default(),
+            ));
+        let mut events = Vec::new();
+        while let crate::event_queue::EventPoll::Event(event) = queue.poll() {
+            events.push(event);
+        }
+        (disposition, events)
+    }
+
+    fn event_shape(events: &[Event]) -> Vec<(u32, u32, u64)> {
+        events
+            .iter()
+            .map(|event| (event.kind, event.flags, event.request_id))
+            .collect()
+    }
+
+    #[test]
+    fn direct_preview_follows_the_body_and_routes_its_image_inline_only() {
+        let protocol = fake_protocol(Some(Ok(TEST_PNG.to_vec())));
+        let repo = crate::store::traits::fake::FakeStorageRepository::new();
+        let message = preview_message("look", image_preview("Card"));
+
+        let (disposition, events) = project_message(&message, false, &protocol, &repo);
+
+        assert_eq!(disposition, ProjectionDisposition::AwaitingAck);
+        assert_eq!(
+            event_shape(&events),
+            [
+                (EVENT_MESSAGE, 0, 0),
+                (EVENT_LINK_PREVIEW, 0, 0),
+                (EVENT_ATTACHMENT, FLAG_INLINE_ONLY, 7),
+            ]
+        );
+        assert_eq!(events[0].text.as_deref(), Some("look"));
+        assert_eq!(events[1].title.as_deref(), Some("Card"));
+        assert_eq!(events[1].text.as_deref(), Some("https://example.invalid/a"));
+        assert_eq!(events[1].peer_id.as_deref(), Some(TEST_SENDER));
+        assert_eq!(events[1].chat_id, None);
+        assert_eq!(events[2].data, TEST_PNG);
+        assert_eq!(events[2].text.as_deref(), Some("image/png"));
+        assert!(events[2].chat_id.is_none());
+    }
+
+    #[test]
+    fn preview_image_never_becomes_a_regular_attachment_or_placeholder() {
+        let protocol = fake_protocol(Some(Ok(TEST_PNG.to_vec())));
+        let repo = crate::store::traits::fake::FakeStorageRepository::new();
+        let message = preview_message("", image_preview("Card"));
+
+        let (_, events) = project_message(&message, false, &protocol, &repo);
+
+        assert_eq!(
+            event_shape(&events),
+            [
+                (EVENT_LINK_PREVIEW, 0, 0),
+                (EVENT_ATTACHMENT, FLAG_INLINE_ONLY, 7)
+            ]
+        );
+        assert!(events.iter().all(|event| {
+            !event
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("[Attachment"))
+        }));
+    }
+
+    #[test]
+    fn invalid_or_missing_preview_images_are_skipped_silently() {
+        let repo = crate::store::traits::fake::FakeStorageRepository::new();
+        let message = preview_message("look", image_preview("Card"));
+        let results = [
+            Some(Ok(b"not an image at all".to_vec())),
+            Some(Ok(Vec::new())),
+            Some(Ok(vec![0; MAX_INLINE_MEDIA_BYTES + 1])),
+            Some(Err("download failed".to_owned())),
+        ];
+
+        for result in results {
+            let protocol = fake_protocol(result);
+            let (disposition, events) = project_message(&message, false, &protocol, &repo);
+
+            assert_eq!(disposition, ProjectionDisposition::AwaitingAck);
+            assert_eq!(
+                event_shape(&events),
+                [(EVENT_MESSAGE, 0, 0), (EVENT_LINK_PREVIEW, 0, 7)]
+            );
+        }
+
+        let mut oversized = message.clone();
+        if let Some(image) = oversized.preview[0].image.as_mut() {
+            image.size = Some(MAX_INLINE_MEDIA_BYTES as u32 + 1);
+        }
+        let protocol = fake_protocol(Some(Ok(TEST_PNG.to_vec())));
+        let (_, events) = project_message(&oversized, false, &protocol, &repo);
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn preview_without_text_projects_nothing_even_with_an_image() {
+        let protocol = fake_protocol(Some(Ok(TEST_PNG.to_vec())));
+        let repo = crate::store::traits::fake::FakeStorageRepository::new();
+        let mut image_only = image_preview("");
+        image_only.url = None;
+        let message = preview_message("", image_only);
+
+        let (disposition, events) = project_message(&message, false, &protocol, &repo);
+
+        assert_eq!(disposition, ProjectionDisposition::Complete);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn outgoing_echo_shows_preview_text_without_downloading_the_image() {
+        let protocol = fake_protocol(Some(Ok(TEST_PNG.to_vec())));
+        let repo = crate::store::traits::fake::FakeStorageRepository::new();
+        let message = preview_message("", image_preview("Card"));
+
+        let (_, events) = project_message(&message, true, &protocol, &repo);
+
+        assert_eq!(
+            event_shape(&events),
+            [(EVENT_LINK_PREVIEW, FLAG_OUTGOING, 7)]
+        );
+    }
+
+    #[test]
+    fn group_preview_keeps_the_group_title_off_the_preview_event() {
+        use presage::libsignal_service::groups_v2::Role;
+        use presage::model::groups::Member;
+
+        let protocol = fake_protocol(Some(Ok(TEST_PNG.to_vec())));
+        let repo = crate::store::traits::fake::FakeStorageRepository::new();
+        let key = [9u8; 32];
+        repo.add_group(
+            key,
+            Group {
+                title: "Real group".into(),
+                avatar: String::new(),
+                disappearing_messages_timer: None,
+                access_control: None,
+                revision: 1,
+                members: vec![Member {
+                    aci: protocol.local_aci(),
+                    role: Role::Default,
+                    profile_key: ProfileKey::create([1; 32]),
+                    joined_at_revision: 0,
+                    label: None,
+                    label_emoji: None,
+                }],
+                pending_members: Vec::new(),
+                requesting_members: Vec::new(),
+                invite_link_password: Vec::new(),
+                description: None,
+            },
+        );
+        let mut message = preview_message("hi", image_preview("Card"));
+        message.group_v2 = Some(GroupContextV2 {
+            master_key: Some(key.to_vec()),
+            ..GroupContextV2::default()
+        });
+
+        let (_, events) = project_message(&message, false, &protocol, &repo);
+
+        assert_eq!(
+            event_shape(&events),
+            [
+                (EVENT_GROUP_MESSAGE, 0, 0),
+                (EVENT_LINK_PREVIEW, 0, 0),
+                (EVENT_ATTACHMENT, FLAG_INLINE_ONLY, 7),
+            ]
+        );
+        let chat_id = Some(group_identifier(&key));
+        assert!(events.iter().all(|event| event.chat_id == chat_id));
+        assert_eq!(events[0].title.as_deref(), Some("Real group"));
+        assert_eq!(events[1].title.as_deref(), Some("Card"));
+        assert_eq!(events[1].peer_id.as_deref(), Some(TEST_SENDER));
     }
 }

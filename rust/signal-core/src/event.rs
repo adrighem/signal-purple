@@ -29,10 +29,12 @@ pub const EVENT_RECOVERING: u32 = 22;
 pub const EVENT_ACCOUNT: u32 = 23;
 pub const EVENT_SESSION_RESET: u32 = 24;
 pub const EVENT_AVATAR: u32 = 25;
+pub const EVENT_LINK_PREVIEW: u32 = 26;
 
 pub const FLAG_OUTGOING: u32 = 1 << 0;
 pub const FLAG_FATAL: u32 = 1 << 1;
 pub const FLAG_TRANSIENT: u32 = 1 << 2;
+pub const FLAG_INLINE_ONLY: u32 = 1 << 3;
 
 #[derive(Debug, Default)]
 pub struct Event {
@@ -225,13 +227,18 @@ mod tests {
             EVENT_RECOVERING,
             EVENT_ACCOUNT,
             EVENT_SESSION_RESET,
+            EVENT_AVATAR,
+            EVENT_LINK_PREVIEW,
         ];
 
         assert_eq!(ABI_VERSION, 8);
         for (index, kind) in kinds.into_iter().enumerate() {
             assert_eq!(kind, index as u32 + 1);
         }
-        assert_eq!([FLAG_OUTGOING, FLAG_FATAL, FLAG_TRANSIENT], [1, 2, 4]);
+        assert_eq!(
+            [FLAG_OUTGOING, FLAG_FATAL, FLAG_TRANSIENT, FLAG_INLINE_ONLY],
+            [1, 2, 4, 8]
+        );
     }
 
     #[test]

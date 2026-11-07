@@ -106,6 +106,11 @@ user-facing local storage, not diagnostic output.
   privacy and group-ignore rules to text, inline media, and transfer fallback.
   Filtered events are acknowledged without presentation or a read receipt;
   outgoing linked-device echoes remain visible.
+  Link preview title, description, and URL are sender-controlled: Rust caps and
+  strips control and bidirectional override characters, and C escapes them with
+  the same markup escaping as message text, so only the plugin's own bold title
+  markup is ever interpreted. Preview images use the inline-only path above and
+  never open a receive prompt. The plugin does not fetch the preview URL.
   Decrypted
   incoming bytes remain in memory until the displayed image is released, saved,
   or rejected; the plugin creates no plaintext attachment cache. Remote

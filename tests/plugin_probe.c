@@ -1720,6 +1720,220 @@ test_inline_attachment_routing(PurplePlugin *plugin,
     read_conversation_focused = FALSE;
 }
 
+static guint preview_capture_writes;
+static char *preview_capture_message;
+
+static void
+capture_preview_message(PurpleConversation *conversation, const char *sender,
+                        const char *message, PurpleMessageFlags flags,
+                        time_t timestamp)
+{
+    (void)conversation;
+    (void)sender;
+    (void)flags;
+    (void)timestamp;
+    preview_capture_writes++;
+    g_free(preview_capture_message);
+    preview_capture_message = g_strdup(message);
+}
+
+static PurpleConversationUiOps preview_conversation_ops = {
+    .write_chat = capture_preview_message,
+    .write_im = capture_preview_message,
+    .has_focus = read_has_focus,
+};
+
+static gboolean
+dispatch_preview(SignalDispatchEventFunc dispatch,
+                 SignalConnection *connection, const SignalEvent *event)
+{
+    gboolean accepted = FALSE;
+
+    preview_capture_writes = 0;
+    g_clear_pointer(&preview_capture_message, g_free);
+    g_assert_true(dispatch(connection, event, &accepted));
+    return accepted;
+}
+
+static void
+test_link_preview_projection(PurplePlugin *plugin,
+                             PurplePluginProtocolInfo *protocol)
+{
+    union {
+        gpointer pointer;
+        SignalDispatchEventFunc function;
+    } dispatch_event = { 0 };
+    PurpleAccount *account =
+        purple_account_new("link-preview-projection", SIGNAL_PLUGIN_ID);
+    PurpleConnection gc = {
+        .prpl = plugin,
+        .state = PURPLE_CONNECTED,
+        .account = account,
+    };
+    FakeReadMarker marker = {
+        .status = SIGNAL_STATUS_OK,
+    };
+    SignalConnection *connection;
+    PurpleConversation *direct;
+    PurpleConversation *group;
+    SignalEvent direct_preview = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_LINK_PREVIEW,
+        .request_id = 9100,
+        .timestamp_ms = 4000,
+        .peer_id = "aci:preview-direct",
+        .title = "<b>Evil</b> & co",
+        .text = "a <script>\nhttps://x.invalid/?a=1&b=2",
+    };
+    SignalEvent group_setup = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_GROUP_MESSAGE,
+        .peer_id = "aci:preview-member",
+        .chat_id = "preview-group",
+        .title = "Preview group",
+        .text = "setup",
+    };
+    SignalEvent group_preview = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_LINK_PREVIEW,
+        .request_id = 9101,
+        .timestamp_ms = 5000,
+        .peer_id = "aci:preview-member",
+        .chat_id = "preview-group",
+        .title = "Hijack the group title",
+        .text = "description",
+    };
+    SignalEvent rejected_image = {
+        .abi_version = SIGNAL_CORE_ABI_VERSION,
+        .struct_size = sizeof(SignalEvent),
+        .kind = SIGNAL_EVENT_ATTACHMENT,
+        .flags = SIGNAL_EVENT_FLAG_INLINE_ONLY,
+        .request_id = 9102,
+        .timestamp_ms = 5000,
+        .peer_id = "aci:preview-direct",
+        .title = "card.png",
+        .text = "image/png",
+        .data = (const guint8 *)"not an image",
+        .data_len = 12,
+    };
+    SignalEvent malformed = direct_preview;
+    guint transfer_count = g_list_length(purple_xfers_get_all());
+
+    g_assert_true(g_module_symbol((GModule *)plugin->handle,
+                                  "signal_dispatch_event",
+                                  &dispatch_event.pointer));
+    purple_account_set_connection(account, &gc);
+    connection = new_transfer_connection(&gc);
+    connection->group_snapshot_complete = TRUE;
+    connection->core = (SignalCore *)&marker;
+    connection->mark_read = fake_mark_read;
+    read_conversation_focused = TRUE;
+
+    direct = purple_conversation_new(PURPLE_CONV_TYPE_IM, account,
+                                     direct_preview.peer_id);
+    purple_conversation_set_ui_ops(direct, &preview_conversation_ops);
+
+    /* Sender-controlled fields are escaped; only the title is made bold. */
+    g_assert_true(dispatch_preview(dispatch_event.function, connection,
+                                   &direct_preview));
+    g_assert_cmpuint(preview_capture_writes, ==, 1);
+    g_assert_cmpstr(
+        preview_capture_message, ==,
+        "<b>&lt;b&gt;Evil&lt;/b&gt; &amp; co</b>\n"
+        "a &lt;script&gt;\nhttps://x.invalid/?a=1&amp;b=2");
+    g_assert_cmpuint(marker.calls, ==, 1);
+    g_assert_cmpuint(marker.timestamp, ==, direct_preview.timestamp_ms);
+
+    direct_preview.request_id = 0;
+    direct_preview.text = NULL;
+    g_assert_true(dispatch_preview(dispatch_event.function, connection,
+                                   &direct_preview));
+    g_assert_cmpstr(preview_capture_message, ==,
+                    "<b>&lt;b&gt;Evil&lt;/b&gt; &amp; co</b>");
+    direct_preview.title = NULL;
+    direct_preview.text = "description only";
+    g_assert_true(dispatch_preview(dispatch_event.function, connection,
+                                   &direct_preview));
+    g_assert_cmpstr(preview_capture_message, ==, "description only");
+    g_assert_cmpuint(marker.calls, ==, 1);
+
+    /* An empty preview or missing sender is not acknowledged. */
+    direct_preview.text = "";
+    g_assert_false(dispatch_preview(dispatch_event.function, connection,
+                                    &direct_preview));
+    malformed.peer_id = "";
+    g_assert_false(dispatch_preview(dispatch_event.function, connection,
+                                    &malformed));
+    malformed = group_preview;
+    malformed.chat_id = "";
+    g_assert_false(dispatch_preview(dispatch_event.function, connection,
+                                    &malformed));
+    g_assert_cmpuint(preview_capture_writes, ==, 0);
+
+    /* The direct privacy gate applies, and filtered events never read. */
+    direct_preview.request_id = 9103;
+    direct_preview.title = "Filtered";
+    direct_preview.text = "hidden";
+    purple_account_set_privacy_type(account, PURPLE_PRIVACY_DENY_ALL);
+    g_assert_true(dispatch_preview(dispatch_event.function, connection,
+                                   &direct_preview));
+    g_assert_cmpuint(preview_capture_writes, ==, 0);
+    g_assert_cmpuint(marker.calls, ==, 1);
+    direct_preview.flags = SIGNAL_EVENT_FLAG_OUTGOING;
+    direct_preview.request_id = 0;
+    g_assert_true(dispatch_preview(dispatch_event.function, connection,
+                                   &direct_preview));
+    g_assert_cmpuint(preview_capture_writes, ==, 1);
+    purple_account_set_privacy_type(account, PURPLE_PRIVACY_ALLOW_ALL);
+
+    /* A group preview never renames the conversation and honors ignore. */
+    g_assert_true(dispatch_preview(dispatch_event.function, connection,
+                                   &group_setup));
+    group = signal_group_sync_lookup_conversation(account,
+                                                  group_preview.chat_id);
+    g_assert_nonnull(group);
+    purple_conversation_set_ui_ops(group, &preview_conversation_ops);
+    purple_conv_chat_ignore(PURPLE_CONV_CHAT(group), group_preview.peer_id);
+    g_assert_true(dispatch_preview(dispatch_event.function, connection,
+                                   &group_preview));
+    g_assert_cmpuint(preview_capture_writes, ==, 0);
+    purple_conv_chat_unignore(PURPLE_CONV_CHAT(group),
+                              group_preview.peer_id);
+    g_assert_true(dispatch_preview(dispatch_event.function, connection,
+                                   &group_preview));
+    g_assert_cmpuint(preview_capture_writes, ==, 1);
+    g_assert_cmpstr(preview_capture_message, ==,
+                    "<b>Hijack the group title</b>\ndescription");
+    g_assert_cmpstr(purple_conversation_get_title(group), ==,
+                    "Preview group");
+    g_assert_cmpuint(marker.calls, ==, 2);
+    g_assert_cmpstr(marker.recipient, ==, group_preview.peer_id);
+
+    /* An image the decoder rejects is dropped, not offered as a file. */
+    g_assert_true(dispatch_preview(dispatch_event.function, connection,
+                                   &rejected_image));
+    g_assert_cmpuint(preview_capture_writes, ==, 0);
+    g_assert_cmpuint(g_list_length(purple_xfers_get_all()), ==,
+                     transfer_count);
+    g_assert_cmpuint(marker.calls, ==, 3);
+    g_assert_cmpuint(marker.timestamp, ==, rejected_image.timestamp_ms);
+
+    g_clear_pointer(&preview_capture_message, g_free);
+    connection->core = NULL;
+    serv_got_chat_left(&gc,
+                       purple_conv_chat_get_id(PURPLE_CONV_CHAT(group)));
+    purple_conversation_destroy(group);
+    purple_conversation_destroy(direct);
+    protocol->close(&gc);
+    purple_account_set_connection(account, NULL);
+    purple_account_destroy(account);
+    g_clear_pointer(&marker.recipient, g_free);
+    read_conversation_focused = FALSE;
+}
+
 static void
 test_pending_read_receipt_limit(PurplePlugin *plugin,
                                 PurplePluginProtocolInfo *protocol)
@@ -2171,6 +2385,7 @@ main(int argc, char **argv)
     test_standard_conversation_logging(plugin, protocol);
     test_pending_read_receipt_admission(plugin, protocol);
     test_inline_attachment_routing(plugin, protocol);
+    test_link_preview_projection(plugin, protocol);
     test_pending_read_receipt_limit(plugin, protocol);
     test_pending_transfer_disconnect(protocol, user_dir);
     test_synchronous_start_failure(protocol, user_dir);

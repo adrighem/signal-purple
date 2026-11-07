@@ -134,6 +134,8 @@ pub(crate) mod fake {
         pub link_preview_delay: Option<Duration>,
         pub link_preview_panics: bool,
         pub link_preview_requests: Arc<Mutex<Vec<String>>>,
+        /// Result of `get_attachment`; `None` yields an empty download.
+        pub attachment_result: Option<Result<Vec<u8>, String>>,
     }
 
     impl SignalProtocol for FakeSignalProtocol {
@@ -183,7 +185,9 @@ pub(crate) mod fake {
         }
 
         async fn get_attachment(&self, _pointer: &AttachmentPointer) -> Result<Vec<u8>, String> {
-            Ok(Vec::new())
+            self.attachment_result
+                .clone()
+                .unwrap_or_else(|| Ok(Vec::new()))
         }
 
         async fn link_preview(&self, body: &str) -> Result<Option<Preview>, String> {

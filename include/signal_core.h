@@ -33,6 +33,13 @@ enum {
     SIGNAL_STATUS_INTERNAL_ERROR = -4
 };
 
+/*
+ * SIGNAL_EVENT_LINK_PREVIEW carries one sender-controlled link preview for a
+ * direct (chat_id NULL) or group message. title and text are plain text, either
+ * may be NULL, and C must escape them before display. peer_id is the sender.
+ * SIGNAL_EVENT_FLAG_INLINE_ONLY marks an attachment event which may only be
+ * shown inline and must be dropped, never offered as a file transfer.
+ */
 typedef enum {
     SIGNAL_EVENT_LINK_QR = 1,
     SIGNAL_EVENT_READY = 2,
@@ -58,14 +65,16 @@ typedef enum {
     SIGNAL_EVENT_RECOVERING = 22,
     SIGNAL_EVENT_ACCOUNT = 23,
     SIGNAL_EVENT_SESSION_RESET = 24,
-    SIGNAL_EVENT_AVATAR = 25
+    SIGNAL_EVENT_AVATAR = 25,
+    SIGNAL_EVENT_LINK_PREVIEW = 26
 } SignalEventKind;
 
 typedef enum {
     SIGNAL_EVENT_FLAG_NONE = 0,
     SIGNAL_EVENT_FLAG_OUTGOING = 1u << 0,
     SIGNAL_EVENT_FLAG_FATAL = 1u << 1,
-    SIGNAL_EVENT_FLAG_TRANSIENT = 1u << 2
+    SIGNAL_EVENT_FLAG_TRANSIENT = 1u << 2,
+    SIGNAL_EVENT_FLAG_INLINE_ONLY = 1u << 3
 } SignalEventFlags;
 
 typedef struct {
@@ -133,10 +142,12 @@ typedef enum {
     SIGNAL_CORE_ABI_VALUE_EVENT_ACCOUNT,
     SIGNAL_CORE_ABI_VALUE_EVENT_SESSION_RESET,
     SIGNAL_CORE_ABI_VALUE_EVENT_AVATAR,
+    SIGNAL_CORE_ABI_VALUE_EVENT_LINK_PREVIEW,
     SIGNAL_CORE_ABI_VALUE_FLAG_NONE,
     SIGNAL_CORE_ABI_VALUE_FLAG_OUTGOING,
     SIGNAL_CORE_ABI_VALUE_FLAG_FATAL,
     SIGNAL_CORE_ABI_VALUE_FLAG_TRANSIENT,
+    SIGNAL_CORE_ABI_VALUE_FLAG_INLINE_ONLY,
     SIGNAL_CORE_ABI_VALUE_CONFIG_SIZE,
     SIGNAL_CORE_ABI_VALUE_CONFIG_ALIGNMENT,
     SIGNAL_CORE_ABI_VALUE_CONFIG_ABI_VERSION_OFFSET,

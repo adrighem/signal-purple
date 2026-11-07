@@ -32,7 +32,7 @@ const MAX_ATTACHMENT_FILENAME_BYTES: usize = 255;
 const MAX_CONTENT_TYPE_BYTES: usize = 255;
 const EVENT_QUEUE_CAPACITY: usize = 4096;
 
-const ABI_CONTRACT_VALUE_COUNT: usize = 67;
+const ABI_CONTRACT_VALUE_COUNT: usize = 69;
 const ABI_CONTRACT_VALUES: [i64; ABI_CONTRACT_VALUE_COUNT] = [
     ABI_VERSION as i64,
     SignalStatus::Ok as i64,
@@ -65,10 +65,12 @@ const ABI_CONTRACT_VALUES: [i64; ABI_CONTRACT_VALUE_COUNT] = [
     event::EVENT_ACCOUNT as i64,
     event::EVENT_SESSION_RESET as i64,
     event::EVENT_AVATAR as i64,
+    event::EVENT_LINK_PREVIEW as i64,
     0,
     event::FLAG_OUTGOING as i64,
     event::FLAG_FATAL as i64,
     event::FLAG_TRANSIENT as i64,
+    event::FLAG_INLINE_ONLY as i64,
     std::mem::size_of::<SignalCoreConfig>() as i64,
     std::mem::align_of::<SignalCoreConfig>() as i64,
     std::mem::offset_of!(SignalCoreConfig, abi_version) as i64,

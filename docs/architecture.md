@@ -157,6 +157,19 @@ direct messaging remains available.
   stale plugin-managed entries and collapses duplicate managed chats. Each
   connection assigns a collision-free sequential Purple chat integer.
 - Incoming text is markup-escaped. Outgoing Purple markup is stripped.
+- A message's first link preview is projected as a separate
+  `SIGNAL_EVENT_LINK_PREVIEW` after the body, for direct and group
+  conversations. Rust sends plain fields only: the title is capped at 200
+  characters, the description at 500 characters (both truncated on a character
+  boundary with an ellipsis), and control, newline, and bidirectional override
+  characters are removed. The URL is added to the description text only when the
+  body does not already contain it, and an over-long URL (more than 2048
+  characters) is dropped rather than truncated. The C adapter escapes each field
+  with the same `g_markup_escape_text` call used for body text, then adds only
+  its own bold markup around the title. The preview never supplies the group
+  conversation title. A preview with no title, description, or new URL is
+  ignored, and an empty body no longer falls back to preview text outside this
+  event. Deleted, reaction, and view-once messages carry no preview.
 - Own-device `SynchronizeMessage` values render as outgoing messages.
 - Delivery receipts are queued when Presage marks an envelope as needing one.
   The deduplicated process-memory queue holds at most 4096 exact message
@@ -171,8 +184,8 @@ direct messaging remains available.
   deduplicated and capped at 4096. Command-queue pressure is retried by one owned
   GLib timer, backend readiness retries on `READY`, and teardown cancels the
   timer. Background delivery and notification rendering do not mark a message
-  read. Only the final projection event queues the receipt, so captions and
-  multiple attachments read once after final presentation. Once admitted to the
+  read. Only the final projection event queues the receipt, so captions, link
+  previews, and multiple attachments read once after final presentation. Once admitted to the
   backend, a read receipt is best-effort: an asynchronous send failure is
   reported but not durably replayed.
 - Direct and group sends are written to an encrypted outbox before network
@@ -218,9 +231,14 @@ direct messaging remains available.
   frame area, and aggregate presentation bytes are bounded. Only validated GIF
   output replaces the presentation. Missing helpers or any failed boundary
   preserves the original MP4 receive-file flow. Ordinary video and any image
-  the UI does not retain also use that flow. One gate applies direct privacy and
-  group-ignore rules before incoming text, inline media, or transfer fallback;
-  filtered events are acknowledged without presentation or a read receipt.
+  the UI does not retain also use that flow. A link preview image is downloaded
+  only for incoming messages and goes through the same inline-image checks, but
+  its attachment event carries `SIGNAL_EVENT_FLAG_INLINE_ONLY`: a missing,
+  failed, oversized, invalid, or UI-rejected image is dropped silently and never
+  becomes a receive prompt or `[Attachment]` placeholder. One gate applies
+  direct privacy and group-ignore rules before incoming text, link previews,
+  inline media, or transfer fallback; filtered events are acknowledged without
+  presentation or a read receipt.
   Outgoing linked-device echoes bypass that gate.
   Outgoing transfers use
   Purple's direct and group send-file callbacks. Each admitted request carries
