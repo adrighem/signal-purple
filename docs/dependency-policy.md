@@ -43,3 +43,12 @@ than pinned. Upstream `presage-store-sqlite` (unforked) does not carry the
 single-connection pool serialization fix; that is fork-only. Treat any
 additional fork commit, or a `cargo update` that advances either pin, as a
 full Signal-stack update under the policy above.
+
+Since Presage gained outgoing link previews, the Signal stack also pulls in
+`reqwest` with rustls and system-proxy detection, the AWS-LC crypto provider
+(`aws-lc-rs`/`aws-lc-sys`, which compiles bundled C through `cc` and the
+existing `cmake`/`clang` build dependencies), and the `scraper`/`html5ever`
+HTML parser. They are linked into `libsignal_core.so` whether or not a user
+enables previews, so review them under the same rules as the protocol crates.
+`quinn` and a few platform crates appear in the lockfile but are not built for
+Linux.
