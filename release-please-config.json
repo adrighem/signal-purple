@@ -12,8 +12,9 @@
       "extra-files": [
         "rust/signal-core/Cargo.toml",
         {
-          "type": "generic",
-          "path": "rust/signal-core/Cargo.lock"
+          "type": "toml",
+          "path": "rust/signal-core/Cargo.lock",
+          "jsonpath": "$.package[?(@.name.value=='signal-core')].version"
         },
         "CITATION.cff"
       ]

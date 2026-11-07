@@ -27,10 +27,10 @@
 - Release helpers that accept Git revisions must peel an annotated tag to one
   verified commit before deriving timestamps, versions, or archive contents.
   Test commit and signed/annotated-tag inputs for byte-identical output.
-- Cargo Dependabot updates can remove the signal-core
-  `# x-release-please-version` marker from `Cargo.lock`. Treat that as a
-  release blocker and guard the marker in CI before merging automated lockfile
-  changes.
+- Never put release-please comment markers in generated files. Cargo and
+  Dependabot rewrite `Cargo.lock` and drop the signal-core
+  `# x-release-please-version` comment, which failed every cargo Dependabot PR.
+  Update `Cargo.lock` as a `toml` extra-file selected by JSONPath instead.
 - Manually listing Rust modules as CMake custom-command dependencies can leave
   incremental CMake builds using a stale backend after a new module is added.
   Invoke Cargo as the dependency authority and let its incremental build
