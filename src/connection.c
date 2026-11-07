@@ -1456,6 +1456,9 @@ signal_login(PurpleAccount *account)
     config.device_name = purple_account_get_string(account, SIGNAL_DEVICE_NAME_KEY,
                                                    "signal-purple");
     config.passphrase = passphrase;
+    config.generate_link_previews =
+        purple_account_get_bool(account, SIGNAL_LINK_PREVIEWS_KEY, FALSE) ? 1u
+                                                                          : 0u;
     status = signal_core_new(&config, &connection->core);
     secret_password_free(passphrase);
 

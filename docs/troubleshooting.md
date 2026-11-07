@@ -150,6 +150,19 @@ notifications at later attempt thresholds mean the message is still queued,
 not that a new copy was created. Identity-blocked messages retry immediately
 after the changed identity is accepted.
 
+## A link preview does not appear
+
+Link previews are off by default. Enable **Generate link previews** in the
+account's Advanced settings and reconnect the account. Only the first `https`
+link in a text message is previewed; `http` links, IP addresses, `localhost`,
+and reserved names such as `.example` or `.onion` are skipped, as are file
+sends. The preview is generated on this computer without Purple's proxy, so a
+network that blocks direct connections, a site that refuses the request or has
+no page title, or a fetch and image upload taking longer than five seconds
+sends the message without a preview. These fallbacks are intentionally silent
+and are not reported in Pidgin. A message retried from the outbox after a
+failed first attempt is also sent without its preview.
+
 ## Identity changes block messages
 
 Incoming messages continue across an identity replacement to avoid losing an

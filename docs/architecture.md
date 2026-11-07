@@ -179,6 +179,24 @@ direct messaging remains available.
   submission. Failed entries retain their original Signal timestamp and retry
   with bounded exponential backoff across reconnects. Accepting a verified
   identity change immediately expedites that contact's queued messages.
+- Outgoing link previews are controlled by the account option
+  `generate-link-previews`, default off, and reach the core as the
+  `generate_link_previews` config field (ABI 8). Presage's automatic preview
+  fetch inside every send is always disabled. When the option is on, the actor
+  hands each direct text send, and each group text send while groups are
+  authoritative, to a link-preview pipeline instead of sending it inline. The
+  pipeline runs on the backend's local task set, so the actor keeps receiving,
+  acknowledging, and handling other commands during a fetch. It generates at
+  most two previews at once through Presage's `link_preview` (one lazily built
+  `reqwest` client per core), caps each generation including the image upload
+  at five seconds, and on any failure, timeout, panic, or URL mismatch releases
+  the send without a preview. Each send waits for the earlier sends to the same
+  conversation, so one conversation's messages keep their order while other
+  conversations proceed; link-free sends never wait for a fetch slot. The
+  released send then follows the normal outbox path, and allocates its
+  timestamp, on the actor. Only the first attempt carries the preview: the
+  outbox stores text alone, so a retried send goes out without one. Sends still
+  in the pipeline at shutdown are dropped like commands still queued.
 - Adapter-generated text, attachment, typing, delivery-receipt, and read-receipt
   sends share one timestamp allocator per core. It uses the wall clock as a
   floor and atomically advances beyond the last allocation, so concurrent sends

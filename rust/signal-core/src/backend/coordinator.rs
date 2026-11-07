@@ -1453,6 +1453,7 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
             request_id,
             recipient,
             message,
+            preview,
         } => {
             let result = if parse_recipient(&recipient).is_some() {
                 enqueue_and_send(
@@ -1462,6 +1463,7 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
                         kind: ClientOutboxKind::Direct,
                         recipient,
                         body: message,
+                        preview: preview.into_preview(),
                     },
                     departed_groups,
                     metadata_cache,
@@ -1486,6 +1488,7 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
             request_id,
             group_key,
             message,
+            preview,
         } => {
             let result = if !groups_authoritative {
                 Err(OutboxAttemptError::retryable(
@@ -1509,6 +1512,7 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
                                 kind: ClientOutboxKind::Group,
                                 recipient: group_key.clone(),
                                 body: message,
+                                preview: preview.into_preview(),
                             },
                             departed_groups,
                             metadata_cache,

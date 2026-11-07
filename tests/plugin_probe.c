@@ -9,7 +9,7 @@
 
 #include "signal_purple.h"
 
-G_STATIC_ASSERT(SIGNAL_CORE_ABI_VERSION == 7u);
+G_STATIC_ASSERT(SIGNAL_CORE_ABI_VERSION == 8u);
 
 typedef struct {
     PurpleInputFunction function;
@@ -1772,6 +1772,29 @@ test_pending_read_receipt_limit(PurplePlugin *plugin,
 }
 
 static void
+test_link_preview_option(PurplePluginProtocolInfo *protocol)
+{
+    PurpleAccountOption *found = NULL;
+    GList *item;
+
+    for (item = protocol->protocol_options; item != NULL; item = item->next) {
+        PurpleAccountOption *option = item->data;
+
+        if (g_strcmp0(purple_account_option_get_setting(option),
+                      SIGNAL_LINK_PREVIEWS_KEY) == 0)
+            found = option;
+    }
+    g_assert_nonnull(found);
+    g_assert_cmpint(purple_account_option_get_type(found), ==,
+                    PURPLE_PREF_BOOLEAN);
+    g_assert_false(purple_account_option_get_default_bool(found));
+    g_assert_nonnull(g_strstr_len(purple_account_option_get_text(found), -1,
+                                  "IP address"));
+    g_assert_nonnull(
+        g_strstr_len(purple_account_option_get_text(found), -1, "proxy"));
+}
+
+static void
 test_avatar_support(PurplePlugin *plugin, PurplePluginProtocolInfo *protocol)
 {
     PurpleAccount *account =
@@ -2142,6 +2165,7 @@ main(int argc, char **argv)
     g_assert_nonnull(protocol->chat_send_file);
     g_assert_nonnull(protocol->find_blist_chat);
     g_assert_nonnull(protocol->get_cb_alias);
+    test_link_preview_option(protocol);
     test_connection_owned_resource_cleanup(protocol);
     test_avatar_support(plugin, protocol);
     test_standard_conversation_logging(plugin, protocol);

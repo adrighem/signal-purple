@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use std::ffi::{CString, c_char};
 
-pub const ABI_VERSION: u32 = 7;
+pub const ABI_VERSION: u32 = 8;
 
 pub const EVENT_LINK_QR: u32 = 1;
 pub const EVENT_READY: u32 = 2;
@@ -227,7 +227,7 @@ mod tests {
             EVENT_SESSION_RESET,
         ];
 
-        assert_eq!(ABI_VERSION, 7);
+        assert_eq!(ABI_VERSION, 8);
         for (index, kind) in kinds.into_iter().enumerate() {
             assert_eq!(kind, index as u32 + 1);
         }

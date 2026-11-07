@@ -136,6 +136,14 @@ signal_plugin_init(PurplePlugin *plugin)
         SIGNAL_STORE_PATH_KEY, "");
     protocol_info.protocol_options =
         g_list_append(protocol_info.protocol_options, option);
+
+    option = purple_account_option_bool_new(
+        "Generate link previews (this computer fetches the first https link "
+        "of each sent message, so that site sees your IP address; the fetch "
+        "ignores Purple proxy settings)",
+        SIGNAL_LINK_PREVIEWS_KEY, FALSE);
+    protocol_info.protocol_options =
+        g_list_append(protocol_info.protocol_options, option);
 }
 
 PURPLE_INIT_PLUGIN(signal, signal_plugin_init, plugin_info)

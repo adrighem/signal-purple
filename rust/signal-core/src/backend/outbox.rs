@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use presage::libsignal_service::content::{DataMessage, GroupContextV2};
+use presage::proto::Preview;
 use presage::store::Thread;
 use presage_store_sqlite::{ClientOutboxKind, ClientOutboxMessage};
 
@@ -76,10 +77,13 @@ pub(crate) fn outbox_message_is_attemptable(
     groups_authoritative || matches!(kind, ClientOutboxKind::Direct)
 }
 
+/// Sends one outbox entry. Only a first attempt carries `preview`: the outbox
+/// stores the text alone, so retries are sent without one.
 pub(crate) async fn attempt_outbox_message<M: SignalProtocol>(
     manager: &mut M,
     repo: &impl StorageOps,
     message: &ClientOutboxMessage,
+    preview: Option<&Preview>,
     departed_groups: &DepartedGroups,
     metadata_cache: &super::coordinator::MetadataCache,
 ) -> Result<SentMessage, OutboxAttemptError> {
@@ -97,6 +101,7 @@ pub(crate) async fn attempt_outbox_message<M: SignalProtocol>(
                     DataMessage {
                         body: Some(message.body.clone()),
                         timestamp: Some(message.timestamp),
+                        preview: preview.into_iter().cloned().collect(),
                         ..Default::default()
                     }
                     .into(),
@@ -140,6 +145,7 @@ pub(crate) async fn attempt_outbox_message<M: SignalProtocol>(
                             revision: Some(group.revision),
                             ..Default::default()
                         }),
+                        preview: preview.into_iter().cloned().collect(),
                         ..Default::default()
                     }
                     .into(),
@@ -216,8 +222,15 @@ pub(crate) async fn retry_outbox<M: SignalProtocol>(
         if !outbox_message_is_attemptable(&message.kind, groups_authoritative) {
             continue;
         }
-        let result =
-            attempt_outbox_message(manager, repo, &message, departed_groups, metadata_cache).await;
+        let result = attempt_outbox_message(
+            manager,
+            repo,
+            &message,
+            None,
+            departed_groups,
+            metadata_cache,
+        )
+        .await;
         if let Ok(sent) = &result {
             super::coordinator::mark_sent_message_projected_or_report(repo, sent, sink).await;
         }
@@ -248,6 +261,7 @@ pub(crate) struct NewOutboxMessage {
     pub(crate) kind: ClientOutboxKind,
     pub(crate) recipient: String,
     pub(crate) body: String,
+    pub(crate) preview: Option<Preview>,
 }
 
 pub(crate) async fn enqueue_and_send<M: SignalProtocol>(
@@ -263,6 +277,7 @@ pub(crate) async fn enqueue_and_send<M: SignalProtocol>(
         kind,
         recipient,
         body,
+        preview,
     } = request;
     let timestamp = timestamps.next();
     let id = repo
@@ -281,8 +296,15 @@ pub(crate) async fn enqueue_and_send<M: SignalProtocol>(
         timestamp,
         attempts: 0,
     };
-    let result =
-        attempt_outbox_message(manager, repo, &message, departed_groups, metadata_cache).await;
+    let result = attempt_outbox_message(
+        manager,
+        repo,
+        &message,
+        preview.as_ref(),
+        departed_groups,
+        metadata_cache,
+    )
+    .await;
     if let Ok(sent) = &result {
         super::coordinator::mark_sent_message_projected_or_report(repo, sent, sink).await;
     }

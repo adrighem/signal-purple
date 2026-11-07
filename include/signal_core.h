@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define SIGNAL_CORE_ABI_VERSION 7u
+#define SIGNAL_CORE_ABI_VERSION 8u
 
 /* String limits exclude the terminating NUL byte. */
 #define SIGNAL_CORE_MAX_STORE_PATH_BYTES 4096u
@@ -74,6 +74,9 @@ typedef struct {
     const char *store_path;
     const char *device_name;
     const char *passphrase;
+    /* 1 fetches link previews for sent text, 0 never does; other values are
+     * rejected. */
+    uint32_t generate_link_previews;
 } SignalCoreConfig;
 
 typedef struct {
@@ -141,6 +144,7 @@ typedef enum {
     SIGNAL_CORE_ABI_VALUE_CONFIG_STORE_PATH_OFFSET,
     SIGNAL_CORE_ABI_VALUE_CONFIG_DEVICE_NAME_OFFSET,
     SIGNAL_CORE_ABI_VALUE_CONFIG_PASSPHRASE_OFFSET,
+    SIGNAL_CORE_ABI_VALUE_CONFIG_GENERATE_LINK_PREVIEWS_OFFSET,
     SIGNAL_CORE_ABI_VALUE_EVENT_SIZE,
     SIGNAL_CORE_ABI_VALUE_EVENT_ALIGNMENT,
     SIGNAL_CORE_ABI_VALUE_EVENT_ABI_VERSION_OFFSET,

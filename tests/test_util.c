@@ -63,6 +63,8 @@ static const gint64 abi_contract_values[SIGNAL_CORE_ABI_VALUE_COUNT] = {
         offsetof(SignalCoreConfig, device_name),
     [SIGNAL_CORE_ABI_VALUE_CONFIG_PASSPHRASE_OFFSET] =
         offsetof(SignalCoreConfig, passphrase),
+    [SIGNAL_CORE_ABI_VALUE_CONFIG_GENERATE_LINK_PREVIEWS_OFFSET] =
+        offsetof(SignalCoreConfig, generate_link_previews),
     [SIGNAL_CORE_ABI_VALUE_EVENT_SIZE] = sizeof(SignalEvent),
     [SIGNAL_CORE_ABI_VALUE_EVENT_ALIGNMENT] = _Alignof(SignalEvent),
     [SIGNAL_CORE_ABI_VALUE_EVENT_ABI_VERSION_OFFSET] =
@@ -145,7 +147,7 @@ test_abi_values(void)
         SIGNAL_EVENT_AVATAR,
     };
 
-    g_assert_cmpuint(SIGNAL_CORE_ABI_VERSION, ==, 7);
+    g_assert_cmpuint(SIGNAL_CORE_ABI_VERSION, ==, 8);
     for (guint index = 0; index < G_N_ELEMENTS(statuses); index++)
         g_assert_cmpint(statuses[index], ==, -(gint)index);
     for (guint index = 0; index < G_N_ELEMENTS(events); index++)
@@ -203,6 +205,7 @@ test_persisted_identifiers(void)
     g_assert_cmpstr(SIGNAL_STORE_ID_KEY, ==, "store-id");
     g_assert_cmpstr(SIGNAL_STORE_PATH_KEY, ==, "store-path");
     g_assert_cmpstr(SIGNAL_DEVICE_NAME_KEY, ==, "device-name");
+    g_assert_cmpstr(SIGNAL_LINK_PREVIEWS_KEY, ==, "generate-link-previews");
     g_assert_cmpstr(SIGNAL_SYNCED_BUDDY_KEY, ==, "signal-purple-synced-contact");
     g_assert_cmpstr(SIGNAL_SYNCED_GROUP_KEY, ==, "signal-purple-synced-group");
 }
