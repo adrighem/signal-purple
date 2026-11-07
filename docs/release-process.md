@@ -56,6 +56,12 @@ passes the exact tag, version, and 40-character commit. The caller must be a
 on `main`, and the release manifest, Cargo files, citation metadata, and
 `version.txt` must agree.
 
+Release Please bumps `Cargo.toml` and `CITATION.cff` through the
+`x-release-please-version` comment marker. `Cargo.lock` has no marker, because
+Cargo and Dependabot rewrite the lockfile and drop comments. Release Please
+instead updates it as a TOML extra-file whose JSONPath selects the
+`signal-core` package version.
+
 Build, attestation, and publication use separate jobs. Only the final job can
 write repository contents, and it does not check out or execute repository
 code. Existing assets are skipped only when their GitHub-reported SHA-256

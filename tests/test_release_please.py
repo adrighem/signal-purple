@@ -22,7 +22,7 @@ README = pathlib.PurePosixPath("README.md")
 CONTRIBUTING = pathlib.PurePosixPath("CONTRIBUTING.md")
 PULL_REQUEST_TEMPLATE = pathlib.PurePosixPath(".github/PULL_REQUEST_TEMPLATE.md")
 BUG_FORM = pathlib.PurePosixPath(".github/ISSUE_TEMPLATE/bug.yml")
-MARKER = "# x-release-please-version"
+LOCK_JSONPATH = "$.package[?(@.name.value=='signal-core')].version"
 RELEASE_ARTIFACTS_WORKFLOW = pathlib.PurePosixPath(
     ".github/workflows/release-artifacts.yml"
 )
@@ -78,10 +78,15 @@ def validate_release_config() -> None:
         if path == LOCK_PATH.as_posix():
             matching_entries.append(entry)
 
-    if matching_entries != [{"type": "generic", "path": LOCK_PATH.as_posix()}]:
+    expected_entry = {
+        "type": "toml",
+        "path": LOCK_PATH.as_posix(),
+        "jsonpath": LOCK_JSONPATH,
+    }
+    if matching_entries != [expected_entry]:
         fail(
-            "Cargo.lock must appear exactly once as a generic Release Please "
-            "extra-file"
+            "Cargo.lock must appear exactly once as a toml Release Please "
+            "extra-file selecting the signal-core package version"
         )
 
 
@@ -526,28 +531,19 @@ def validate_repository_guidance() -> None:
     )
 
 
-def validate_lock_marker() -> None:
+def validate_lock_version() -> None:
     version = (PROJECT_ROOT / "version.txt").read_text(encoding="utf-8").strip()
-    lock_text = (PROJECT_ROOT / LOCK_PATH).read_text(encoding="utf-8")
+    lock = tomllib.loads((PROJECT_ROOT / LOCK_PATH).read_text(encoding="utf-8"))
 
-    if lock_text.count(MARKER) != 1:
-        fail(f"{MARKER} must occur exactly once in Cargo.lock")
-
-    package_blocks = re.split(r"(?m)^\[\[package\]\]\s*$", lock_text)
-    signal_core_blocks = [
-        block
-        for block in package_blocks
-        if re.search(r'(?m)^name = "signal-core"$', block)
+    signal_core_packages = [
+        package
+        for package in lock.get("package", [])
+        if package.get("name") == "signal-core"
     ]
-    if len(signal_core_blocks) != 1:
+    if len(signal_core_packages) != 1:
         fail("Cargo.lock must contain exactly one signal-core package")
-
-    expected_line = f'version = "{version}" {MARKER}'
-    if signal_core_blocks[0].splitlines().count(expected_line) != 1:
-        fail(
-            "signal-core's Cargo.lock version must match version.txt and retain "
-            f"{MARKER}"
-        )
+    if signal_core_packages[0].get("version") != version:
+        fail("signal-core's Cargo.lock version must match version.txt")
 
 
 def validate_presage_revision() -> None:
@@ -640,7 +636,7 @@ def main() -> None:
     validate_release_workflows()
     validate_ci_workflow()
     validate_repository_guidance()
-    validate_lock_marker()
+    validate_lock_version()
     validate_presage_revision()
     validate_nix_version_source()
     validate_appstream_metadata()
