@@ -17,6 +17,17 @@ The complete transitive dependency list and checksums are recorded in
 [`rust/signal-core/Cargo.lock`](rust/signal-core/Cargo.lock). Cargo package
 license metadata remains authoritative for transitive crates.
 
+Presage's link-preview support adds an HTTP client stack with native and
+file-level copyleft code worth noting. `aws-lc-sys` builds the bundled AWS-LC C
+library used as the rustls crypto provider; its Cargo metadata declares
+`ISC AND (Apache-2.0 OR ISC) AND Apache-2.0 AND MIT AND BSD-3-Clause AND
+(Apache-2.0 OR ISC OR MIT) AND (Apache-2.0 OR ISC OR MIT-0)`, and its vendored
+source carries the upstream OpenSSL/SSLeay-derived notices. The HTML parser
+crates `cssparser`, `cssparser-macros`, `dtoa-short`, and `selectors` are
+MPL-2.0, whose file-level terms permit combination with the GPL and AGPL code
+above. The generated DEP-5 inventory in release source archives lists each
+vendored crate and its bundled notice files.
+
 GNU GPLv3 section 13 permits GPLv3 and AGPLv3 code to be combined, while the
 AGPL section 13 requirements apply to the combination. The original C code does
 not become relicensed, but distributing the combined plugin/backend requires

@@ -15,6 +15,7 @@
 #define SIGNAL_STORE_ID_KEY "store-id"
 #define SIGNAL_STORE_PATH_KEY "store-path"
 #define SIGNAL_DEVICE_NAME_KEY "device-name"
+#define SIGNAL_LINK_PREVIEWS_KEY "generate-link-previews"
 
 typedef SignalStatus (*SignalSendGroupMessageFunc)(
     SignalCore *core, uint64_t request_id, const char *group_key,

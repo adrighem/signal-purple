@@ -293,6 +293,12 @@ signal_deliver_attachment(SignalConnection *connection,
         }
     }
 
+    /* A link preview image is decoration: never turn it into a file prompt. */
+    if ((event->flags & SIGNAL_EVENT_FLAG_INLINE_ONLY) != 0) {
+        signal_queue_final_read(connection, conversation, event);
+        return TRUE;
+    }
+
     xfer = purple_xfer_new(account, PURPLE_XFER_RECEIVE, peer);
     if (xfer == NULL) {
         purple_notify_error(connection, "Signal attachment unavailable",

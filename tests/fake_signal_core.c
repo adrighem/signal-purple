@@ -54,10 +54,14 @@ static const int64_t fake_abi_contract_values[SIGNAL_CORE_ABI_VALUE_COUNT] = {
     [SIGNAL_CORE_ABI_VALUE_EVENT_ACCOUNT] = SIGNAL_EVENT_ACCOUNT,
     [SIGNAL_CORE_ABI_VALUE_EVENT_SESSION_RESET] = SIGNAL_EVENT_SESSION_RESET,
     [SIGNAL_CORE_ABI_VALUE_EVENT_AVATAR] = SIGNAL_EVENT_AVATAR,
+    [SIGNAL_CORE_ABI_VALUE_EVENT_LINK_PREVIEW] =
+        SIGNAL_EVENT_LINK_PREVIEW,
     [SIGNAL_CORE_ABI_VALUE_FLAG_NONE] = SIGNAL_EVENT_FLAG_NONE,
     [SIGNAL_CORE_ABI_VALUE_FLAG_OUTGOING] = SIGNAL_EVENT_FLAG_OUTGOING,
     [SIGNAL_CORE_ABI_VALUE_FLAG_FATAL] = SIGNAL_EVENT_FLAG_FATAL,
     [SIGNAL_CORE_ABI_VALUE_FLAG_TRANSIENT] = SIGNAL_EVENT_FLAG_TRANSIENT,
+    [SIGNAL_CORE_ABI_VALUE_FLAG_INLINE_ONLY] =
+        SIGNAL_EVENT_FLAG_INLINE_ONLY,
     [SIGNAL_CORE_ABI_VALUE_CONFIG_SIZE] = (int64_t)sizeof(SignalCoreConfig),
     [SIGNAL_CORE_ABI_VALUE_CONFIG_ALIGNMENT] = (int64_t)_Alignof(SignalCoreConfig),
     [SIGNAL_CORE_ABI_VALUE_CONFIG_ABI_VERSION_OFFSET] =
@@ -70,6 +74,8 @@ static const int64_t fake_abi_contract_values[SIGNAL_CORE_ABI_VALUE_COUNT] = {
         (int64_t)__builtin_offsetof(SignalCoreConfig, device_name),
     [SIGNAL_CORE_ABI_VALUE_CONFIG_PASSPHRASE_OFFSET] =
         (int64_t)__builtin_offsetof(SignalCoreConfig, passphrase),
+    [SIGNAL_CORE_ABI_VALUE_CONFIG_GENERATE_LINK_PREVIEWS_OFFSET] =
+        (int64_t)__builtin_offsetof(SignalCoreConfig, generate_link_previews),
     [SIGNAL_CORE_ABI_VALUE_EVENT_SIZE] = (int64_t)sizeof(SignalEvent),
     [SIGNAL_CORE_ABI_VALUE_EVENT_ALIGNMENT] = (int64_t)_Alignof(SignalEvent),
     [SIGNAL_CORE_ABI_VALUE_EVENT_ABI_VERSION_OFFSET] =
@@ -141,7 +147,8 @@ signal_core_new(const SignalCoreConfig *config, SignalCore **out_core)
     }
     *out_core = NULL;
     if (!config || config->abi_version != SIGNAL_CORE_ABI_VERSION ||
-        config->struct_size < sizeof(SignalCoreConfig)) {
+        config->struct_size < sizeof(SignalCoreConfig) ||
+        config->generate_link_previews > 1) {
         return SIGNAL_STATUS_INVALID_ARGUMENT;
     }
 

@@ -31,6 +31,9 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc as tokio_mpsc, watch};
 
 use super::command::Command;
+use super::link_preview::{
+    LinkPreviewText, download_preview_image, link_preview, link_preview_text,
+};
 use super::media::{
     AvatarCache, DownloadedAttachment, MAX_SIGNAL_GIF_TRANSCODES_PER_MESSAGE,
     attachment_display_name, should_inline_image, transcode_signal_gif_video,
@@ -46,8 +49,8 @@ use crate::event::{
     EVENT_ACCOUNT, EVENT_ATTACHMENT, EVENT_ATTACHMENT_SENT, EVENT_AVATAR, EVENT_CONTACT,
     EVENT_CONTACT_SYNC_BEGIN, EVENT_CONTACT_SYNC_END, EVENT_GROUP, EVENT_GROUP_LEFT,
     EVENT_GROUP_MEMBER, EVENT_GROUP_MESSAGE, EVENT_GROUP_SYNC_BEGIN, EVENT_GROUP_SYNC_END,
-    EVENT_IDENTITY_ACCEPTED, EVENT_IDENTITY_CHANGE, EVENT_MESSAGE, EVENT_RECEIPT,
-    EVENT_SESSION_RESET, EVENT_TYPING, Event, FLAG_OUTGOING,
+    EVENT_IDENTITY_ACCEPTED, EVENT_IDENTITY_CHANGE, EVENT_LINK_PREVIEW, EVENT_MESSAGE,
+    EVENT_RECEIPT, EVENT_SESSION_RESET, EVENT_TYPING, Event, FLAG_INLINE_ONLY, FLAG_OUTGOING,
 };
 use crate::event_queue::EventSink;
 use crate::store::StorageRepository;
@@ -1453,6 +1456,7 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
             request_id,
             recipient,
             message,
+            preview,
         } => {
             let result = if parse_recipient(&recipient).is_some() {
                 enqueue_and_send(
@@ -1462,6 +1466,7 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
                         kind: ClientOutboxKind::Direct,
                         recipient,
                         body: message,
+                        preview: preview.into_preview(),
                     },
                     departed_groups,
                     metadata_cache,
@@ -1486,6 +1491,7 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
             request_id,
             group_key,
             message,
+            preview,
         } => {
             let result = if !groups_authoritative {
                 Err(OutboxAttemptError::retryable(
@@ -1509,6 +1515,7 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
                                 kind: ClientOutboxKind::Group,
                                 recipient: group_key.clone(),
                                 body: message,
+                                preview: preview.into_preview(),
                             },
                             departed_groups,
                             metadata_cache,
@@ -1748,7 +1755,7 @@ fn format_body_with_mentions(body: &str, body_ranges: &[BodyRange]) -> String {
     result
 }
 
-fn data_message_text(message: &DataMessage) -> String {
+pub(super) fn data_message_text(message: &DataMessage) -> String {
     if message.delete.is_some() {
         return "[Message deleted by sender]".to_owned();
     }
@@ -1768,25 +1775,6 @@ fn data_message_text(message: &DataMessage) -> String {
         .as_deref()
         .filter(|body| !body.is_empty())
         .map(|body| format_body_with_mentions(body, &message.body_ranges))
-        .or_else(|| {
-            message
-                .preview
-                .iter()
-                .find_map(|preview| {
-                    preview
-                        .url
-                        .as_deref()
-                        .filter(|text| !text.is_empty())
-                        .or_else(|| preview.title.as_deref().filter(|text| !text.is_empty()))
-                        .or_else(|| {
-                            preview
-                                .description
-                                .as_deref()
-                                .filter(|text| !text.is_empty())
-                        })
-                })
-                .map(ToOwned::to_owned)
-        })
         .unwrap_or_default();
 
     if let Some(quote) = &message.quote
@@ -1814,7 +1802,7 @@ fn regular_message_attachments(message: &DataMessage) -> &[AttachmentPointer] {
     &message.attachments
 }
 
-fn attachment_pointer_without_sender_size_hint(
+pub(super) fn attachment_pointer_without_sender_size_hint(
     attachment: &AttachmentPointer,
 ) -> AttachmentPointer {
     // The sender controls this field, and Presage otherwise uses it as the
@@ -1824,7 +1812,10 @@ fn attachment_pointer_without_sender_size_hint(
     download_pointer
 }
 
-fn truncate_attachment_to_sender_size(attachment: &AttachmentPointer, data: &mut Vec<u8>) {
+pub(super) fn truncate_attachment_to_sender_size(
+    attachment: &AttachmentPointer,
+    data: &mut Vec<u8>,
+) {
     if let Some(size) = attachment.size.and_then(|size| size.try_into().ok()) {
         // Preserve Presage's post-decryption privacy-padding behavior without
         // trusting the sender-provided size for allocation.
@@ -1873,7 +1864,8 @@ async fn emit_data_message<M: SignalProtocol, S: StorageOps>(
 
     let text = data_message_text(message);
     let attachments = regular_message_attachments(message);
-    if text.is_empty() && attachments.is_empty() {
+    let preview_text = link_preview_text(message);
+    if text.is_empty() && attachments.is_empty() && preview_text.is_none() {
         return ProjectionDisposition::Complete;
     }
 
@@ -1949,6 +1941,11 @@ async fn emit_data_message<M: SignalProtocol, S: StorageOps>(
         }
     }
 
+    let preview_image = match (outgoing, preview_text.is_some(), link_preview(message)) {
+        (false, true, Some(preview)) => download_preview_image(manager, preview).await,
+        _ => None,
+    };
+
     let mut signal_gif_transcodes = 0usize;
     for attachment in &mut downloaded {
         if signal_gif_transcodes >= MAX_SIGNAL_GIF_TRANSCODES_PER_MESSAGE {
@@ -1987,54 +1984,67 @@ async fn emit_data_message<M: SignalProtocol, S: StorageOps>(
             }),
     );
 
-    let message_delivery_id = if downloaded.is_empty() {
-        delivery_id
-    } else {
-        0
+    let chat_id = group_key.map(|key| group_identifier(&key));
+    let event_peer = match group_key {
+        Some(_) => group_message_peer(outgoing, peer, manager.local_aci()),
+        None => peer.to_owned(),
     };
-
-    if let (Some(group_key), Some(text)) = (group_key, text.as_ref()) {
-        let group_peer = group_message_peer(outgoing, peer, manager.local_aci());
-        sink.emit(Event {
-            kind: EVENT_GROUP_MESSAGE,
-            request_id: message_delivery_id,
-            flags,
-            peer_id: Some(group_peer),
-            chat_id: Some(group_identifier(&group_key)),
-            title: group_title,
-            text: Some(text.clone()),
-            timestamp_ms: timestamp,
-            ..Event::default()
+    let mut events = Vec::new();
+    if let Some(text) = text {
+        events.push(match chat_id.clone() {
+            Some(chat_id) => Event {
+                kind: EVENT_GROUP_MESSAGE,
+                flags,
+                peer_id: Some(event_peer.clone()),
+                chat_id: Some(chat_id),
+                title: group_title,
+                text: Some(text),
+                timestamp_ms: timestamp,
+                ..Event::default()
+            },
+            None => Event {
+                kind: EVENT_MESSAGE,
+                flags,
+                peer_id: Some(event_peer.clone()),
+                text: Some(text),
+                timestamp_ms: timestamp,
+                ..Event::default()
+            },
         });
-    } else if let Some(text) = text {
-        sink.emit(Event {
-            kind: EVENT_MESSAGE,
-            request_id: message_delivery_id,
+    }
+    if let Some(LinkPreviewText { title, text }) = preview_text {
+        events.push(Event {
+            kind: EVENT_LINK_PREVIEW,
             flags,
-            peer_id: Some(peer.to_owned()),
-            text: Some(text),
+            peer_id: Some(event_peer),
+            chat_id: chat_id.clone(),
+            title,
+            text,
             timestamp_ms: timestamp,
             ..Event::default()
         });
     }
-
-    let attachment_count = downloaded.len();
-    for (index, attachment) in downloaded.into_iter().enumerate() {
-        sink.emit(Event {
+    let preview_image = preview_image.map(|image| (image, FLAG_INLINE_ONLY));
+    let attachments = downloaded.into_iter().map(|image| (image, 0));
+    for (attachment, flags) in preview_image.into_iter().chain(attachments) {
+        events.push(Event {
             kind: EVENT_ATTACHMENT,
-            request_id: if index + 1 == attachment_count {
-                delivery_id
-            } else {
-                0
-            },
+            flags,
             peer_id: Some(peer.to_owned()),
-            chat_id: group_key.map(|key| group_identifier(&key)),
+            chat_id: chat_id.clone(),
             title: Some(attachment.filename),
             text: attachment.content_type,
             data: attachment.data,
             timestamp_ms: timestamp,
             ..Event::default()
         });
+    }
+    // Only the final event of one Signal message may trigger the read receipt.
+    if let Some(last) = events.last_mut() {
+        last.request_id = delivery_id;
+    }
+    for event in events {
+        sink.emit(event);
     }
     ProjectionDisposition::AwaitingAck
 }
@@ -2260,6 +2270,9 @@ pub(crate) fn qr_png(value: &[u8]) -> Result<Vec<u8>, String> {
 mod tests {
     use super::*;
     use crate::backend::group_state::GroupDepartureState;
+    use crate::backend::link_preview::test_support::{preview, preview_message};
+    use crate::backend::media::MAX_INLINE_MEDIA_BYTES;
+    use presage::proto::Preview;
 
     #[test]
     fn message_timestamps_advance_when_wall_clock_stalls() {
@@ -2854,9 +2867,13 @@ mod tests {
         };
 
         assert!(regular_message_attachments(&message).is_empty());
+        assert_eq!(data_message_text(&message), "");
         assert_eq!(
-            data_message_text(&message),
-            "https://example.invalid/article"
+            link_preview_text(&message),
+            Some(LinkPreviewText {
+                title: None,
+                text: Some("https://example.invalid/article".into()),
+            })
         );
 
         let message = DataMessage {
@@ -3080,5 +3097,227 @@ mod tests {
             data_message_text(&message),
             "> Previous question?\n\nHello @alice!"
         );
+    }
+
+    const TEST_PNG: &[u8] = b"\x89PNG\r\n\x1a\nfake body";
+    const TEST_SENDER: &str = "aci:22222222-2222-4222-8222-222222222222";
+
+    fn image_preview(title: &str) -> Preview {
+        Preview {
+            image: Some(AttachmentPointer {
+                file_name: Some("card.png".into()),
+                content_type: Some("image/png".into()),
+                ..AttachmentPointer::default()
+            }),
+            ..preview(title, "", "https://example.invalid/a")
+        }
+    }
+
+    fn fake_protocol(
+        result: Option<Result<Vec<u8>, String>>,
+    ) -> crate::backend::protocol::fake::FakeSignalProtocol {
+        crate::backend::protocol::fake::FakeSignalProtocol {
+            attachment_result: result,
+            ..Default::default()
+        }
+    }
+
+    fn project_message(
+        message: &DataMessage,
+        outgoing: bool,
+        protocol: &crate::backend::protocol::fake::FakeSignalProtocol,
+        repo: &crate::store::traits::fake::FakeStorageRepository,
+    ) -> (ProjectionDisposition, Vec<Event>) {
+        let (sink, queue) = crate::event_queue::event_queue(16).unwrap();
+        let projection = if outgoing {
+            DataMessageProjection::outgoing(message, TEST_SENDER, 1_000, 7)
+        } else {
+            DataMessageProjection::incoming(message, TEST_SENDER, 1_000, 7)
+        };
+        let disposition = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(emit_data_message(
+                protocol,
+                repo,
+                projection,
+                &sink,
+                &DepartedGroups::default(),
+            ));
+        let mut events = Vec::new();
+        while let crate::event_queue::EventPoll::Event(event) = queue.poll() {
+            events.push(event);
+        }
+        (disposition, events)
+    }
+
+    fn event_shape(events: &[Event]) -> Vec<(u32, u32, u64)> {
+        events
+            .iter()
+            .map(|event| (event.kind, event.flags, event.request_id))
+            .collect()
+    }
+
+    #[test]
+    fn direct_preview_follows_the_body_and_routes_its_image_inline_only() {
+        let protocol = fake_protocol(Some(Ok(TEST_PNG.to_vec())));
+        let repo = crate::store::traits::fake::FakeStorageRepository::new();
+        let message = preview_message("look", image_preview("Card"));
+
+        let (disposition, events) = project_message(&message, false, &protocol, &repo);
+
+        assert_eq!(disposition, ProjectionDisposition::AwaitingAck);
+        assert_eq!(
+            event_shape(&events),
+            [
+                (EVENT_MESSAGE, 0, 0),
+                (EVENT_LINK_PREVIEW, 0, 0),
+                (EVENT_ATTACHMENT, FLAG_INLINE_ONLY, 7),
+            ]
+        );
+        assert_eq!(events[0].text.as_deref(), Some("look"));
+        assert_eq!(events[1].title.as_deref(), Some("Card"));
+        assert_eq!(events[1].text.as_deref(), Some("https://example.invalid/a"));
+        assert_eq!(events[1].peer_id.as_deref(), Some(TEST_SENDER));
+        assert_eq!(events[1].chat_id, None);
+        assert_eq!(events[2].data, TEST_PNG);
+        assert_eq!(events[2].text.as_deref(), Some("image/png"));
+        assert!(events[2].chat_id.is_none());
+    }
+
+    #[test]
+    fn preview_image_never_becomes_a_regular_attachment_or_placeholder() {
+        let protocol = fake_protocol(Some(Ok(TEST_PNG.to_vec())));
+        let repo = crate::store::traits::fake::FakeStorageRepository::new();
+        let message = preview_message("", image_preview("Card"));
+
+        let (_, events) = project_message(&message, false, &protocol, &repo);
+
+        assert_eq!(
+            event_shape(&events),
+            [
+                (EVENT_LINK_PREVIEW, 0, 0),
+                (EVENT_ATTACHMENT, FLAG_INLINE_ONLY, 7)
+            ]
+        );
+        assert!(events.iter().all(|event| {
+            !event
+                .text
+                .as_deref()
+                .is_some_and(|text| text.contains("[Attachment"))
+        }));
+    }
+
+    #[test]
+    fn invalid_or_missing_preview_images_are_skipped_silently() {
+        let repo = crate::store::traits::fake::FakeStorageRepository::new();
+        let message = preview_message("look", image_preview("Card"));
+        let results = [
+            Some(Ok(b"not an image at all".to_vec())),
+            Some(Ok(Vec::new())),
+            Some(Ok(vec![0; MAX_INLINE_MEDIA_BYTES + 1])),
+            Some(Err("download failed".to_owned())),
+        ];
+
+        for result in results {
+            let protocol = fake_protocol(result);
+            let (disposition, events) = project_message(&message, false, &protocol, &repo);
+
+            assert_eq!(disposition, ProjectionDisposition::AwaitingAck);
+            assert_eq!(
+                event_shape(&events),
+                [(EVENT_MESSAGE, 0, 0), (EVENT_LINK_PREVIEW, 0, 7)]
+            );
+        }
+
+        let mut oversized = message.clone();
+        if let Some(image) = oversized.preview[0].image.as_mut() {
+            image.size = Some(MAX_INLINE_MEDIA_BYTES as u32 + 1);
+        }
+        let protocol = fake_protocol(Some(Ok(TEST_PNG.to_vec())));
+        let (_, events) = project_message(&oversized, false, &protocol, &repo);
+        assert_eq!(events.len(), 2);
+    }
+
+    #[test]
+    fn preview_without_text_projects_nothing_even_with_an_image() {
+        let protocol = fake_protocol(Some(Ok(TEST_PNG.to_vec())));
+        let repo = crate::store::traits::fake::FakeStorageRepository::new();
+        let mut image_only = image_preview("");
+        image_only.url = None;
+        let message = preview_message("", image_only);
+
+        let (disposition, events) = project_message(&message, false, &protocol, &repo);
+
+        assert_eq!(disposition, ProjectionDisposition::Complete);
+        assert!(events.is_empty());
+    }
+
+    #[test]
+    fn outgoing_echo_shows_preview_text_without_downloading_the_image() {
+        let protocol = fake_protocol(Some(Ok(TEST_PNG.to_vec())));
+        let repo = crate::store::traits::fake::FakeStorageRepository::new();
+        let message = preview_message("", image_preview("Card"));
+
+        let (_, events) = project_message(&message, true, &protocol, &repo);
+
+        assert_eq!(
+            event_shape(&events),
+            [(EVENT_LINK_PREVIEW, FLAG_OUTGOING, 7)]
+        );
+    }
+
+    #[test]
+    fn group_preview_keeps_the_group_title_off_the_preview_event() {
+        use presage::libsignal_service::groups_v2::Role;
+        use presage::model::groups::Member;
+
+        let protocol = fake_protocol(Some(Ok(TEST_PNG.to_vec())));
+        let repo = crate::store::traits::fake::FakeStorageRepository::new();
+        let key = [9u8; 32];
+        repo.add_group(
+            key,
+            Group {
+                title: "Real group".into(),
+                avatar: String::new(),
+                disappearing_messages_timer: None,
+                access_control: None,
+                revision: 1,
+                members: vec![Member {
+                    aci: protocol.local_aci(),
+                    role: Role::Default,
+                    profile_key: ProfileKey::create([1; 32]),
+                    joined_at_revision: 0,
+                    label: None,
+                    label_emoji: None,
+                }],
+                pending_members: Vec::new(),
+                requesting_members: Vec::new(),
+                invite_link_password: Vec::new(),
+                description: None,
+            },
+        );
+        let mut message = preview_message("hi", image_preview("Card"));
+        message.group_v2 = Some(GroupContextV2 {
+            master_key: Some(key.to_vec()),
+            ..GroupContextV2::default()
+        });
+
+        let (_, events) = project_message(&message, false, &protocol, &repo);
+
+        assert_eq!(
+            event_shape(&events),
+            [
+                (EVENT_GROUP_MESSAGE, 0, 0),
+                (EVENT_LINK_PREVIEW, 0, 0),
+                (EVENT_ATTACHMENT, FLAG_INLINE_ONLY, 7),
+            ]
+        );
+        let chat_id = Some(group_identifier(&key));
+        assert!(events.iter().all(|event| event.chat_id == chat_id));
+        assert_eq!(events[0].title.as_deref(), Some("Real group"));
+        assert_eq!(events[1].title.as_deref(), Some("Card"));
+        assert_eq!(events[1].peer_id.as_deref(), Some(TEST_SENDER));
     }
 }

@@ -4,7 +4,7 @@ use presage::libsignal_service::content::ContentBody;
 use presage::libsignal_service::protocol::{Aci, ServiceId};
 use presage::libsignal_service::sender::AttachmentSpec;
 use presage::manager::{LeaveGroupOutcome, Registered};
-use presage::proto::AttachmentPointer;
+use presage::proto::{AttachmentPointer, Preview};
 use presage_store_sqlite::SqliteStore;
 
 /// The subset of `presage::Manager` operations this crate's command/content
@@ -39,6 +39,9 @@ pub(crate) trait SignalProtocol: Clone {
     ) -> Result<AttachmentPointer, String>;
 
     async fn get_attachment(&self, pointer: &AttachmentPointer) -> Result<Vec<u8>, String>;
+
+    /// Fetches a preview of the first link in `body` and uploads its image.
+    async fn link_preview(&self, body: &str) -> Result<Option<Preview>, String>;
 
     async fn leave_group(&mut self, master_key: &[u8; 32]) -> Result<LeaveGroupOutcome, String>;
 
@@ -89,6 +92,12 @@ impl SignalProtocol for Manager<SqliteStore, Registered> {
             .map_err(|error| error.to_string())
     }
 
+    async fn link_preview(&self, body: &str) -> Result<Option<Preview>, String> {
+        Manager::link_preview(self, body)
+            .await
+            .map_err(|error| error.to_string())
+    }
+
     async fn leave_group(&mut self, master_key: &[u8; 32]) -> Result<LeaveGroupOutcome, String> {
         Manager::leave_group(self, master_key)
             .await
@@ -105,6 +114,7 @@ impl SignalProtocol for Manager<SqliteStore, Registered> {
 #[cfg(test)]
 pub(crate) mod fake {
     use std::sync::{Arc, Mutex};
+    use std::time::Duration;
 
     use presage::libsignal_service::protocol::ServiceId;
 
@@ -119,6 +129,13 @@ pub(crate) mod fake {
         pub sent_group_messages: Arc<Mutex<Vec<SentGroupMessage>>>,
         pub left_groups: Arc<Mutex<Vec<[u8; 32]>>>,
         pub cleared_sessions: Arc<Mutex<Vec<ServiceId>>>,
+        /// `None` behaves like a body without a previewable link.
+        pub link_preview: Option<Result<Preview, String>>,
+        pub link_preview_delay: Option<Duration>,
+        pub link_preview_panics: bool,
+        pub link_preview_requests: Arc<Mutex<Vec<String>>>,
+        /// Result of `get_attachment`; `None` yields an empty download.
+        pub attachment_result: Option<Result<Vec<u8>, String>>,
     }
 
     impl SignalProtocol for FakeSignalProtocol {
@@ -168,7 +185,24 @@ pub(crate) mod fake {
         }
 
         async fn get_attachment(&self, _pointer: &AttachmentPointer) -> Result<Vec<u8>, String> {
-            Ok(Vec::new())
+            self.attachment_result
+                .clone()
+                .unwrap_or_else(|| Ok(Vec::new()))
+        }
+
+        async fn link_preview(&self, body: &str) -> Result<Option<Preview>, String> {
+            self.link_preview_requests
+                .lock()
+                .unwrap()
+                .push(body.to_owned());
+            if let Some(delay) = self.link_preview_delay {
+                tokio::time::sleep(delay).await;
+            }
+            assert!(
+                !self.link_preview_panics,
+                "link preview generation panicked"
+            );
+            self.link_preview.clone().transpose()
         }
 
         async fn leave_group(

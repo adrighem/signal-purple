@@ -12,7 +12,9 @@ const BACKEND_THREAD_STACK_BYTES: usize = 8 * 1024 * 1024;
 
 use crate::acknowledgment::AcknowledgmentInbox;
 use crate::attachment::{AttachmentAdmission, AttachmentAdmissionError, MAX_ATTACHMENT_BYTES};
-use crate::backend::{self, AttachmentPayload, Command, Config, StorePassphrase, WorkerContext};
+use crate::backend::{
+    self, AttachmentPayload, Command, Config, OutgoingPreview, StorePassphrase, WorkerContext,
+};
 #[cfg(test)]
 use crate::event::Event;
 use crate::event::{self, ABI_VERSION, OwnedEvent, SignalEvent};
@@ -30,7 +32,7 @@ const MAX_ATTACHMENT_FILENAME_BYTES: usize = 255;
 const MAX_CONTENT_TYPE_BYTES: usize = 255;
 const EVENT_QUEUE_CAPACITY: usize = 4096;
 
-const ABI_CONTRACT_VALUE_COUNT: usize = 66;
+const ABI_CONTRACT_VALUE_COUNT: usize = 69;
 const ABI_CONTRACT_VALUES: [i64; ABI_CONTRACT_VALUE_COUNT] = [
     ABI_VERSION as i64,
     SignalStatus::Ok as i64,
@@ -63,10 +65,12 @@ const ABI_CONTRACT_VALUES: [i64; ABI_CONTRACT_VALUE_COUNT] = [
     event::EVENT_ACCOUNT as i64,
     event::EVENT_SESSION_RESET as i64,
     event::EVENT_AVATAR as i64,
+    event::EVENT_LINK_PREVIEW as i64,
     0,
     event::FLAG_OUTGOING as i64,
     event::FLAG_FATAL as i64,
     event::FLAG_TRANSIENT as i64,
+    event::FLAG_INLINE_ONLY as i64,
     std::mem::size_of::<SignalCoreConfig>() as i64,
     std::mem::align_of::<SignalCoreConfig>() as i64,
     std::mem::offset_of!(SignalCoreConfig, abi_version) as i64,
@@ -74,6 +78,7 @@ const ABI_CONTRACT_VALUES: [i64; ABI_CONTRACT_VALUE_COUNT] = [
     std::mem::offset_of!(SignalCoreConfig, store_path) as i64,
     std::mem::offset_of!(SignalCoreConfig, device_name) as i64,
     std::mem::offset_of!(SignalCoreConfig, passphrase) as i64,
+    std::mem::offset_of!(SignalCoreConfig, generate_link_previews) as i64,
     std::mem::size_of::<SignalEvent>() as i64,
     std::mem::align_of::<SignalEvent>() as i64,
     std::mem::offset_of!(SignalEvent, abi_version) as i64,
@@ -117,6 +122,7 @@ pub struct SignalCoreConfig {
     store_path: *const c_char,
     device_name: *const c_char,
     passphrase: *const c_char,
+    generate_link_previews: u32,
 }
 
 pub struct SignalCore {
@@ -158,6 +164,14 @@ unsafe fn required_string(
     std::str::from_utf8(bytes)
         .map(str::to_owned)
         .map_err(|_| SignalStatus::InvalidArgument)
+}
+
+fn config_flag(value: u32) -> Result<bool, SignalStatus> {
+    match value {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(SignalStatus::InvalidArgument),
+    }
 }
 
 unsafe fn required_store_passphrase(
@@ -254,6 +268,7 @@ pub unsafe extern "C" fn signal_core_new(
         // SAFETY: the checked size covers the full struct, and the caller owns
         // it for the duration of this call.
         let config = unsafe { &*config };
+        let link_previews = status_try!(config_flag(config.generate_link_previews));
 
         // SAFETY: validated and copied by `required_string`.
         let store_path =
@@ -281,6 +296,7 @@ pub unsafe extern "C" fn signal_core_new(
             store_path,
             device_name,
             passphrase,
+            link_previews,
         };
 
         let join = status_try!(
@@ -345,6 +361,7 @@ pub unsafe extern "C" fn signal_core_send_message(
                 request_id,
                 recipient,
                 message,
+                preview: OutgoingPreview::Unresolved,
             },
         )
     })
@@ -383,6 +400,7 @@ pub unsafe extern "C" fn signal_core_send_group_message(
                 request_id,
                 group_key,
                 message,
+                preview: OutgoingPreview::Unresolved,
             },
         )
     })
@@ -1029,6 +1047,29 @@ mod tests {
     }
 
     #[test]
+    fn constructor_rejects_a_non_boolean_link_preview_flag() {
+        let text = CString::new("unused").unwrap();
+        let config = SignalCoreConfig {
+            abi_version: ABI_VERSION,
+            struct_size: size_of::<SignalCoreConfig>() as u32,
+            store_path: text.as_ptr(),
+            device_name: text.as_ptr(),
+            passphrase: text.as_ptr(),
+            generate_link_previews: 2,
+        };
+        let mut output = std::ptr::dangling_mut::<SignalCore>();
+
+        // SAFETY: `config` and its strings outlive the call, and the flag is
+        // rejected before any string is read.
+        let status = unsafe { signal_core_new(&config, &mut output) };
+
+        assert_eq!(status, SignalStatus::InvalidArgument);
+        assert!(output.is_null());
+        assert_eq!(config_flag(0), Ok(false));
+        assert_eq!(config_flag(1), Ok(true));
+    }
+
+    #[test]
     fn required_passphrase_copy_enters_zeroizing_ownership() {
         let input = CString::new("test-store-passphrase").unwrap();
         let dropped = Arc::new(AtomicBool::new(false));
@@ -1243,6 +1284,7 @@ mod tests {
                     request_id: 1,
                     recipient: "aci:first".into(),
                     message: "one".into(),
+                    preview: OutgoingPreview::Unresolved,
                 }
             ),
             SignalStatus::Ok

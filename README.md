@@ -34,11 +34,13 @@ This README distinguishes production-service evidence from automated tests:
 | Group discovery and display | **Partly live-tested.** Discovery, reconnect deduplication, titles, members, and administrator flags passed live checks. Current authoritative refresh and pruning are test-covered. |
 | Group messages | **Implemented.** Routing and active-membership guards have automated coverage; current end-to-end send/receive still needs live validation. |
 | Remote group leave | **Test-covered.** The confirmed **Leave Signal group…** flow still needs live validation. |
+| Outgoing link previews | **Test-covered.** Off by default. Link detection, the five-second fallback, and per-conversation ordering have automated coverage; previews shown by official clients still need live validation. |
 | Typing and receipts | **Test-covered.** Direct typing and outgoing delivery/focus-gated read receipts are implemented. Receipt updates received from other clients are not shown in Purple 2. |
 | Attachments | **Implemented.** Size limits, ABI handling, transfer presentation, and direct/group inline-image routing have focused tests. End-to-end transfers and inline media still need live checks. |
+| Incoming link previews | **Implemented.** Direct and group title, description, link, and inline image projection have focused Rust and C tests; live checks are pending. |
 | Delivery recovery | **Test-covered.** The encrypted text outbox and unacknowledged-message replay are implemented; controlled offline, crash, and network-loss checks remain. |
 | Identity replacement | **Test-covered.** Verified-contact sends block until the user accepts a changed identity after out-of-band verification. |
-| Persisted identifiers | **Test-covered.** Plugin ID `prpl-adrighem-signal`, account keys `store-id`/`store-path`/`device-name`, and managed buddy/group keys are locked by literal regression tests. |
+| Persisted identifiers | **Test-covered.** Plugin ID `prpl-adrighem-signal`, account keys `store-id`/`store-path`/`device-name`/`generate-link-previews`, and managed buddy/group keys are locked by literal regression tests. |
 | Idle event handling | **Live-tested.** Descriptor-driven wakeups replaced the old polling loop; an isolated idle sample found no hot Signal thread. |
 
 Production-service evidence is revision-specific. See
@@ -305,6 +307,12 @@ code and any provisioning URI as sensitive credentials.
   outgoing Purple markup is stripped. Reactions become a short text message,
   and edits appear as new messages instead of changing earlier text. Outgoing
   message text is limited to 64 KiB.
+- The account option **Generate link previews** is off by default. When it is
+  on, this computer fetches the first `https` link in each sent direct or group
+  message and attaches a title, description, and image for Signal clients to
+  show. The linked site sees your IP address, and the fetch does not use
+  Purple's proxy settings. A preview that takes longer than five seconds or
+  fails is skipped and the message is sent without it.
 - On reconnect, the plugin receives envelopes which Signal still has queued
   for this linked device. It cannot fetch arbitrary history or import an
   official client's local message database.
@@ -335,6 +343,10 @@ converted through bounded, process-isolated FFmpeg pipes and presented as GIFs
 when the optional `ffmpeg` and `prlimit` helpers are installed. Ordinary video
 and any failed, unavailable, oversized, or invalid conversion retains the
 original MP4 transfer prompt because Purple 2 has no native inline-video API.
+Incoming direct and group link previews show the first preview's title,
+description, and any link missing from the message body, with the same
+inline-image checks for its image; a rejected preview image is skipped without
+a transfer prompt.
 Unnamed common media receives a usable type-specific filename. Empty or failed
 incoming downloads are rejected visibly. Incoming transfer size follows
 Signal's network policy without a lower plugin per-file or per-message cap.
@@ -382,6 +394,10 @@ desktop secret service, and the plugin refuses to fall back to plaintext when
 that service is unavailable. The Rust FFI copies it directly into zeroizing
 ownership, and the worker wipes that copy immediately after the SQLCipher store
 open completes or is interrupted.
+
+Outgoing link previews are off by default. Enabling them makes this computer
+contact the first `https` site linked in each sent message, outside Purple's
+proxy settings.
 
 Identity handling uses trust on first use. An identity replacement for an
 unverified contact produces a one-time warning and sending continues. A

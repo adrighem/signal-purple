@@ -47,10 +47,14 @@ static const gint64 abi_contract_values[SIGNAL_CORE_ABI_VALUE_COUNT] = {
     [SIGNAL_CORE_ABI_VALUE_EVENT_ACCOUNT] = SIGNAL_EVENT_ACCOUNT,
     [SIGNAL_CORE_ABI_VALUE_EVENT_SESSION_RESET] = SIGNAL_EVENT_SESSION_RESET,
     [SIGNAL_CORE_ABI_VALUE_EVENT_AVATAR] = SIGNAL_EVENT_AVATAR,
+    [SIGNAL_CORE_ABI_VALUE_EVENT_LINK_PREVIEW] =
+        SIGNAL_EVENT_LINK_PREVIEW,
     [SIGNAL_CORE_ABI_VALUE_FLAG_NONE] = SIGNAL_EVENT_FLAG_NONE,
     [SIGNAL_CORE_ABI_VALUE_FLAG_OUTGOING] = SIGNAL_EVENT_FLAG_OUTGOING,
     [SIGNAL_CORE_ABI_VALUE_FLAG_FATAL] = SIGNAL_EVENT_FLAG_FATAL,
     [SIGNAL_CORE_ABI_VALUE_FLAG_TRANSIENT] = SIGNAL_EVENT_FLAG_TRANSIENT,
+    [SIGNAL_CORE_ABI_VALUE_FLAG_INLINE_ONLY] =
+        SIGNAL_EVENT_FLAG_INLINE_ONLY,
     [SIGNAL_CORE_ABI_VALUE_CONFIG_SIZE] = sizeof(SignalCoreConfig),
     [SIGNAL_CORE_ABI_VALUE_CONFIG_ALIGNMENT] = _Alignof(SignalCoreConfig),
     [SIGNAL_CORE_ABI_VALUE_CONFIG_ABI_VERSION_OFFSET] =
@@ -63,6 +67,8 @@ static const gint64 abi_contract_values[SIGNAL_CORE_ABI_VALUE_COUNT] = {
         offsetof(SignalCoreConfig, device_name),
     [SIGNAL_CORE_ABI_VALUE_CONFIG_PASSPHRASE_OFFSET] =
         offsetof(SignalCoreConfig, passphrase),
+    [SIGNAL_CORE_ABI_VALUE_CONFIG_GENERATE_LINK_PREVIEWS_OFFSET] =
+        offsetof(SignalCoreConfig, generate_link_previews),
     [SIGNAL_CORE_ABI_VALUE_EVENT_SIZE] = sizeof(SignalEvent),
     [SIGNAL_CORE_ABI_VALUE_EVENT_ALIGNMENT] = _Alignof(SignalEvent),
     [SIGNAL_CORE_ABI_VALUE_EVENT_ABI_VERSION_OFFSET] =
@@ -143,9 +149,10 @@ test_abi_values(void)
         SIGNAL_EVENT_ACCOUNT,
         SIGNAL_EVENT_SESSION_RESET,
         SIGNAL_EVENT_AVATAR,
+        SIGNAL_EVENT_LINK_PREVIEW,
     };
 
-    g_assert_cmpuint(SIGNAL_CORE_ABI_VERSION, ==, 7);
+    g_assert_cmpuint(SIGNAL_CORE_ABI_VERSION, ==, 8);
     for (guint index = 0; index < G_N_ELEMENTS(statuses); index++)
         g_assert_cmpint(statuses[index], ==, -(gint)index);
     for (guint index = 0; index < G_N_ELEMENTS(events); index++)
@@ -154,6 +161,7 @@ test_abi_values(void)
     g_assert_cmpuint(SIGNAL_EVENT_FLAG_OUTGOING, ==, 1);
     g_assert_cmpuint(SIGNAL_EVENT_FLAG_FATAL, ==, 2);
     g_assert_cmpuint(SIGNAL_EVENT_FLAG_TRANSIENT, ==, 4);
+    g_assert_cmpuint(SIGNAL_EVENT_FLAG_INLINE_ONLY, ==, 8);
 }
 
 static void
@@ -203,6 +211,7 @@ test_persisted_identifiers(void)
     g_assert_cmpstr(SIGNAL_STORE_ID_KEY, ==, "store-id");
     g_assert_cmpstr(SIGNAL_STORE_PATH_KEY, ==, "store-path");
     g_assert_cmpstr(SIGNAL_DEVICE_NAME_KEY, ==, "device-name");
+    g_assert_cmpstr(SIGNAL_LINK_PREVIEWS_KEY, ==, "generate-link-previews");
     g_assert_cmpstr(SIGNAL_SYNCED_BUDDY_KEY, ==, "signal-purple-synced-contact");
     g_assert_cmpstr(SIGNAL_SYNCED_GROUP_KEY, ==, "signal-purple-synced-group");
 }

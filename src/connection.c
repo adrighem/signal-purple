@@ -855,20 +855,12 @@ signal_group_sync_timeout(gpointer data)
 }
 
 static gboolean
-signal_deliver_direct(SignalConnection *connection, const SignalEvent *event)
+signal_present_direct(SignalConnection *connection, const SignalEvent *event,
+                      const char *markup)
 {
     PurpleAccount *account;
     PurpleConversation *conversation;
-    g_autofree char *escaped = NULL;
     time_t timestamp;
-
-    if (event->peer_id == NULL || event->peer_id[0] == '\0' ||
-        event->text == NULL) {
-        purple_debug_warning(
-            "signal-purple",
-            "Rejected a malformed direct-message projection without acknowledging it\n");
-        return FALSE;
-    }
 
     account = purple_connection_get_account(connection->gc);
     if (!signal_event_can_present(connection, NULL, event))
@@ -880,31 +872,73 @@ signal_deliver_direct(SignalConnection *connection, const SignalEvent *event)
         conversation = purple_conversation_new(PURPLE_CONV_TYPE_IM, account,
                                                event->peer_id);
 
-    escaped = g_markup_escape_text(event->text, -1);
     timestamp = event->timestamp_ms > 0
                     ? (time_t)(event->timestamp_ms / 1000)
                     : time(NULL);
 
     if ((event->flags & SIGNAL_EVENT_FLAG_OUTGOING) == 0) {
-        serv_got_im(connection->gc, event->peer_id, escaped,
+        serv_got_im(connection->gc, event->peer_id, markup,
                     signal_message_flags(FALSE), timestamp);
         signal_queue_final_read(connection, conversation, event);
         return TRUE;
     }
 
     purple_conv_im_write(PURPLE_CONV_IM(conversation),
-                         purple_account_get_username(account), escaped,
+                         purple_account_get_username(account), markup,
                          signal_message_flags(TRUE),
                          timestamp);
     return TRUE;
 }
 
 static gboolean
-signal_deliver_group(SignalConnection *connection, const SignalEvent *event)
+signal_deliver_direct(SignalConnection *connection, const SignalEvent *event)
+{
+    g_autofree char *escaped = NULL;
+
+    if (event->peer_id == NULL || event->peer_id[0] == '\0' ||
+        event->text == NULL) {
+        purple_debug_warning(
+            "signal-purple",
+            "Rejected a malformed direct-message projection without acknowledging it\n");
+        return FALSE;
+    }
+
+    escaped = g_markup_escape_text(event->text, -1);
+    return signal_present_direct(connection, event, escaped);
+}
+
+static gboolean
+signal_present_group(SignalConnection *connection, const SignalEvent *event,
+                     const char *group_title, const char *markup)
 {
     guint id;
-    g_autofree char *escaped = NULL;
     time_t timestamp;
+
+    /* The backend emits group content only after confirming local membership.
+     * This keeps a newly joined group usable before the next full snapshot. */
+    g_hash_table_add(connection->active_group_keys,
+                     g_strdup(event->chat_id));
+    PurpleConversation *conversation =
+        signal_open_group(connection, event->chat_id, group_title);
+    if (!signal_event_can_present(connection, conversation, event))
+        return TRUE;
+
+    id = signal_group_id(connection, event->chat_id, group_title);
+    timestamp = event->timestamp_ms > 0
+                    ? (time_t)(event->timestamp_ms / 1000)
+                    : time(NULL);
+    serv_got_chat_in(connection->gc, (int)id, event->peer_id,
+                     signal_message_flags(
+                         (event->flags & SIGNAL_EVENT_FLAG_OUTGOING) != 0),
+                     markup, timestamp);
+    signal_queue_final_read(connection, conversation, event);
+    return TRUE;
+}
+
+static gboolean
+signal_deliver_group(SignalConnection *connection, const SignalEvent *event)
+{
+    g_autofree char *escaped = NULL;
 
     if (event->chat_id == NULL || event->chat_id[0] == '\0' ||
         event->peer_id == NULL || event->peer_id[0] == '\0' ||
@@ -915,26 +949,48 @@ signal_deliver_group(SignalConnection *connection, const SignalEvent *event)
         return FALSE;
     }
 
-    /* The backend emits group content only after confirming local membership.
-     * This keeps a newly joined group usable before the next full snapshot. */
-    g_hash_table_add(connection->active_group_keys,
-                     g_strdup(event->chat_id));
-    PurpleConversation *conversation = signal_open_group(
-        connection, event->chat_id, event->title);
-    if (!signal_event_can_present(connection, conversation, event))
-        return TRUE;
-
-    id = signal_group_id(connection, event->chat_id, event->title);
     escaped = g_markup_escape_text(event->text, -1);
-    timestamp = event->timestamp_ms > 0
-                    ? (time_t)(event->timestamp_ms / 1000)
-                    : time(NULL);
-    serv_got_chat_in(connection->gc, (int)id, event->peer_id,
-                     signal_message_flags(
-                         (event->flags & SIGNAL_EVENT_FLAG_OUTGOING) != 0),
-                     escaped, timestamp);
-    signal_queue_final_read(connection, conversation, event);
-    return TRUE;
+    return signal_present_group(connection, event, event->title, escaped);
+}
+
+/* Preview text is sender-controlled: escape every field, then add only the
+ * plugin's own bold markup around the title. */
+static char *
+signal_link_preview_markup(const SignalEvent *event)
+{
+    g_autofree char *title = NULL;
+    g_autofree char *text = NULL;
+
+    if (event->title != NULL && event->title[0] != '\0')
+        title = g_markup_escape_text(event->title, -1);
+    if (event->text != NULL && event->text[0] != '\0')
+        text = g_markup_escape_text(event->text, -1);
+    if (title != NULL && text != NULL)
+        return g_strdup_printf("<b>%s</b>\n%s", title, text);
+    if (title != NULL)
+        return g_strdup_printf("<b>%s</b>", title);
+    return g_steal_pointer(&text);
+}
+
+static gboolean
+signal_deliver_link_preview(SignalConnection *connection,
+                            const SignalEvent *event)
+{
+    g_autofree char *markup = signal_link_preview_markup(event);
+
+    if (markup == NULL || event->peer_id == NULL ||
+        event->peer_id[0] == '\0' ||
+        (event->chat_id != NULL && event->chat_id[0] == '\0')) {
+        purple_debug_warning(
+            "signal-purple",
+            "Rejected a malformed link-preview projection without acknowledging it\n");
+        return FALSE;
+    }
+
+    /* The title belongs to the preview, never to the group conversation. */
+    if (event->chat_id == NULL)
+        return signal_present_direct(connection, event, markup);
+    return signal_present_group(connection, event, NULL, markup);
 }
 
 static void
@@ -1152,6 +1208,9 @@ signal_dispatch_event(SignalConnection *connection, const SignalEvent *event,
     case SIGNAL_EVENT_GROUP_MESSAGE:
         projection_accepted = signal_deliver_group(connection, event);
         break;
+    case SIGNAL_EVENT_LINK_PREVIEW:
+        projection_accepted = signal_deliver_link_preview(connection, event);
+        break;
     case SIGNAL_EVENT_GROUP_LEFT:
         signal_group_left(connection, event);
         break;
@@ -1297,6 +1356,7 @@ signal_poll_backend(gint fd, GIOCondition condition, gpointer data)
         if (event->request_id != 0 &&
             (event->kind == SIGNAL_EVENT_MESSAGE ||
              event->kind == SIGNAL_EVENT_GROUP_MESSAGE ||
+             event->kind == SIGNAL_EVENT_LINK_PREVIEW ||
              event->kind == SIGNAL_EVENT_ATTACHMENT)) {
             SignalStatus status = signal_core_ack_message(
                 connection->core, event->request_id);
@@ -1456,6 +1516,9 @@ signal_login(PurpleAccount *account)
     config.device_name = purple_account_get_string(account, SIGNAL_DEVICE_NAME_KEY,
                                                    "signal-purple");
     config.passphrase = passphrase;
+    config.generate_link_previews =
+        purple_account_get_bool(account, SIGNAL_LINK_PREVIEWS_KEY, FALSE) ? 1u
+                                                                          : 0u;
     status = signal_core_new(&config, &connection->core);
     secret_password_free(passphrase);
 

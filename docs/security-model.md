@@ -106,6 +106,11 @@ user-facing local storage, not diagnostic output.
   privacy and group-ignore rules to text, inline media, and transfer fallback.
   Filtered events are acknowledged without presentation or a read receipt;
   outgoing linked-device echoes remain visible.
+  Link preview title, description, and URL are sender-controlled: Rust caps and
+  strips control and bidirectional override characters, and C escapes them with
+  the same markup escaping as message text, so only the plugin's own bold title
+  markup is ever interpreted. Preview images use the inline-only path above and
+  never open a receive prompt. The plugin does not fetch the preview URL.
   Decrypted
   incoming bytes remain in memory until the displayed image is released, saved,
   or rejected; the plugin creates no plaintext attachment cache. Remote
@@ -125,6 +130,14 @@ user-facing local storage, not diagnostic output.
   after backend admission are reported rather than durably replayed. Excess
   receipt metadata is discarded with a rate-limited warning rather than
   permitting unbounded memory growth.
+- Outgoing link previews are off by default. Presage's automatic preview fetch
+  is disabled for every send, so with the option off the plugin makes no
+  request to linked sites. When enabled, Presage accepts only `https` links to
+  public-looking domain names (no IP literals, `localhost`, `.onion`, or other
+  reserved names), follows at most ten redirects under the same rule, and caps
+  pages and images at 2 MiB; signal-purple caps each generation at five seconds
+  and sends without a preview on any failure. Preview diagnostics are
+  debug-level only and never include the link at info level or above.
 - Unsent message bodies, recipients, timestamps, and retry counters remain in
   the SQLCipher outbox. Purple receives errors at the first failure and at
   bounded later attempts, and those error events omit the message body.
@@ -177,6 +190,14 @@ user-facing local storage, not diagnostic output.
   flaw in the UI or another plugin can access this process.
 - Signal does not support third-party clients or promise protocol stability.
 - Disappearing timers and remote deletions are not projected into Purple.
+- An enabled link preview is fetched directly from this computer. The linked
+  site, and anyone observing the connection's metadata, learns your IP address
+  and when you shared the link. The request ignores Purple's proxy settings; it
+  uses only the system proxy environment that `reqwest` reads. Presage's domain
+  check is name-based: a public name that resolves to a private, loopback, or
+  link-local address is not blocked, so a link can make this computer contact a
+  host on its local network. The preview image is uploaded to Signal's
+  attachment CDN even if the message send later fails.
 - Purple's buddy list stores synced contact aliases, group titles, canonical
   contact identifiers, and opaque group identifiers in plaintext. The plugin
   cannot prevent another in-process UI or plugin from retaining message text.

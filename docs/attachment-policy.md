@@ -13,6 +13,7 @@ lower per-file or per-message download cap.
 | Unresolved receive prompts | No plugin byte cap | C adapter | Retain data until the user accepts or rejects the prompt |
 | Inline direct/group JPEG/PNG | 8 MiB encoded, 8192 pixels per edge, and 16 megapixels | Rust classifier and C image decoder | Fall back to a file prompt |
 | Inline direct/group GIF | 8 MiB encoded, 8192 pixels per edge, 16 megapixels, and 8 million cumulative canvas pixel-frames | Rust classifier, C GIF parser, and image decoder | Fall back to a file prompt |
+| Incoming link preview image (direct/group) | Same JPEG/PNG/GIF limits as inline images, 8 MiB encoded, one image per message | Rust classifier, C GIF parser, and image decoder | Skip the image silently; never a file prompt |
 | Signal GIF-style MP4 conversion | 8 MiB input/output, 480 pixels per edge, 15 fps maximum, 2 attempts per message, 1 process globally | Rust worker, `prlimit`, and FFmpeg | Preserve the original MP4 file prompt |
 
 Incoming downloads use Presage's standard attachment API. Signal decides which
@@ -21,6 +22,14 @@ and download or decryption failures, but does not enforce sender-declared or
 decrypted byte limits of its own. Sender-declared plaintext size is cleared
 before download so it cannot drive allocation, then applied only after
 authenticated decryption to remove Signal privacy padding.
+
+A link preview image is an `AttachmentPointer` inside the message's first
+preview. It is downloaded for incoming messages only, with the sender-declared
+size cleared like any other attachment, and is dropped when the declared size
+exceeds 8 MiB or the decrypted data fails the inline-image checks. It is sent to
+C with the inline-only flag, so a decoder or image-store rejection also drops it
+instead of falling back to a transfer prompt. It is never counted as a regular
+attachment or placeholder.
 
 Signal GIF-style conversion additionally runs with a cleared environment,
 pipe-only FFmpeg input and output, one codec thread, a 1 GiB address-space

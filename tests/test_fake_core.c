@@ -37,6 +37,12 @@ test_fake_core_lifecycle(void)
 
     signal_core_shutdown(core);
     signal_core_free(core);
+
+    config.generate_link_previews = 2;
+    core = NULL;
+    status = signal_core_new(&config, &core);
+    g_assert_cmpint(status, ==, SIGNAL_STATUS_INVALID_ARGUMENT);
+    g_assert_null(core);
 }
 
 static void

@@ -29,6 +29,9 @@ use super::coordinator::{
     load_unprojected_messages, qr_png, receive_error_is_transient,
     request_contacts_after_queue_drain, spawn_group_sync, upload_and_send_attachment,
 };
+use super::link_preview::{
+    LINK_PREVIEW_TIMEOUT, LinkPreviewPipeline, needs_link_preview, next_resolved_send,
+};
 use super::media::AvatarCache;
 use super::outbox::retry_outbox;
 use super::projection::{
@@ -101,6 +104,7 @@ async fn run(
         store_path,
         device_name,
         passphrase,
+        link_previews,
     } = config;
     let avatar_cache = AvatarCache::new(Some(&store_path));
     let Some(store) = open_encrypted_store(&store_path, passphrase, &mut shutdown).await? else {
@@ -111,7 +115,7 @@ async fn run(
     let Some(is_registered) = await_or_shutdown(store.is_registered(), &mut shutdown).await else {
         return Ok(());
     };
-    let manager = if is_registered {
+    let mut manager = if is_registered {
         let load = Manager::load_registered(store);
         pin_mut!(load);
         tokio::select! {
@@ -128,6 +132,10 @@ async fn run(
             None => return Ok(()),
         }
     };
+    // Previews are generated only through the bounded link-preview pipeline.
+    manager.set_link_previews_enabled(false);
+    let link_previews =
+        link_previews.then(|| LinkPreviewPipeline::new(manager.clone(), LINK_PREVIEW_TIMEOUT));
 
     Box::pin(receive_and_command_loop(
         manager,
@@ -137,6 +145,7 @@ async fn run(
         sink,
         ready,
         avatar_cache,
+        link_previews,
     ))
     .await
 }
@@ -258,6 +267,7 @@ async fn link_device(
 struct ConnectionSession {
     manager: Manager<SqliteStore, Registered>,
     commands: tokio_mpsc::Receiver<Command>,
+    link_previews: Option<LinkPreviewPipeline<Manager<SqliteStore, Registered>>>,
     acknowledgments: Arc<AcknowledgmentInbox>,
     shutdown: watch::Receiver<bool>,
     sink: EventSink,
@@ -300,7 +310,14 @@ impl ConnectionSession {
         }
     }
 
+    fn abort_link_previews(&mut self) {
+        if let Some(pipeline) = &mut self.link_previews {
+            pipeline.abort();
+        }
+    }
+
     async fn stop_and_drain(&mut self) {
+        self.abort_link_previews();
         stop_attachments_and_drain_acknowledgments(
             &self.manager,
             &self.sink,
@@ -318,6 +335,7 @@ impl ConnectionSession {
     }
 
     async fn stop_active_and_drain(&mut self, receive_tasks: &mut ActiveReceiveTasks) {
+        self.abort_link_previews();
         stop_active_receive_loop(
             receive_tasks,
             &self.manager,
@@ -671,7 +689,10 @@ impl ConnectionSession {
                     {
                         Some(command)
                     } else {
-                        self.commands.recv().await
+                        tokio::select! {
+                            command = self.commands.recv() => command,
+                            command = next_resolved_send(&mut self.link_previews) => Some(command),
+                        }
                     }
                 } => {
                     let Some(command) = command else {
@@ -680,6 +701,12 @@ impl ConnectionSession {
                     };
                     if !session_ready {
                         handle_recovery_command(command, &mut self.deferred_commands);
+                        continue;
+                    }
+                    if let Some(pipeline) = &mut self.link_previews
+                        && needs_link_preview(&command, groups_authoritative)
+                    {
+                        pipeline.submit(command);
                         continue;
                     }
                     match command {
@@ -965,6 +992,7 @@ impl ConnectionSession {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn receive_and_command_loop(
     manager: Manager<SqliteStore, Registered>,
     commands: tokio_mpsc::Receiver<Command>,
@@ -973,6 +1001,7 @@ async fn receive_and_command_loop(
     sink: EventSink,
     ready: Arc<AtomicBool>,
     avatar_cache: AvatarCache,
+    link_previews: Option<LinkPreviewPipeline<Manager<SqliteStore, Registered>>>,
 ) -> Result<(), String> {
     let repo = StorageRepository::new(manager.store().clone());
     let Some(init_result) = await_or_shutdown(repo.initialize_subsystems(), &mut shutdown).await
@@ -996,6 +1025,7 @@ async fn receive_and_command_loop(
     let connection = ConnectionSession {
         manager,
         commands,
+        link_previews,
         acknowledgments,
         shutdown,
         sink,
@@ -1315,6 +1345,7 @@ pub(crate) async fn attachment_task_result(
 mod tests {
     use super::*;
     use crate::attachment::AttachmentAdmission;
+    use crate::backend::command::OutgoingPreview;
     use crate::backend::coordinator::finish_attachment_completion;
     use crate::event::EVENT_ATTACHMENT_SENT;
     use std::path::PathBuf;
@@ -1593,6 +1624,7 @@ mod tests {
                 request_id: 40,
                 recipient: "recipient".into(),
                 message: "message".into(),
+                preview: OutgoingPreview::Unresolved,
             },
             Command::SendAttachment {
                 request_id: 41,
@@ -1785,6 +1817,7 @@ mod tests {
                 request_id: 41,
                 group_key: "group".into(),
                 message: "message".into(),
+                preview: OutgoingPreview::Unresolved,
             },
             "recovery stopped",
         )

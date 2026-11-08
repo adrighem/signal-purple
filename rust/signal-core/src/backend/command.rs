@@ -4,6 +4,7 @@ use std::sync::atomic::AtomicBool;
 #[cfg(test)]
 use std::sync::atomic::Ordering;
 
+use presage::proto::Preview;
 use tokio::sync::{mpsc as tokio_mpsc, watch};
 use zeroize::{Zeroize, Zeroizing};
 
@@ -15,6 +16,7 @@ pub struct Config {
     pub store_path: String,
     pub device_name: String,
     pub passphrase: StorePassphrase,
+    pub link_previews: bool,
 }
 
 pub struct WorkerContext {
@@ -32,11 +34,13 @@ pub enum Command {
         request_id: u64,
         recipient: String,
         message: String,
+        preview: OutgoingPreview,
     },
     SendGroupMessage {
         request_id: u64,
         group_key: String,
         message: String,
+        preview: OutgoingPreview,
     },
     LeaveGroup {
         request_id: u64,
@@ -73,6 +77,24 @@ pub enum Command {
         recipient: String,
         timestamp: u64,
     },
+}
+
+/// Link preview of a text send. Purple submits `Unresolved`; the backend
+/// resolves it before sending when link previews are enabled.
+#[derive(Debug, Default)]
+pub enum OutgoingPreview {
+    #[default]
+    Unresolved,
+    Resolved(Option<Box<Preview>>),
+}
+
+impl OutgoingPreview {
+    pub(crate) fn into_preview(self) -> Option<Preview> {
+        match self {
+            Self::Unresolved | Self::Resolved(None) => None,
+            Self::Resolved(Some(preview)) => Some(*preview),
+        }
+    }
 }
 
 pub struct StorePassphrase {
