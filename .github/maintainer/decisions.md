@@ -295,3 +295,16 @@
   sender-declared plaintext size for allocation. Clear that hint for Presage's
   standard download call, then apply it only to remove privacy padding after
   authenticated decryption.
+
+## 2026-11-07 - Update Cargo.lock through a TOML JSONPath, not a marker
+
+- Cargo Dependabot PRs (PR:110, PR:112, PR:116, PR:117) all failed
+  `build-and-test` because regenerating `Cargo.lock` drops the
+  `# x-release-please-version` comment. Two earlier manual re-adds did not hold.
+- Switched the release-please extra-file to `type: toml` with JSONPath
+  `$.package[?(@.name.value=='signal-core')].version`. The `.value` suffix is
+  required because release-please's tagged TOML parser wraps scalars. Verified
+  locally with release-please 17.11.2 `GenericToml`: only the signal-core
+  version line changes.
+- The release validator now checks the config entry and that the lockfile
+  version matches `version.txt`, without requiring a marker.
