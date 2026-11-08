@@ -1,4 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+//! Link previews in both directions. Outgoing, a preview is generated for a
+//! text send before it goes out. Incoming, the sender's preview becomes plain
+//! text plus an optional inline-only image on the message events.
 use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -6,16 +9,26 @@ use std::time::Duration;
 
 use futures::FutureExt;
 use futures::channel::oneshot;
+use presage::libsignal_service::content::DataMessage;
 use presage::model::previews::extract_urls_from_text_block;
 use presage::proto::Preview;
 use tokio::sync::{Semaphore, mpsc as tokio_mpsc};
 
 use super::command::{Command, OutgoingPreview};
+use super::coordinator::{
+    attachment_pointer_without_sender_size_hint, truncate_attachment_to_sender_size,
+};
+use super::media::{DownloadedAttachment, MAX_INLINE_MEDIA_BYTES, should_inline_image};
 use super::protocol::SignalProtocol;
 
 /// Hard cap on fetching the linked page and uploading its image.
 pub(crate) const LINK_PREVIEW_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_CONCURRENT_PREVIEWS: usize = 2;
+/// Display caps for sender-controlled link preview text, in characters. An
+/// over-long URL is dropped rather than truncated into a different link.
+const MAX_PREVIEW_TITLE_CHARS: usize = 200;
+const MAX_PREVIEW_DESCRIPTION_CHARS: usize = 500;
+const MAX_PREVIEW_URL_CHARS: usize = 2048;
 
 /// The link Signal clients would preview, exactly as written in `body`.
 /// Receivers drop a preview whose URL is not one of the body's links.
@@ -215,13 +228,135 @@ pub(crate) async fn next_resolved_send<M: SignalProtocol + 'static>(
     }
 }
 
+/// Plain preview fields for one `EVENT_LINK_PREVIEW`. Purple escapes both
+/// before display, so neither is markup.
+#[derive(Debug, PartialEq)]
+pub(super) struct LinkPreviewText {
+    pub(super) title: Option<String>,
+    pub(super) text: Option<String>,
+}
+
+fn preview_char(ch: char) -> Option<char> {
+    match ch {
+        '\n' | '\t' => Some(' '),
+        // Bidirectional controls can make attacker text mimic other text.
+        '\u{200e}' | '\u{200f}' | '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' => None,
+        _ if ch.is_control() => None,
+        _ => Some(ch),
+    }
+}
+
+fn preview_display_text(value: Option<&str>, max_chars: usize) -> Option<String> {
+    // One extra character reveals truncation without scanning the whole value.
+    let mut chars: Vec<char> = value?
+        .chars()
+        .filter_map(preview_char)
+        .take(max_chars + 1)
+        .collect();
+    let truncated = chars.len() > max_chars;
+    chars.truncate(max_chars);
+    let mut cleaned = chars.into_iter().collect::<String>().trim().to_owned();
+    if cleaned.is_empty() {
+        return None;
+    }
+    if truncated {
+        cleaned.push('…');
+    }
+    Some(cleaned)
+}
+
+fn preview_url(value: Option<&str>) -> Option<String> {
+    let url = value?.trim();
+    let displayable = !url.is_empty()
+        && url.chars().count() <= MAX_PREVIEW_URL_CHARS
+        && url.chars().all(|ch| preview_char(ch) == Some(ch));
+    displayable.then(|| url.to_owned())
+}
+
+/// Only the first preview is shown, and only for ordinary message content.
+pub(super) fn link_preview(message: &DataMessage) -> Option<&Preview> {
+    if message.delete.is_some() || message.is_view_once.unwrap_or(false) {
+        return None;
+    }
+    message
+        .reaction
+        .is_none()
+        .then(|| message.preview.first())?
+}
+
+pub(super) fn link_preview_text(message: &DataMessage) -> Option<LinkPreviewText> {
+    let preview = link_preview(message)?;
+    let title = preview_display_text(preview.title.as_deref(), MAX_PREVIEW_TITLE_CHARS);
+    let description = preview_display_text(
+        preview.description.as_deref(),
+        MAX_PREVIEW_DESCRIPTION_CHARS,
+    );
+    let body = message.body.as_deref().unwrap_or_default();
+    let url = preview_url(preview.url.as_deref()).filter(|url| !body.contains(url.as_str()));
+    let text = [description, url]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let text = (!text.is_empty()).then_some(text);
+    (title.is_some() || text.is_some()).then_some(LinkPreviewText { title, text })
+}
+
+/// Downloads the preview image for the inline-image path. Any miss is silent:
+/// the preview text is still shown and the image never becomes a file prompt.
+pub(super) async fn download_preview_image<M: SignalProtocol>(
+    manager: &M,
+    preview: &Preview,
+) -> Option<DownloadedAttachment> {
+    let image = preview.image.as_ref()?;
+    if image.size.unwrap_or(0) as usize > MAX_INLINE_MEDIA_BYTES {
+        return None;
+    }
+    let download_pointer = attachment_pointer_without_sender_size_hint(image);
+    let mut data = match manager.get_attachment(&download_pointer).await {
+        Ok(data) => data,
+        Err(error) => {
+            tracing::debug!(%error, "Skipping Signal link preview image download");
+            return None;
+        }
+    };
+    truncate_attachment_to_sender_size(image, &mut data);
+    should_inline_image(false, image.content_type.as_deref(), Some(&data))
+        .then(|| DownloadedAttachment::new(0, image, data))
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use presage::libsignal_service::content::DataMessage;
+    use presage::proto::Preview;
+
+    pub(crate) fn preview(title: &str, description: &str, url: &str) -> Preview {
+        Preview {
+            title: (!title.is_empty()).then(|| title.to_owned()),
+            description: (!description.is_empty()).then(|| description.to_owned()),
+            url: (!url.is_empty()).then(|| url.to_owned()),
+            ..Preview::default()
+        }
+    }
+
+    pub(crate) fn preview_message(body: &str, preview: Preview) -> DataMessage {
+        DataMessage {
+            body: (!body.is_empty()).then(|| body.to_owned()),
+            preview: vec![preview],
+            ..DataMessage::default()
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use presage::libsignal_service::content::ContentBody;
 
+    use super::test_support::{preview, preview_message};
     use super::*;
     use crate::backend::coordinator::{
-        CommandContext, DepartedGroups, MessageTimestampAllocator, MetadataCache, handle_command,
+        CommandContext, DepartedGroups, MessageTimestampAllocator, MetadataCache,
+        data_message_text, handle_command,
     };
     use crate::backend::protocol::fake::FakeSignalProtocol;
     use crate::store::traits::fake::FakeStorageRepository;
@@ -514,5 +649,152 @@ mod tests {
         handle_direct_send(&mut protocol, command).await;
 
         assert_eq!(sent_previews(&protocol), vec![vec![preview]]);
+    }
+
+    #[test]
+    fn link_preview_text_shows_title_description_and_new_url() {
+        let message = preview_message(
+            "look at this",
+            preview("Title", "About it", "https://example.invalid/a"),
+        );
+
+        assert_eq!(
+            link_preview_text(&message),
+            Some(LinkPreviewText {
+                title: Some("Title".into()),
+                text: Some("About it\nhttps://example.invalid/a".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn link_preview_text_omits_a_url_the_body_already_contains() {
+        let message = preview_message(
+            "see https://example.invalid/a now",
+            preview("Title", "About it", "https://example.invalid/a"),
+        );
+        assert_eq!(
+            link_preview_text(&message),
+            Some(LinkPreviewText {
+                title: Some("Title".into()),
+                text: Some("About it".into()),
+            })
+        );
+
+        let url_only = preview_message(
+            "https://example.invalid/a",
+            preview("", "", "https://example.invalid/a"),
+        );
+        assert_eq!(link_preview_text(&url_only), None);
+    }
+
+    #[test]
+    fn link_preview_text_replaces_the_empty_body_fallback() {
+        let url_only = preview_message("", preview("", "", "https://example.invalid/a"));
+        assert_eq!(data_message_text(&url_only), "");
+        assert_eq!(
+            link_preview_text(&url_only).and_then(|text| text.text),
+            Some("https://example.invalid/a".into())
+        );
+
+        let title_only = preview_message("", preview("Only title", "", ""));
+        assert_eq!(
+            link_preview_text(&title_only),
+            Some(LinkPreviewText {
+                title: Some("Only title".into()),
+                text: None,
+            })
+        );
+        assert_eq!(link_preview_text(&DataMessage::default()), None);
+    }
+
+    #[test]
+    fn link_preview_text_leaves_escaping_to_the_purple_adapter() {
+        let message = preview_message(
+            "",
+            preview(
+                "<b>Click</b> & win",
+                "<script>x</script>",
+                "https://a.invalid/?a=1&b=2",
+            ),
+        );
+        let text = link_preview_text(&message).unwrap();
+
+        assert_eq!(text.title.as_deref(), Some("<b>Click</b> & win"));
+        assert_eq!(
+            text.text.as_deref(),
+            Some("<script>x</script>\nhttps://a.invalid/?a=1&b=2")
+        );
+    }
+
+    #[test]
+    fn link_preview_text_caps_length_on_character_boundaries() {
+        let title = "\u{e9}".repeat(MAX_PREVIEW_TITLE_CHARS + 50);
+        let description = "\u{1f600}".repeat(MAX_PREVIEW_DESCRIPTION_CHARS + 50);
+        let exact = "x".repeat(MAX_PREVIEW_TITLE_CHARS);
+        let long_url = format!("https://a.invalid/{}", "p".repeat(MAX_PREVIEW_URL_CHARS));
+
+        let text = link_preview_text(&preview_message(
+            "",
+            preview(&title, &description, &long_url),
+        ))
+        .unwrap();
+        assert_eq!(
+            text.title,
+            Some(format!(
+                "{}\u{2026}",
+                "\u{e9}".repeat(MAX_PREVIEW_TITLE_CHARS)
+            ))
+        );
+        assert_eq!(
+            text.text,
+            Some(format!(
+                "{}\u{2026}",
+                "\u{1f600}".repeat(MAX_PREVIEW_DESCRIPTION_CHARS)
+            ))
+        );
+
+        let text = link_preview_text(&preview_message("", preview(&exact, "", ""))).unwrap();
+        assert_eq!(text.title, Some(exact));
+    }
+
+    #[test]
+    fn link_preview_text_strips_controls_and_flattens_lines() {
+        let message = preview_message(
+            "",
+            preview(
+                "  Line\none\u{202e}\u{0}\t two  ",
+                "a\r\nb\u{7}",
+                "https://a.invalid/\nx",
+            ),
+        );
+
+        assert_eq!(
+            link_preview_text(&message),
+            Some(LinkPreviewText {
+                title: Some("Line one  two".into()),
+                text: Some("a b".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn link_preview_text_uses_only_the_first_preview_and_ordinary_content() {
+        let mut message = preview_message("", preview("First", "", ""));
+        message.preview.push(preview("Second", "", ""));
+        assert_eq!(
+            link_preview_text(&message).and_then(|text| text.title),
+            Some("First".into())
+        );
+
+        let mut deleted = message.clone();
+        deleted.delete = Some(Default::default());
+        let mut view_once = message.clone();
+        view_once.is_view_once = Some(true);
+        let mut reaction = message;
+        reaction.reaction = Some(Default::default());
+        for message in [deleted, view_once, reaction] {
+            assert_eq!(link_preview_text(&message), None);
+        }
     }
 }
