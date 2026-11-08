@@ -2,6 +2,11 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 set -eu
 
+# Git hooks export GIT_DIR for the repository being pushed. Drop the inherited
+# Git environment so fixture commands can never write to the caller's
+# repository.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_COMMON_DIR GIT_OBJECT_DIRECTORY
+
 project_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 temporary=$(mktemp -d "${TMPDIR:-/tmp}/signal-purple-archive-test.XXXXXX")
 trap 'rm -rf "$temporary"' EXIT HUP INT TERM
