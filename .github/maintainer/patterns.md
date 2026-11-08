@@ -97,3 +97,10 @@
 - A fixed-capacity command queue does not bound metadata retained before
   admission. Deduplicate and cap that owner, preserve retry eligibility, and
   cancel its retry source before teardown.
+- Git hooks export `GIT_DIR`. A test that builds a fixture repository with
+  `git -C "$fixture"` under the `pre-push` hook writes to the real repository
+  instead (it set `core.bare`, replaced `user.email` and committed onto the
+  pushed branch). Fixture tests must unset the inherited Git environment.
+- Read the presage diff before taking a fork bump, not only the lockfile.
+  Upstream #359 added a network fetch inside every send with no opt-out, which
+  a Dependabot lockfile bump would have shipped silently.

@@ -308,3 +308,14 @@
   version line changes.
 - The release validator now checks the config entry and that the lockfile
   version matches `version.txt`, without requiring a marker.
+
+## 2026-11-08 - Link previews: incoming always, outgoing opt-in
+
+- Render incoming previews (escaped, capped, thumbnail inline only). They need
+  no network access from this client.
+- Outgoing previews are an account option, off by default: the fetch exposes
+  the user's IP address to the linked site and ignores Purple's proxy settings.
+- Presage upstream #359 fetches previews inside every send. The fork adds
+  `Manager::set_link_previews_enabled` (default true, upstreamable);
+  signal-purple always disables it and fetches explicitly with a 5 s cap.
+  Superseded Dependabot PR:116 and PR:117 with PR:120.
