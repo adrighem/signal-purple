@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use presage::libsignal_service::protocol::SignalProtocolError;
+use presage::store::TransientStoreError;
 use presage_store_sqlite::SqliteStoreError;
 
 fn sqlx_error_is_transient(db_error: &sqlx::Error) -> bool {
@@ -56,6 +57,10 @@ pub(crate) fn signal_protocol_error_is_transient(error: &SignalProtocolError) ->
                     || message_lower.contains("code: 5")
                     || message_lower.contains("code: 6")
                     || message_lower.contains("code: 1032"))
+        }
+        SignalProtocolError::ApplicationCallbackError(_, source) => {
+            let source: &(dyn std::error::Error + 'static) = source.as_ref();
+            source.is::<TransientStoreError>()
         }
         _ => false,
     }
@@ -155,5 +160,20 @@ mod tests {
         assert!(signal_protocol_error_is_transient(&pool_timeout));
         assert!(signal_protocol_error_is_transient(&presage_pool_timeout));
         assert!(!signal_protocol_error_is_transient(&permanent));
+    }
+
+    #[test]
+    fn classifies_transient_store_callback_errors_as_transient() {
+        let transient = SignalProtocolError::ApplicationCallbackError(
+            "presage sqlite store",
+            Box::new(TransientStoreError("pool timed out".into())),
+        );
+        let other_callback = SignalProtocolError::ApplicationCallbackError(
+            "presage sqlite store",
+            Box::new(std::fmt::Error),
+        );
+
+        assert!(signal_protocol_error_is_transient(&transient));
+        assert!(!signal_protocol_error_is_transient(&other_callback));
     }
 }

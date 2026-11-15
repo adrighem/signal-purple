@@ -334,4 +334,5 @@
 - Commissioned Gemini 4 architectural review for structural pre-key misalignment and envelope drop mitigations across `adrighem/presage` and `signal-purple`.
 - Verified deferred WebSocket ACK mechanics in `libsignal-service-rs`: disconnecting on transient database errors during envelope decryption safely triggers Signal server redelivery on reconnect without packet loss.
 - Adopted deferred pre-key deletion in `SqliteProtocolStore` to couple pre-key removal and session persistence within a single `BEGIN IMMEDIATE` transaction.
+- Shipped in adrighem/presage PR:1 (`7974c9aa3`): pre-key uses (EC removal and Kyber marking) commit with the session, and transient store errors surface as `presage::store::TransientStoreError` so the receive loop retries the envelope, then leaves it unacknowledged for redelivery. signal-purple classifies that marker as transient. Batched pre-key replenishment deferred until startup contention is measured.
 - Full review findings and phased execution plan documented in `.github/maintainer/work/prekey-misalignment-handover-2026-11-14.md`.
