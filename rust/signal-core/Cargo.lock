@@ -1948,7 +1948,7 @@ dependencies = [
 [[package]]
 name = "libsignal-service"
 version = "0.1.0"
-source = "git+https://github.com/adrighem/libsignal-service-rs?branch=main#714177b2e678b78f0e457cd38b72d6b740b2e8c3"
+source = "git+https://github.com/adrighem/libsignal-service-rs?branch=main#7312d1b1250086009973b54ed511084bcd704933"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm",
@@ -2519,7 +2519,7 @@ checksum = "925383efa346730478fb4838dbe9137d2a47675ad789c546d150a6e1dd4ab31c"
 [[package]]
 name = "presage"
 version = "0.8.0-dev"
-source = "git+https://github.com/adrighem/presage.git?branch=main#7974c9aa32f9c6090b6ecc46e71e40674e3f6808"
+source = "git+https://github.com/adrighem/presage.git?branch=main#ae1cc93d7500e1f13e8038618de5de69234a5540"
 dependencies = [
  "base64 0.22.1",
  "bytes",
@@ -2546,7 +2546,7 @@ dependencies = [
 [[package]]
 name = "presage-store-sqlite"
 version = "0.8.0-dev"
-source = "git+https://github.com/adrighem/presage.git?branch=main#7974c9aa32f9c6090b6ecc46e71e40674e3f6808"
+source = "git+https://github.com/adrighem/presage.git?branch=main#ae1cc93d7500e1f13e8038618de5de69234a5540"
 dependencies = [
  "async-trait",
  "bytes",
