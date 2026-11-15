@@ -4,11 +4,13 @@ use presage::proto::Preview;
 use presage::store::Thread;
 use presage_store_sqlite::{ClientOutboxKind, ClientOutboxMessage};
 
-use super::coordinator::{DepartedGroups, MessageTimestampAllocator, SentMessage, wall_clock_ms};
+use super::coordinator::{
+    DepartedGroups, MessageTimestampAllocator, SentMessage, report_storage_error, wall_clock_ms,
+};
 use super::protocol::SignalProtocol;
 use crate::event::Event;
 use crate::event_queue::EventSink;
-use crate::store::errors::sqlite_store_error_is_transient;
+use crate::store::errors::StorageError;
 use crate::store::traits::StorageOps;
 
 #[derive(Debug)]
@@ -165,13 +167,16 @@ pub(crate) async fn finish_outbox_attempt(
     repo: &impl StorageOps,
     message: &ClientOutboxMessage,
     result: &Result<SentMessage, OutboxAttemptError>,
-) -> Result<(), String> {
+) -> Result<(), StorageError> {
     match result {
         Ok(_) => repo
             .complete_outbox_message(message.id)
             .await
             .map_err(|error| {
-                format!("Message sent but its outbox entry could not be cleared: {error}")
+                StorageError::store(
+                    "Message sent but its outbox entry could not be cleared",
+                    error,
+                )
             }),
         Err(error)
             if !error.should_retry()
@@ -179,8 +184,8 @@ pub(crate) async fn finish_outbox_attempt(
         {
             repo.complete_outbox_message(message.id)
                 .await
-                .map_err(|store_error| {
-                    format!("Could not discard a terminal outbox entry: {store_error}")
+                .map_err(|error| {
+                    StorageError::store("Could not discard a terminal outbox entry", error)
                 })
         }
         Err(_) => {
@@ -191,7 +196,7 @@ pub(crate) async fn finish_outbox_attempt(
                 wall_clock_ms().saturating_add(retry_delay_ms(attempts)),
             )
             .await
-            .map_err(|error| format!("Could not schedule message retry: {error}"))
+            .map_err(|error| StorageError::store("Could not schedule message retry", error))
         }
     }
 }
@@ -207,14 +212,10 @@ pub(crate) async fn retry_outbox<M: SignalProtocol>(
     let messages = match repo.due_outbox_messages(wall_clock_ms()).await {
         Ok(messages) => messages,
         Err(error) => {
-            if sqlite_store_error_is_transient(&error) {
-                tracing::warn!(%error, "Transient store contention reading encrypted Signal outbox; deferring");
-            } else {
-                sink.emit(Event::error(
-                    format!("Could not read the encrypted Signal outbox: {error}"),
-                    false,
-                ));
-            }
+            report_storage_error(
+                sink,
+                &StorageError::store("Could not read the encrypted Signal outbox", error),
+            );
             return;
         }
     };
@@ -235,7 +236,7 @@ pub(crate) async fn retry_outbox<M: SignalProtocol>(
             super::coordinator::mark_sent_message_projected_or_report(repo, sent, sink).await;
         }
         if let Err(error) = finish_outbox_attempt(repo, &message, &result).await {
-            sink.emit(Event::error(error, false));
+            report_storage_error(sink, &error);
         } else if let Err(error) = result {
             let next_attempts = message.attempts.saturating_add(1);
             if !error.should_retry() || next_attempts >= MAX_OUTBOX_ATTEMPTS {
@@ -310,7 +311,13 @@ pub(crate) async fn enqueue_and_send<M: SignalProtocol>(
     }
     let finish_result = finish_outbox_attempt(repo, &message, &result).await;
     match result {
-        Ok(_) => finish_result.map_err(OutboxAttemptError::classify),
+        Ok(_) => finish_result.map_err(|error| {
+            if error.is_transient() {
+                OutboxAttemptError::retryable(error.to_string())
+            } else {
+                OutboxAttemptError::permanent(error.to_string())
+            }
+        }),
         Err(error) => Err(error),
     }
 }

@@ -118,6 +118,12 @@ mod tests {
             sqlx::Error::PoolTimedOut
         )));
         assert!(!sqlite_store_error_is_transient(&SqliteStoreError::Db(
+            sqlx::Error::PoolClosed
+        )));
+        assert!(!sqlite_store_error_is_transient(
+            &SqliteStoreError::InvalidFormat
+        ));
+        assert!(!sqlite_store_error_is_transient(&SqliteStoreError::Db(
             sqlx::Error::RowNotFound
         )));
     }

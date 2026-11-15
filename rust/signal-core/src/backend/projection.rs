@@ -10,14 +10,14 @@ use presage_store_sqlite::SqliteStore;
 
 use super::coordinator::{
     DepartedGroups, MessageTimestampAllocator, delivery_receipt_failure_action, handle_content,
-    projection_effect,
+    projection_effect, report_storage_error,
 };
 use super::protocol::SignalProtocol;
 use crate::acknowledgment::AcknowledgmentInbox;
 use crate::event::Event;
 use crate::event_queue::EventSink;
 use crate::store::StorageRepository;
-use crate::store::errors::sqlite_store_error_is_transient;
+use crate::store::errors::StorageError;
 use crate::store::traits::StorageOps;
 
 pub(crate) const MAX_PENDING_MESSAGE_PROJECTIONS: usize = 64;
@@ -237,14 +237,10 @@ pub(crate) async fn project_content<M: SignalProtocol, S: StorageOps>(
         }
         Err(error) => {
             projection.release(delivery_id);
-            if sqlite_store_error_is_transient(&error) {
-                tracing::warn!(%error, "Transient store contention recording handled Signal message; releasing for replay");
-            } else {
-                sink.emit(Event::error(
-                    format!("Could not record a handled Signal message: {error}"),
-                    false,
-                ));
-            }
+            report_storage_error(
+                sink,
+                &StorageError::store("Could not record a handled Signal message", error),
+            );
         }
     }
 }
@@ -266,14 +262,10 @@ pub(crate) async fn acknowledge_message(
             true
         }
         Err(error) => {
-            if sqlite_store_error_is_transient(&error) {
-                tracing::warn!(%error, "Transient store contention acknowledging displayed Signal message; will retry");
-            } else {
-                sink.emit(Event::error(
-                    format!("Could not acknowledge a displayed Signal message: {error}"),
-                    false,
-                ));
-            }
+            report_storage_error(
+                sink,
+                &StorageError::store("Could not acknowledge a displayed Signal message", error),
+            );
             false
         }
     }

@@ -319,3 +319,19 @@
   `Manager::set_link_previews_enabled` (default true, upstreamable);
   signal-purple always disables it and fetches explicitly with a 5 s cap.
   Superseded Dependabot PR:116 and PR:117 with PR:120.
+
+## 2026-11-13 - Mitigate single-connection SQLite pool contention and suppress transient error popups
+
+- Bootup concurrency spike: Presage refreshes pre-keys on initial `QueueEmpty` while signal-purple simultaneously triggered contact sync, missing avatar fetching, storage group sync, outbox retry, and message replay.
+- Stagger missing avatar fetching by 1.5 s after `QueueEmpty` to yield the single-connection SQLite pool to pre-key refresh, group synchronization, and initial message projection.
+- Transient classification stays typed: `PoolTimedOut`, SQLite BUSY/LOCKED codes, IO. No string-matching catch-alls on unknown error variants; a permanent error misread as transient would retry forever (and, once envelope handling disconnects on transient errors, loop on a poison message). `PoolClosed` is permanent (shutdown).
+- All store error reporting goes through `report_storage_error`: transient contention logs a warning, anything else reaches the user. `finish_outbox_attempt` returns `StorageError` so each failure keeps its own context.
+- `group_for_projection`, `finish_outbox_attempt`, `expedite_outbox_messages`, and `mark_sent_message_projected_or_report` no longer raise GUI error dialogs (`purple_notify_error`) for contention.
+- SQLite `busy_timeout` already defaults to 5 s in sqlx; with `max_connections(1)` the effective limit is the pool acquire timeout, so no busy-timeout change.
+
+## 2026-11-14 - Pre-key misalignment resilience architecture
+
+- Commissioned Gemini 4 architectural review for structural pre-key misalignment and envelope drop mitigations across `adrighem/presage` and `signal-purple`.
+- Verified deferred WebSocket ACK mechanics in `libsignal-service-rs`: disconnecting on transient database errors during envelope decryption safely triggers Signal server redelivery on reconnect without packet loss.
+- Adopted deferred pre-key deletion in `SqliteProtocolStore` to couple pre-key removal and session persistence within a single `BEGIN IMMEDIATE` transaction.
+- Full review findings and phased execution plan documented in `.github/maintainer/work/prekey-misalignment-handover-2026-11-14.md`.
