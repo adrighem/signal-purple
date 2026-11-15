@@ -180,6 +180,7 @@ pub(crate) mod fake {
     pub(crate) enum StorageErrorKind {
         Transient,
         NotFound,
+        Permanent,
     }
 
     #[derive(Clone, Default)]
@@ -341,6 +342,10 @@ pub(crate) mod fake {
                             StorageErrorKind::NotFound => {
                                 StorageError::NotFound("fake row not yet visible")
                             }
+                            StorageErrorKind::Permanent => StorageError::store(
+                                "fake permanent failure",
+                                SqliteStoreError::Db(sqlx::Error::RowNotFound),
+                            ),
                         });
                     }
                     state.projection_failure = None;

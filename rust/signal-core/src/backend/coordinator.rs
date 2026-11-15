@@ -23,8 +23,7 @@ use presage::proto::{
 };
 use presage::store::Thread;
 use presage::{Manager, manager::Registered};
-use presage_store_sqlite::ClientOutboxKind;
-use presage_store_sqlite::SqliteStore;
+use presage_store_sqlite::{ClientOutboxKind, SqliteStore, SqliteStoreError};
 use qrcode::QrCode;
 use qrcode::types::Color;
 use sha2::{Digest, Sha256};
@@ -63,6 +62,10 @@ pub(crate) const GROUP_SYNC_RETRY_SECS: u64 = 30;
 pub(crate) const RECOVERY_RETRY_DELAYS_SECS: [u64; 6] = [1, 2, 4, 8, 16, 32];
 pub(crate) const RECEIVE_EVENT_QUEUE_CAPACITY: usize = 16;
 pub(crate) const SHUTDOWN_CLEANUP_TIMEOUT: Duration = Duration::from_secs(2);
+/// Delay before fetching missing avatars after the initial queue drain, so
+/// pre-key refresh, group sync and message replay get the single-connection
+/// SQLite pool first.
+const AVATAR_FETCH_DELAY: Duration = Duration::from_millis(1500);
 pub(crate) const SNAPSHOT_YIELD_INTERVAL: usize = 64;
 /// Maximum supported download size for a single attachment (50 MiB).
 pub(crate) const MAX_ATTACHMENT_SIZE_BYTES: usize = 50 * 1024 * 1024;
@@ -570,10 +573,14 @@ pub(crate) async fn fetch_missing_avatars_after_queue_drain(
     avatar_cache: AvatarCache,
     metadata_cache: MetadataCache,
 ) {
-    run_after_start_signal(
-        start,
-        fetch_missing_avatars(manager, shutdown, sink, avatar_cache, metadata_cache),
-    )
+    run_after_start_signal(start, async move {
+        let mut delay_shutdown = shutdown.clone();
+        tokio::select! {
+            _ = tokio::time::sleep(AVATAR_FETCH_DELAY) => {}
+            _ = wait_for_shutdown(&mut delay_shutdown) => return,
+        }
+        fetch_missing_avatars(manager, shutdown, sink, avatar_cache, metadata_cache).await
+    })
     .await;
 }
 
@@ -1059,14 +1066,10 @@ pub(crate) async fn emit_identity_changes(
             }
         }
         Err(error) => {
-            if sqlite_store_error_is_transient(&error) {
-                tracing::warn!(%error, "Transient store contention reading Signal identity changes; deferring");
-            } else {
-                sink.emit(Event::error(
-                    format!("Could not read Signal identity changes: {error}"),
-                    false,
-                ));
-            }
+            report_storage_error(
+                sink,
+                &StorageError::store("Could not read Signal identity changes", error),
+            );
         }
     }
 }
@@ -1106,6 +1109,16 @@ pub(crate) async fn mark_sent_message_projected_or_report(
     sink: &EventSink,
 ) {
     if let Err(error) = mark_sent_message_projected(repo, sent).await {
+        report_storage_error(sink, &error);
+    }
+}
+
+/// Logs transient store contention, which a later retry will resolve, and
+/// reports every other store error to the user.
+pub(crate) fn report_storage_error(sink: &EventSink, error: &StorageError) {
+    if error.is_transient() {
+        tracing::warn!(%error, "Transient store contention; will retry");
+    } else {
         sink.emit(Event::error(error.to_string(), false));
     }
 }
@@ -1235,14 +1248,10 @@ pub(crate) async fn load_unprojected_messages(
     let messages = match repo.unprojected_messages().await {
         Ok(messages) => messages,
         Err(error) => {
-            if sqlite_store_error_is_transient(&error) {
-                tracing::warn!(%error, "Transient store contention reading pending Signal messages; deferring");
-            } else {
-                sink.emit(Event::error(
-                    format!("Could not read pending Signal messages: {error}"),
-                    false,
-                ));
-            }
+            report_storage_error(
+                sink,
+                &StorageError::store("Could not read pending Signal messages", error),
+            );
             return;
         }
     };
@@ -1270,10 +1279,10 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
         } => match repo.accept_identity_change(&recipient).await {
             Ok(true) => {
                 if let Err(error) = repo.expedite_outbox_messages(&recipient).await {
-                    sink.emit(Event::error(
-                        format!("Could not expedite queued Signal messages: {error}"),
-                        false,
-                    ));
+                    report_storage_error(
+                        sink,
+                        &StorageError::store("Could not expedite queued Signal messages", error),
+                    );
                 }
                 sink.emit(Event {
                     kind: EVENT_IDENTITY_ACCEPTED,
@@ -1423,10 +1432,13 @@ pub(crate) async fn handle_command<M: SignalProtocol, S: StorageOps>(
                     drop(group_operation);
                     metadata_cache.remove_group_index(&group_key);
                     if let Err(error) = repo.expedite_outbox_messages(&group_key).await {
-                        sink.emit(Event::error(
-                            format!("Could not schedule stale group messages for cleanup: {error}"),
-                            false,
-                        ));
+                        report_storage_error(
+                            sink,
+                            &StorageError::store(
+                                "Could not schedule stale group messages for cleanup",
+                                error,
+                            ),
+                        );
                     }
                     retry_outbox(
                         manager,
@@ -1880,7 +1892,10 @@ async fn emit_data_message<M: SignalProtocol, S: StorageOps>(
             Ok(ProjectionGroup::Complete) => return ProjectionDisposition::Complete,
             Ok(ProjectionGroup::Retry) => return ProjectionDisposition::Retry,
             Err(error) => {
-                sink.emit(Event::error(error, false));
+                report_storage_error(
+                    sink,
+                    &StorageError::store("Could not read Signal group membership", error),
+                );
                 return ProjectionDisposition::Retry;
             }
         }
@@ -2096,7 +2111,7 @@ async fn group_for_projection<M: SignalProtocol, S: StorageOps>(
     repo: &S,
     key: [u8; 32],
     departed_groups: &DepartedGroups,
-) -> Result<ProjectionGroup, String> {
+) -> Result<ProjectionGroup, SqliteStoreError> {
     let identifier = group_identifier(&key);
     if let Some(disposition) =
         departure_projection_disposition(departed_groups.departure_state(&identifier))
@@ -2108,10 +2123,7 @@ async fn group_for_projection<M: SignalProtocol, S: StorageOps>(
         });
     }
 
-    let group = repo
-        .group(key)
-        .await
-        .map_err(|error| format!("Could not read Signal group membership: {error}"))?;
+    let group = repo.group(key).await?;
 
     if let Some(disposition) =
         departure_projection_disposition(departed_groups.departure_state(&identifier))
@@ -3032,6 +3044,39 @@ mod tests {
 
             assert!(result.is_err());
             assert!(!repo.is_projected(&test_thread(), 99));
+        });
+    }
+
+    #[test]
+    fn mark_sent_message_projected_or_report_suppresses_transient_error_events() {
+        use crate::event_queue::{EventPoll, event_queue};
+        use crate::store::traits::fake::{FakeStorageRepository, StorageErrorKind};
+
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            let repo = FakeStorageRepository::new();
+            let sent = SentMessage {
+                thread: test_thread(),
+                timestamp: 99,
+            };
+            repo.fail_next_projection_attempts(StorageErrorKind::Transient, 4);
+
+            let (sink, queue) = event_queue(10).unwrap();
+            mark_sent_message_projected_or_report(&repo, &sent, &sink).await;
+
+            // Transient error should be logged and not emitted to GUI event sink
+            assert!(matches!(queue.poll(), EventPoll::Empty));
+
+            // Whereas permanent error emits to GUI event sink
+            repo.fail_next_projection_attempts(StorageErrorKind::Permanent, 1);
+            mark_sent_message_projected_or_report(&repo, &sent, &sink).await;
+            match queue.poll() {
+                EventPoll::Event(event) => assert_eq!(event.kind, crate::event::EVENT_ERROR),
+                _ => panic!("expected error event for permanent failure"),
+            }
         });
     }
 
