@@ -328,6 +328,7 @@
 - All store error reporting goes through `report_storage_error`: transient contention logs a warning, anything else reaches the user. `finish_outbox_attempt` returns `StorageError` so each failure keeps its own context.
 - `group_for_projection`, `finish_outbox_attempt`, `expedite_outbox_messages`, and `mark_sent_message_projected_or_report` no longer raise GUI error dialogs (`purple_notify_error`) for contention.
 - SQLite `busy_timeout` already defaults to 5 s in sqlx; with `max_connections(1)` the effective limit is the pool acquire timeout, so no busy-timeout change.
+- Store error transience now comes from `SqliteStoreError::is_transient()` in presage-store-sqlite (single source of truth); signal-purple only adds the `Protocol` arm.
 
 ## 2026-11-14 - Pre-key misalignment resilience architecture
 

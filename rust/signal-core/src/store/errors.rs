@@ -3,45 +3,6 @@ use presage::libsignal_service::protocol::SignalProtocolError;
 use presage::store::TransientStoreError;
 use presage_store_sqlite::SqliteStoreError;
 
-fn sqlx_error_is_transient(db_error: &sqlx::Error) -> bool {
-    match db_error {
-        sqlx::Error::PoolTimedOut => true,
-        sqlx::Error::Database(err) => {
-            if let Some(code) = err.code() {
-                // Extended result codes in SQLite:
-                // Primary: 5 (SQLITE_BUSY), 6 (SQLITE_LOCKED)
-                // Extended: 261 (BUSY_RECOVERY), 517 (LOCKED_SHAREDCACHE),
-                //           773 (BUSY_SNAPSHOT), 1029 (LOCKED_VTAB), 1032 (BUSY_TIMEOUT)
-                if code == "5"
-                    || code == "6"
-                    || code.starts_with("5_")
-                    || code.starts_with("6_")
-                    || code == "261"
-                    || code == "517"
-                    || code == "773"
-                    || code == "1029"
-                    || code == "1032"
-                {
-                    return true;
-                }
-            }
-            let message = err.message();
-            message.contains("pool timed out")
-                || message.contains("timed out")
-                || message.contains("locked")
-                || message.contains("busy")
-        }
-        sqlx::Error::Io(_) => true,
-        _ => {
-            let message = db_error.to_string();
-            message.contains("pool timed out")
-                || message.contains("timed out")
-                || message.contains("locked")
-                || message.contains("busy")
-        }
-    }
-}
-
 pub(crate) fn signal_protocol_error_is_transient(error: &SignalProtocolError) -> bool {
     match error {
         SignalProtocolError::InvalidState(scope, message) => {
@@ -66,12 +27,14 @@ pub(crate) fn signal_protocol_error_is_transient(error: &SignalProtocolError) ->
     }
 }
 
+/// Store error transience comes from `SqliteStoreError::is_transient()` in
+/// presage-store-sqlite (single source of truth). Only the `Protocol` variant is
+/// classified here, because the store cannot see signal-purple's string-based
+/// handling of old-format `InvalidState` errors.
 pub(crate) fn sqlite_store_error_is_transient(error: &SqliteStoreError) -> bool {
     match error {
-        SqliteStoreError::Db(db_error) => sqlx_error_is_transient(db_error),
-        SqliteStoreError::Io(_) => true,
         SqliteStoreError::Protocol(error) => signal_protocol_error_is_transient(error),
-        _ => false,
+        other => other.is_transient(),
     }
 }
 
@@ -175,5 +138,17 @@ mod tests {
 
         assert!(signal_protocol_error_is_transient(&transient));
         assert!(!signal_protocol_error_is_transient(&other_callback));
+    }
+
+    #[test]
+    fn classifies_protocol_wrapped_store_errors() {
+        let transient = SqliteStoreError::Protocol(SignalProtocolError::ApplicationCallbackError(
+            "presage sqlite store",
+            Box::new(TransientStoreError("pool timed out".into())),
+        ));
+        let permanent = SqliteStoreError::Protocol(SignalProtocolError::InvalidProtobufEncoding);
+
+        assert!(sqlite_store_error_is_transient(&transient));
+        assert!(!sqlite_store_error_is_transient(&permanent));
     }
 }
