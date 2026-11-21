@@ -758,3 +758,13 @@ schema.
 - Release Please re-ran on the post-merge pushes and regenerated the PR:121 head in place (new commit `f8ffa8e4`). The regenerated `Cargo.lock` reverts `zeroize` to 1.9.1 and drops the sqlx 0.9.1 lock changes, because Release Please rewrote the lock from the manifest baseline rather than the current `main` state. Merging the regenerated PR as-is would revert the zeroize bump.
 - Artifacts: `notes/pr-121.md`, `notes/pr-126.md`, `notes/pr-127.md`, `notes/pr-128.md`.
 - The installed maintainer package did not include its documented triage script or reference files, so this run was captured manually and `state.json` was left unchanged.
+
+## 2026-11-21 (close-out) — PR:121 merged, v1.8.0 published
+
+- PR:121 lock fix (approved): regenerated head `f8ffa8e4` rebased onto `main` (`8ed04b7`), `cargo update -p zeroize` restored 1.9.2, amended and pushed as new head `126a286` (force-with-lease onto the Release Please branch). Lock matches `main` exactly except the signal-core bump (1.7.1 to 1.8.0).
+- PR:121 merged 2026-11-21 13:40 UTC (`50daccc`) with all nine checks green. Tag `v1.8.0` created; release published (no `autorelease:` label, so Release Please published on merge).
+- `release-artifacts` workflow: all eight artifacts built, packaged, and attached (Debian 13 + Ubuntu 24.04 debs, dbgsym debs, x86_64 rpm, orig tarball, SPDX SBOM, SHA256SUMS). `publish-apt-repository` dispatched the protected APT publication; completed successfully (run 44913479717).
+- Post-merge Release Please on `50daccc` was a no-op (no release commits since the bump); CI on the merge commit green.
+- Open PRs: none. Open issues: none. Dependabot alerts: none. Code scanning alerts: none.
+- Residual: live verification tests 3-9 from `work/prekey-misalignment-handover-2026-11-14.md` remain open; a v1.8.1 patch release is the remediation path if a defect surfaces.
+- Caveat recorded: merging Dependabot lock PRs while a release PR is open makes Release Please regenerate the release PR from the stale manifest baseline. Sequence future runs: merge the release PR first, or rebase and re-pin its lock after dependency merges.
