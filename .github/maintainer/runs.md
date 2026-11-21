@@ -749,3 +749,12 @@ schema.
 - Replaced direct pointer dereferencing (`*event`) in unit tests with safe `event.as_ref()` reference extraction, verifying pointers are non-null before field access and satisfying CodeQL static analysis.
 - Verified that all unit tests, C++ compilation, CTest suite, and staged-install probes pass with 100% success using `scripts/check.sh full`.
 - No public maintenance action was taken. No staging or committing was performed, preserving autonomous workspace mandates.
+
+## 2026-11-21 — Dependabot merges and 1.8.0 release PR hold
+
+- Inbox: 4 notifications. Open issues: none. Dependabot alerts: none (4 prior rustls alerts fixed 2026-11-08). Code scanning alerts: none (3 prior ffi.rs alerts fixed).
+- Open pull requests: 4. Merged PR:126 (dependency-review-action 5.0.0 to 5.0.1, full-SHA pin preserved), PR:127 (sqlx 0.9.0 to 0.9.1, lock-only), and PR:128 (zeroize 1.9.1 to 1.9.2, lock-only) after explicit approval. All had passing CI, dependency review, and CodeQL.
+- Held PR:121 (release 1.8.0) pending live verification of link previews and the pre-key misalignment fixes (tests 3-9 in `work/prekey-misalignment-handover-2026-11-14.md`).
+- Release Please re-ran on the post-merge pushes and regenerated the PR:121 head in place (new commit `f8ffa8e4`). The regenerated `Cargo.lock` reverts `zeroize` to 1.9.1 and drops the sqlx 0.9.1 lock changes, because Release Please rewrote the lock from the manifest baseline rather than the current `main` state. Merging the regenerated PR as-is would revert the zeroize bump.
+- Artifacts: `notes/pr-121.md`, `notes/pr-126.md`, `notes/pr-127.md`, `notes/pr-128.md`.
+- The installed maintainer package did not include its documented triage script or reference files, so this run was captured manually and `state.json` was left unchanged.
