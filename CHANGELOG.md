@@ -4,6 +4,25 @@ All notable changes are documented here. The project follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and
 [Semantic Versioning](https://semver.org/spec/v2.0.0.html) for stable releases.
 
+## [1.8.0](https://github.com/adrighem/signal-purple/compare/v1.7.1...v1.8.0) (2026-11-21)
+
+
+### Features
+
+* **messages:** generate outgoing link previews ([a3dc43b](https://github.com/adrighem/signal-purple/commit/a3dc43b4eef1e750fd70f85bd054d425d6b953cc))
+* **messages:** incoming and opt-in outgoing Signal link previews ([7abe466](https://github.com/adrighem/signal-purple/commit/7abe466e53eb85286741d1bf7360eb11063d3350))
+* **messages:** render incoming Signal link previews ([cc17d3e](https://github.com/adrighem/signal-purple/commit/cc17d3e422bb44624626b259234ee0de9fde698d))
+
+
+### Bug Fixes
+
+* **core:** keep store contention out of error dialogs and retry envelopes ([901142b](https://github.com/adrighem/signal-purple/commit/901142bbdca8a4835dc74c15fa06977c014a2c7f))
+* **core:** suppress transient store error popups ([3b58d8a](https://github.com/adrighem/signal-purple/commit/3b58d8a3683bd39e25b042330919377c1fdc4262))
+* **core:** treat presage TransientStoreError as transient ([4696b31](https://github.com/adrighem/signal-purple/commit/4696b313c8453a4e38b0df57fdea182b537e94b4))
+* **tests:** isolate archive fixture from the caller's Git environment ([92f2cff](https://github.com/adrighem/signal-purple/commit/92f2cffd015ebb9d20f7d6acd36bd174c647507a))
+* **tests:** isolate archive fixture from the caller's Git environment ([c854175](https://github.com/adrighem/signal-purple/commit/c85417583f568cbba61316283faf818c0ce0f756))
+* **tests:** isolate archive fixture from the caller's Git environment ([19aa464](https://github.com/adrighem/signal-purple/commit/19aa464f2ea9f60bdca693b933ff4386e718a094))
+
 ## [1.7.1](https://github.com/adrighem/signal-purple/compare/v1.7.0...v1.7.1) (2026-10-17)
 
 
