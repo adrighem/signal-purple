@@ -19,7 +19,7 @@ image = { version = "0.25.10", default-features = false, features = ["png", "jpe
 png = "0.18.0"
 presage = { git = "https://github.com/adrighem/presage.git", branch = "main", default-features = false }
 presage-store-sqlite = { git = "https://github.com/adrighem/presage.git", branch = "main" }
-qrcode = { version = "0.14.1", default-features = false }
+qrcode = { version = "0.15.0", default-features = false }
 reqwest-websocket = { version = "0.6.0", default-features = false }
 sha2 = "0.11.0"
 tokio = { version = "1.48.0", features = ["rt", "sync", "time"] }
